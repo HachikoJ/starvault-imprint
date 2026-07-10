@@ -535,6 +535,8 @@ const I18N = {
     pageStatus: "第 {page} / {pages} 页",
     noProjectMatches: "当前没有可展示项目",
     noProjectMatchesHint: "可以清除筛选条件，或撤销刚才隐藏的项目。",
+    noProjectsYet: "项目池还是空的",
+    noProjectsYetHint: "配置 GitHub Token 后点击扫描，检索结果会显示在这里。",
     openGitHub: "打开 GitHub",
     copyUrl: "复制地址",
     watch: "收藏",
@@ -1201,6 +1203,8 @@ const I18N = {
     pageStatus: "Page {page} / {pages}",
     noProjectMatches: "No projects to show",
     noProjectMatchesHint: "Clear filters or undo the last hidden project.",
+    noProjectsYet: "Your project pool is empty",
+    noProjectsYetHint: "Configure a GitHub Token and scan to populate this list.",
     openGitHub: "Open GitHub",
     copyUrl: "Copy URL",
     watch: "Favorite",
@@ -7758,10 +7762,15 @@ function renderProjects(response) {
       `;
     })
     .join("");
+  const isNewProjectPool =
+    !hasActiveFilters() &&
+    Number(state.projectPool.total || 0) === 0 &&
+    !state.summary?.lastScan &&
+    (!state.summary || Number(state.summary.totalProjects || 0) === 0);
   const emptyRowsHtml = `
     <div class="project-list-empty">
-      <strong>${escapeHtml(t("noProjectMatches"))}</strong>
-      <span>${escapeHtml(t("noProjectMatchesHint"))}</span>
+      <strong>${escapeHtml(t(isNewProjectPool ? "noProjectsYet" : "noProjectMatches"))}</strong>
+      <span>${escapeHtml(t(isNewProjectPool ? "noProjectsYetHint" : "noProjectMatchesHint"))}</span>
     </div>
   `;
   elements.projectRows.innerHTML = `

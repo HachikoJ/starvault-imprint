@@ -46,7 +46,6 @@ const { createStorage } = require("./lib/storage");
 const { enrichTopProjectsWithExa, searchTopicSignals: searchExaTopicSignals } = require("./lib/exa");
 const { enrichTopProjectsWithTavily, searchTopicSignals: searchTavilyTopicSignals } = require("./lib/tavily");
 const { startScheduler } = require("./lib/scheduler");
-const { demoRepositories } = require("./lib/seed");
 const {
   activeProvider,
   analyzeWithProvider,
@@ -2900,19 +2899,6 @@ async function runScan(options = {}) {
   }
 }
 
-function ensureDemoData() {
-  const current = storage.summary();
-  if (current.totalProjects === 0) {
-    storage.upsertProjects(demoRepositories(), {
-      id: `demo-${Date.now()}`,
-      status: "demo",
-      mode: "demo-seed",
-      profiles: ["demo"],
-      received: 6
-    });
-  }
-}
-
 async function routeStatic(req, res, url) {
   let pathname = "";
   try {
@@ -3935,7 +3921,6 @@ let shutdownHandlersInstalled = false;
 
 function initializeRuntime() {
   if (runtimeInitialized) return;
-  ensureDemoData();
   resumeDurableTasks();
   runtimeInitialized = true;
 }

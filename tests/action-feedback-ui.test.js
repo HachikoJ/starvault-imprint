@@ -96,6 +96,12 @@ test("manual unfavorite of the last visible favorite clears filters", () => {
   assert.match(favorite, /if \(shouldResetFilters\) \{\s*resetAllFilters\(\);\s*applyProjectPoolSnapshot\(state\.defaultProjectPoolSnapshot\);\s*loadProjects\(\{\s*resetPosition:\s*true,\s*refreshSummary:\s*false\s*\}\)\.catch/s);
 });
 
+test("a first-run empty project pool uses scan guidance instead of filter recovery copy", () => {
+  assert.match(appSource, /const isNewProjectPool =\s*!hasActiveFilters\(\).*state\.projectPool\.total.*state\.summary\?\.lastScan/s);
+  assert.match(appSource, /noProjectsYetHint: "配置 GitHub Token 后点击扫描/);
+  assert.match(appSource, /noProjectsYetHint: "Configure a GitHub Token and scan/);
+});
+
 test("favorite and filter actions render local previews before network refresh", () => {
   const favorite = functionBody("toggleFavorite");
   const watchPreview = functionBody("previewCurrentPageFavorites");

@@ -60,13 +60,15 @@ test("HTTP server exposes a lightweight core snapshot and paged IndexedDB record
   assert.deepEqual(snapshot.store.leaderboards, { daily: {}, byPlan: {} });
   assert.equal(snapshot.sync.projectsIncluded, false);
   assert.equal(snapshot.sync.leaderboardsIncluded, false);
-  assert.ok(snapshot.counts.projects >= 6);
+  assert.equal(snapshot.counts.projects, 0);
+  assert.equal(snapshot.counts.scans, 0);
+  assert.equal(snapshot.counts.observationPlans, 1);
 
   const firstPageResponse = await invoke(handle, { path: "/api/local-projects?limit=25" });
   assert.equal(firstPageResponse.status, 200);
   const firstPage = JSON.parse(firstPageResponse.body);
   assert.equal(firstPage.schema, "starvault-indexeddb-project-page/v1");
-  assert.equal(firstPage.items.length, snapshot.counts.projects);
+  assert.equal(firstPage.items.length, 0);
   assert.equal(firstPage.done, true);
   assert.equal(firstPage.total, snapshot.counts.projects);
   assert.equal(firstPage.items.some((project) => Object.hasOwn(project, "analysis")), false);
@@ -76,6 +78,7 @@ test("HTTP server exposes a lightweight core snapshot and paged IndexedDB record
   const leaderboardPage = JSON.parse(leaderboardPageResponse.body);
   assert.equal(leaderboardPage.schema, "starvault-indexeddb-leaderboard-page/v1");
   assert.equal(leaderboardPage.total, snapshot.counts.leaderboards);
+  assert.equal(leaderboardPage.total, 0);
   assert.equal(leaderboardPage.done, true);
 
   const probe = await invoke(handle, { path: "/.env" });
