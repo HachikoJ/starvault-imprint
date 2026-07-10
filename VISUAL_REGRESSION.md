@@ -1,6 +1,6 @@
 # Visual Regression Matrix
 
-更新日期：2026-06-22  
+更新日期：2026-07-10
 目标：把历史上反复出现的遮挡、错位、英文溢出、标签超框和 Tooltip 位置问题变成固定验收项。
 
 ## 1. 执行命令
@@ -16,7 +16,7 @@ npm install --save-dev playwright
 npx playwright install chromium
 ```
 
-脚本会启动独立本地服务，默认地址为 `http://127.0.0.1:4179`，不会触发真实扫描，也不会主动拉取 GitHub 仓库。
+脚本会在系统临时目录生成无密钥样本库，启动独立本地服务 `http://127.0.0.1:4179`，结束后删除样本库。它不会读取 `data/`、恢复用户任务、触发真实扫描或请求 GitHub/AI Provider。
 
 输出位置：
 
@@ -41,6 +41,8 @@ npx playwright install chromium
 | 文本截断 | 高风险按钮、标签、统计卡、分页、设置项文字被容器裁切 |
 | 同级遮挡 | 顶部操作区、分页区、仓库操作区、密钥按钮区等同级元素互相覆盖 |
 | Tooltip 失控 | Tooltip 超出视口，或覆盖被悬停的触发按钮 |
+
+有明确 `text-overflow: ellipsis` 的单行摘要和 CSS line-clamp 内容属于有意摘要，不计为失败；其容器位置、相邻遮挡和横向溢出仍继续检查。
 
 ## 4. 高风险组件
 
@@ -71,5 +73,6 @@ npx playwright install chromium
 
 - `npm run check` 通过。
 - `npm run visual:check` 通过，或明确记录失败项和决定暂缓的原因。
+- GitHub Actions 的 visual job 通过并上传 `output/visual-regression/` artifact。
 - 对 `output/visual-regression/screenshots/` 中本次矩阵截图做过人工抽查。
 - 如果修改了布局、文案、标签或国际化，PRD 和验收清单中相关条目仍然成立。

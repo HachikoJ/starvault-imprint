@@ -56,23 +56,41 @@ function asBoolean(value, fallback = false) {
 
 function buildConfig() {
   const env = getEnv();
+  const systemTimeZone = Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC";
+  const host = env.HOST || DEFAULT_HOST;
+  const authToken = env.AUTH_TOKEN || env.ACCESS_TOKEN || "";
+  const loopback = ["127.0.0.1", "localhost", "::1", "[::1]"].includes(host.toLowerCase());
+  if (!loopback && !authToken) {
+    throw new Error("AUTH_TOKEN is required when HOST binds outside localhost");
+  }
+  const publicOrigin = String(env.PUBLIC_ORIGIN || "").replace(/\/$/, "");
+  if (publicOrigin) {
+    const parsedOrigin = new URL(publicOrigin);
+    if (parsedOrigin.protocol !== "https:" && !["localhost", "127.0.0.1", "::1"].includes(parsedOrigin.hostname)) {
+      throw new Error("PUBLIC_ORIGIN must use HTTPS outside localhost");
+    }
+  }
   return {
     port: asNumber(env.PORT, DEFAULT_PORT),
-    host: env.HOST || DEFAULT_HOST,
+    host,
     githubToken: env.GITHUB_TOKEN || "",
     tavilyKey: env.TAVILY_API_KEY || "",
     exaKey: env.EXA_API_KEY || "",
     // Optional shared secret. When set, all /api/ requests must present it
-    // (Authorization: Bearer <token>, X-Api-Key, sv_token cookie, or ?token=).
-    authToken: env.AUTH_TOKEN || env.ACCESS_TOKEN || "",
+    // (Authorization: Bearer <token>, X-Api-Key, or sv_token cookie).
+    authToken,
+    publicOrigin,
+    trustProxy: asBoolean(env.TRUST_PROXY, false),
+    allowPrivateProviderUrls: asBoolean(env.ALLOW_PRIVATE_PROVIDER_URLS, false),
     scanHour: Math.min(23, Math.max(0, asNumber(env.SCAN_HOUR, 8))),
+    timeZone: env.APP_TIME_ZONE || env.TZ || systemTimeZone,
     scanMaxRepos: Math.max(50, asNumber(env.SCAN_MAX_REPOS, 800)),
     githubSearchPages: Math.max(1, Math.min(8, asNumber(env.GITHUB_SEARCH_PAGES, 2))),
     githubTrendLimit: Math.max(0, Math.min(300, asNumber(env.GITHUB_TREND_LIMIT, 80))),
     githubTrendingMaxRepos: Math.max(0, Math.min(120, asNumber(env.GITHUB_TRENDING_MAX_REPOS, 60))),
     githubTrendingPerPeriod: Math.max(5, Math.min(50, asNumber(env.GITHUB_TRENDING_PER_PERIOD, 25))),
     runScanOnBoot: asBoolean(env.RUN_SCAN_ON_BOOT, false),
-    storePath: path.join(process.cwd(), "data", "store.json"),
+    storePath: env.STORE_PATH || path.join(process.cwd(), "data", "starvault.db"),
     publicDir: path.join(process.cwd(), "public")
   };
 }
@@ -90,7 +108,9 @@ function publicConfig(config) {
     githubConfigured: Boolean(config.githubToken),
     tavilyConfigured: Boolean(config.tavilyKey),
     exaConfigured: Boolean(config.exaKey),
-    authRequired: Boolean(config.authToken)
+    authRequired: Boolean(config.authToken),
+    publicOrigin: config.publicOrigin || "",
+    trustProxy: Boolean(config.trustProxy)
   };
 }
 

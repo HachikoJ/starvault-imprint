@@ -68,8 +68,6 @@ test("generating an observation plan requires a name and detailed need", () => {
   assert.match(appSource, /function restoreObservationPlanFormValues\(values\)/);
   assert.match(status, /const preservedInputs = options\.preserveInputs \? captureObservationPlanFormValues\(\) : null/);
   assert.match(status, /restoreObservationPlanFormValues\(preservedInputs\)/);
-  assert.match(status, /const latestInputs = options\.preserveInputs \? captureObservationPlanFormValues\(\) : null/);
-  assert.match(status, /restoreObservationPlanFormValues\(latestInputs\)/);
 });
 
 test("observation plan generation failures use inline status and preserve inputs", () => {
@@ -239,8 +237,9 @@ test("observation plan form is grouped into selection generation and transfer mo
 
 test("observation plan switch keeps the logic area vertically stable", () => {
   assert.match(cssSource, /#view-settings\s+\.observation-plan-select-row\s*{[^}]*grid-template-columns:\s*minmax\(0,\s*1fr\) 128px !important/);
-  assert.match(cssSource, /#view-settings\s+\.observation-plan-toolbar\s*{[^}]*height:\s*30px !important/);
-  assert.match(cssSource, /#view-settings\s+\.observation-plan-toolbar\s*{[^}]*max-height:\s*30px !important/);
+  assert.match(cssSource, /#view-settings\s+\.observation-plan-toolbar\s*{[^}]*height:\s*auto !important/);
+  assert.match(cssSource, /#view-settings\s+\.observation-plan-toolbar\s*{[^}]*min-height:\s*40px !important/);
+  assert.match(cssSource, /#view-settings\s+\.observation-plan-toolbar\s*{[^}]*max-height:\s*none !important/);
   assert.match(cssSource, /#view-settings\s+\.observation-plan-toolbar\s*{[^}]*flex-wrap:\s*nowrap !important/);
   assert.match(cssSource, /#view-settings\s+\.observation-plan-toolbar-actions\s*{[^}]*flex-wrap:\s*nowrap !important/);
   assert.match(cssSource, /#view-settings\s+\.observation-plan-inline-status\s*{[^}]*text-overflow:\s*ellipsis !important|#view-settings\s+\.observation-plan-inline-status \.ui-icon-label span:last-child\s*{[^}]*text-overflow:\s*ellipsis !important/);
@@ -256,6 +255,6 @@ test("single default observation plan keeps logic preview and selector layout st
   assert.match(renderer, /plans\.find\(\(plan\) => plan\.id === storedActive\?\.id\) \|\| plans\.find\(\(plan\) => plan\.active\) \|\| plans\[0\] \|\| storedActive \|\| null/);
   assert.match(currentPreview, /plans\.find\(\(plan\) => plan\.id === storedActive\?\.id\) \|\| plans\.find\(\(plan\) => plan\.active\) \|\| plans\[0\] \|\| storedActive \|\| \{\}/);
   assert.match(cssSource, /#view-settings\s+\.observation-plan-toggle-icon\s*{[^}]*width:\s*74px !important/);
-  assert.match(cssSource, /#view-settings\s+\.observation-plan-readable\s*{[^}]*align-content:\s*start !important/);
+  assert.match(cssSource, /#view-settings\s+\.observation-plan-readable\s*{[^}]*align-content:\s*stretch !important/);
   assert.match(cssSource, /#view-settings\s+\.observation-plan-view,\s*#view-settings\s+\.observation-plan-logic textarea\s*{[^}]*box-sizing:\s*border-box !important/);
 });

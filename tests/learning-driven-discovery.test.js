@@ -4,7 +4,7 @@ const os = require("node:os");
 const path = require("node:path");
 const test = require("node:test");
 
-const { applyMemoryToQueryProfiles, buildQueryProfiles } = require("../src/lib/github");
+const { applyMemoryToQueryProfiles, buildQueryProfiles, candidateCapForProfile } = require("../src/lib/github");
 const { createStorage } = require("../src/lib/storage");
 
 function tempStore() {
@@ -67,6 +67,90 @@ test("custom observation plans do not inject cross-domain memory search profiles
   assert.equal(profiles.some((profile) => profile.memoryGenerated), false);
   assert.equal(profiles.every((profile) => profile.planGenerated), true);
   assert.equal(profiles.some((profile) => /Learned preference|language:C\+\+|other in:name/i.test(`${profile.label} ${profile.q}`)), false);
+});
+
+test("custom-plan learning changes in-domain profile order and candidate budget", () => {
+  const storage = tempStore();
+  const plan = storage.saveObservationPlan({
+    name: "FHIR clinical interoperability",
+    searchLogic: {
+      baseMode: "only",
+      keywords: ["FHIR", "SMART on FHIR", "FHIR server"],
+      customQueries: [
+        { label: "FHIR servers", query: "FHIR server in:name,description,readme archived:false mirror:false" },
+        { label: "SMART applications", query: '"SMART on FHIR" app in:name,description,readme archived:false mirror:false' }
+      ]
+    }
+  });
+  storage.setActiveObservationPlan(plan.id);
+  const profiles = buildQueryProfiles(plan);
+  const now = new Date().toISOString();
+  storage.upsertProjects(
+    [
+      {
+        fullName: "acme/fhir-server",
+        owner: "acme",
+        name: "fhir-server",
+        description: "FHIR server",
+        profileKey: profiles[0].key,
+        profileLabel: profiles[0].label,
+        language: "Go",
+        topics: ["fhir"],
+        stars: 200,
+        forks: 20,
+        pushedAt: now,
+        scores: { opportunity: 70, quality: 70, actionability: 70, risk: 5 }
+      },
+      {
+        fullName: "acme/smart-app",
+        owner: "acme",
+        name: "smart-app",
+        description: "SMART on FHIR application",
+        profileKey: profiles[1].key,
+        profileLabel: profiles[1].label,
+        language: "TypeScript",
+        topics: ["smart-on-fhir"],
+        stars: 180,
+        forks: 18,
+        pushedAt: now,
+        scores: { opportunity: 70, quality: 70, actionability: 70, risk: 5 }
+      }
+    ],
+    { observationPlanId: plan.id }
+  );
+
+  for (let index = 0; index < 10; index += 1) {
+    storage.recordMemoryEvent("acme/fhir-server", "select_project");
+  }
+  storage.setWatch("acme/smart-app", true);
+
+  const memory = storage.getMemory();
+  const learnedProfiles = applyMemoryToQueryProfiles(profiles, memory);
+  assert.ok(memory.discoveryProfiles[profiles[1].key] > memory.discoveryProfiles[profiles[0].key]);
+  assert.equal(learnedProfiles[0].key, profiles[1].key);
+  assert.ok(learnedProfiles[0].profileCapMultiplier > learnedProfiles.find((profile) => profile.key === profiles[0].key).profileCapMultiplier);
+  assert.equal(learnedProfiles.some((profile) => profile.memoryGenerated), false);
+});
+
+test("negative custom-plan learning modestly reduces profile budget without removing exploration", () => {
+  const profiles = applyMemoryToQueryProfiles(
+    [
+      { key: "core", q: "fhir in:name,description,readme", planGenerated: true },
+      { key: "mapping", q: "fhir mapping in:name,description,readme", planGenerated: true }
+    ],
+    {
+      discoveryProfiles: { core: -6, mapping: 6 },
+      antiBubble: { explorationRatio: 0.25 }
+    }
+  );
+  const core = profiles.find((profile) => profile.key === "core");
+  const mapping = profiles.find((profile) => profile.key === "mapping");
+
+  assert.ok(core.profileCapMultiplier < 1);
+  assert.ok(mapping.profileCapMultiplier > 1);
+  assert.ok(candidateCapForProfile(200, profiles.length, core) < candidateCapForProfile(200, profiles.length, mapping));
+  assert.ok(candidateCapForProfile(20, profiles.length, core) >= 12);
+  assert.equal(profiles.some((profile) => profile.key === "core"), true);
 });
 
 test("project pool default ranking uses learned preferences", () => {

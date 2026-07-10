@@ -1,5 +1,4 @@
 const { fetchWithRetries, parseRetryAfter, defaultRetryDelay } = require("./http-client");
-const { isNxCadRepository, isNxObservationNeed, nxPlanTermsForText } = require("./domain-relevance");
 
 function dateDaysAgo(days) {
   const date = new Date();
@@ -28,10 +27,6 @@ function escapeRegExp(value = "") {
   return String(value).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
-function namedMediaPlanTerms(text = "") {
-  return /剪映|cap\s*cut|capcut|jian\s*ying|jianying/i.test(String(text || "")) ? ["剪映", "CapCut", "Jianying", "JianYing"] : [];
-}
-
 const GENERIC_CHINESE_PLAN_TERMS = new Set(["方案名称", "详细需求", "历史需求", "相关", "项目", "开源", "工具", "平台", "软件", "系统", "应用", "服务", "领域", "方向", "观察"]);
 const GENERIC_SHORT_ALIAS_TERMS = new Set(["ai", "ml", "api", "sdk", "mcp", "rpa", "cli", "gui", "web", "bot", "ocr", "ui", "ux", "ios"]);
 
@@ -58,6 +53,11 @@ function chinesePlanTerms(text = "", limit = 12) {
 
 function explicitPlanTerms(plan = {}) {
   const strategy = plan.searchLogic || plan.strategy || {};
+  const requestedTerms = [plan.name, plan.nameEn]
+    .concat(planWords(strategy.keywords || strategy.focusTerms || []))
+    .map((term) => String(term || "").replace(/^['"“”]|['"“”]$/g, "").trim())
+    .filter(Boolean);
+  const requestedSet = new Set(requestedTerms.map((term) => term.toLowerCase()));
   const primaryText = [plan.name, plan.nameEn]
     .concat(Array.isArray(plan.requirements) ? plan.requirements.map((item) => (typeof item === "string" ? item : item?.text)) : [])
     .concat(Array.isArray(plan.requirementHistory) ? plan.requirementHistory.map((item) => (typeof item === "string" ? item : item?.text)) : [])
@@ -66,15 +66,6 @@ function explicitPlanTerms(plan = {}) {
   const keywordText = [strategy.keywords, strategy.focusTerms].flatMap((value) => (Array.isArray(value) ? value : [value])).filter(Boolean).join(" ");
   const text = [primaryText, keywordText].filter(Boolean).join(" ") || [plan.description, plan.descriptionEn].filter(Boolean).join(" ");
   const generic = new Set([
-    "cad",
-    "bim",
-    "cam",
-    "cae",
-    "ai",
-    "llm",
-    "rag",
-    "api",
-    "sdk",
     "app",
     "tool",
     "plugin",
@@ -95,11 +86,11 @@ function explicitPlanTerms(plan = {}) {
     "related",
     "relevant"
   ]);
-  const detected = text.match(/\b[A-Za-z][A-Za-z0-9.+#-]{2,30}\b/g) || [];
-  const aliases = [...nxPlanTermsForText(text), ...namedMediaPlanTerms(text)];
-  return Array.from(new Set([...detected, ...chinesePlanTerms(text), ...aliases].map((term) => String(term || "").trim()).filter(Boolean)))
+  const detected = text.match(/\b[A-Za-z][A-Za-z0-9.+#-]{1,30}\b/g) || [];
+  return Array.from(new Set([...requestedTerms, ...detected, ...chinesePlanTerms(text)].map((term) => String(term || "").trim()).filter(Boolean)))
     .filter((term) => {
       const lower = term.toLowerCase();
+      if (requestedSet.has(lower)) return Array.from(term).length >= 2 && !generic.has(lower);
       const shortNamedAlias = /^[A-Z0-9][A-Z0-9+#.-]{1,4}$/.test(term) && !GENERIC_SHORT_ALIAS_TERMS.has(lower);
       if (/[\u4e00-\u9fa5]/.test(term)) return Array.from(term).length >= 2;
       return !generic.has(lower) && (lower.length >= 4 || /\s/.test(lower) || shortNamedAlias);
@@ -107,150 +98,51 @@ function explicitPlanTerms(plan = {}) {
     .slice(0, 16);
 }
 
-const CAD_STRONG_PLAN_TERMS = [
-  "CAD",
-  "DWG",
-  "DXF",
-  "STEP",
-  "STP",
-  "IGES",
-  "IGS",
-  "IFC",
-  "BIM",
-  "CAM",
-  "CAE",
-  "FreeCAD",
-  "LibreCAD",
-  "QCAD",
-  "OpenSCAD",
-  "BRL-CAD",
-  "BRLCAD",
-  "SolveSpace",
-  "CadQuery",
-  "OpenCascade",
-  "Open CASCADE",
-  "OCCT",
-  "IfcOpenShell",
-  "BlenderBIM",
-  "pythonOCC",
-  "JSCAD",
-  "KiCad",
-  "NURBS",
-  "B-Rep",
-  "BREP",
-  "G-code",
-  "CNC",
-  "geometry kernel",
-  "geometric constraint",
-  "parametric modeling",
-  "technical drawing"
-];
-
-const BUSINESS_CRM_STRONG_PLAN_TERMS = [
-  "CRM",
-  "customer relationship management",
-  "sales pipeline",
-  "lead management",
-  "contact management",
-  "deal tracking",
-  "customer portal",
-  "helpdesk",
-  "ticketing",
-  "support dashboard",
-  "marketing automation",
-  "business workflow",
-  "admin dashboard",
-  "self hosted crm",
-  "open source crm",
-  "SaaS CRM"
-];
-
-function planSearchLogicText(plan = {}) {
-  const strategy = plan.searchLogic || plan.strategy || {};
-  const customQueries = Array.isArray(strategy.customQueries) ? strategy.customQueries : [];
-  return [
-    plan.name,
-    plan.nameEn,
-    plan.description,
-    plan.descriptionEn,
-    ...(Array.isArray(plan.requirements) ? plan.requirements.map((item) => (typeof item === "string" ? item : item?.text)) : []),
-    ...(Array.isArray(plan.requirementHistory) ? plan.requirementHistory.map((item) => (typeof item === "string" ? item : item?.text)) : []),
-    ...(Array.isArray(strategy.keywords) ? strategy.keywords : []),
-    ...customQueries.flatMap((item) => [item?.label, item?.labelZh, item?.labelEn, item?.query, item?.q])
-  ]
-    .filter(Boolean)
-    .join(" ");
-}
-
-function isCadObservationPlan(plan = {}) {
-  const text = normalizePlanSearchText(planSearchLogicText(plan));
-  return /\b(cad|bim|cam|cae|dwg|dxf|step|stp|iges|igs|ifc|freecad|librecad|qcad|openscad|brl\s*cad|brlcad|solvespace|cadquery|opencascade|occt|ifcopenshell|blenderbim|pythonocc|jscad|kicad|nurbs|brep|cnc)\b|computer aided design|computer aided drafting|parametric modeling|technical drawing|geometry kernel|geometric constraint/.test(
-    text
-  );
-}
-
-function isBusinessCrmObservationPlan(plan = {}) {
-  const text = normalizePlanSearchText(planSearchLogicText(plan));
-  return /\bcrm\b|customer relationship management|客户关系管理|客户管理|销售线索|销售管道|商机管理|客服工单|工单系统/.test(text);
-}
-
-const AI_HARDWARE_STRONG_PLAN_TERMS = [
-  "AI hardware",
-  "AI accelerator",
-  "ML accelerator",
-  "AI chip",
-  "GPU",
-  "GPU deep learning",
-  "neural processing unit",
-  "NPU",
-  "TPU",
-  "Edge TPU",
-  "Coral TPU",
-  "FPGA",
-  "ASIC",
-  "GPU delegate",
-  "CUDA",
-  "cuDNN",
-  "ROCm",
-  "OpenCL",
-  "TensorRT",
-  "OpenVINO",
-  "Apache TVM",
-  "TVM",
-  "Vitis AI",
-  "oneAPI",
-  "CoreML",
-  "Neural Engine",
-  "TFLite",
-  "TensorFlow Lite",
-  "ONNX Runtime",
-  "XNNPACK",
-  "NCNN",
-  "MNN",
-  "RKNN",
-  "SNPE",
-  "TinyML",
-  "Edge AI",
-  "Jetson",
-  "neuromorphic"
-];
-
-function isAiHardwareObservationPlan(plan = {}) {
-  const text = normalizePlanSearchText(planSearchLogicText(plan));
-  return /\b(?:ai hardware|ai accelerator|ml accelerator|ai chip|neural processing unit|npu|tpu|edge tpu|coral tpu|fpga|asic|cuda|cudnn|rocm|opencl|tensorrt|openvino|apache tvm|vitis ai|tinyml|edge ai|neuromorphic|jetson|rknn|snpe)\b|ai\s*硬件|人工智能硬件|ai\s*芯片|ai\s*加速|推理加速/.test(
-    text
-  );
-}
-
 function planFilterTerms(plan = {}) {
-  return Array.from(
-    new Set([
-      ...explicitPlanTerms(plan),
-      ...(isCadObservationPlan(plan) ? CAD_STRONG_PLAN_TERMS : []),
-      ...(isBusinessCrmObservationPlan(plan) ? BUSINESS_CRM_STRONG_PLAN_TERMS : []),
-      ...(isAiHardwareObservationPlan(plan) ? AI_HARDWARE_STRONG_PLAN_TERMS : [])
-    ])
-  ).slice(0, 80);
+  return explicitPlanTerms(plan).slice(0, 80);
+}
+
+const GENERIC_PROFILE_ANCHORS = new Set([
+  "app",
+  "application",
+  "dashboard",
+  "editor",
+  "extension",
+  "github",
+  "integration",
+  "open",
+  "platform",
+  "plugin",
+  "project",
+  "repository",
+  "sdk",
+  "software",
+  "source",
+  "system",
+  "tool",
+  "viewer",
+  "workflow"
+]);
+
+function profileAnchorTerms(item = {}, query = "") {
+  const core = String(query || "")
+    .replace(/\bin:name,description,readme\b/gi, " ")
+    .replace(/\b(?:archived|mirror):(?:true|false)\b/gi, " ")
+    .replace(/\b(?:stars|pushed|created|language|license|topic):[^\s]+/gi, " ")
+    .replace(/\s+-\S+/g, " ")
+    .replace(/[()]/g, " ")
+    .replace(/\b(?:AND|OR|NOT)\b/gi, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+  const phrases = Array.from(core.matchAll(/"([^"]{2,80})"/g)).map((match) => match[1]);
+  const unquoted = core.replace(/"[^"]+"/g, " ");
+  const words = unquoted.match(/[A-Za-z0-9][A-Za-z0-9.+#-]{1,40}|[\u4e00-\u9fa5]{2,16}/g) || [];
+  const labels = [item.label, item.labelZh, item.labelEn]
+    .filter(Boolean)
+    .flatMap((value) => String(value).match(/[A-Za-z0-9][A-Za-z0-9.+#-]{1,40}|[\u4e00-\u9fa5]{2,16}/g) || []);
+  return Array.from(new Set([...phrases, ...words, ...labels].map((term) => String(term).trim()).filter(Boolean)))
+    .filter((term) => !GENERIC_PROFILE_ANCHORS.has(term.toLowerCase()))
+    .slice(0, 16);
 }
 
 const LOW_VALUE_CONTAINER_TOPIC_RE = /\b(awesome|awesome-list|awesome-lists|resources?|resource-list|book|books|tutorials?)\b/i;
@@ -275,12 +167,6 @@ function textContainsPlanTerm(text = "", term = "") {
   const cleanText = normalizePlanSearchText(text);
   const cleanTerm = normalizePlanSearchText(String(term || "").replace(/^["“]|["”]$/g, ""));
   if (!cleanText || !cleanTerm) return false;
-  if (cleanTerm === "step") {
-    return /\bstep\s+(?:file|format|viewer|converter|parser|model|cad)\b|\biso\s*10303\b/.test(cleanText);
-  }
-  if (cleanTerm === "stp") {
-    return /\bstp\s+(?:file|format|viewer|converter|parser|model|cad)\b/.test(cleanText);
-  }
   if (cleanTerm.includes(" ")) {
     if (cleanText.includes(cleanTerm)) return true;
     const compactTerm = compactPlanSearchText(cleanTerm);
@@ -288,10 +174,6 @@ function textContainsPlanTerm(text = "", term = "") {
   }
   const boundaryMatch = new RegExp(`(^|[^a-z0-9])${escapeRegExp(cleanTerm)}($|[^a-z0-9])`).test(cleanText);
   if (boundaryMatch) return true;
-  const compactTerm = compactPlanSearchText(cleanTerm);
-  const compactText = compactPlanSearchText(cleanText);
-  if (compactTerm === "ugnx") return compactText.includes(compactTerm);
-  if (compactTerm === "nxopen") return /nxopen(?!api|gl)/.test(compactText);
   return false;
 }
 
@@ -321,41 +203,11 @@ function repositoryMatchesPlanProfile(repo = {}, profile = {}) {
   const terms = Array.isArray(profile.planTerms) ? profile.planTerms.filter(Boolean) : [];
   if (!terms.length) return true;
 
-  const planText = `${profile.label || ""} ${profile.labelZh || ""} ${profile.labelEn || ""} ${profile.q || ""} ${terms.join(" ")}`;
-  if (isNxObservationNeed(planText)) {
-    return isNxCadRepository(repo) && !isLowValuePlanContainer(repo);
-  }
-  if (isAiHardwareObservationPlan({ name: planText, searchLogic: { keywords: terms, customQueries: [{ query: profile.q || "" }] } })) {
-    return isAiHardwareRepository(repo) && !isLowValuePlanContainer(repo);
-  }
-
   const fullText = repositoryPlanText(repo);
   const hasPlanTerm = terms.some((term) => textContainsPlanTerm(fullText, term));
   if (!hasPlanTerm) return false;
 
   return !isLowValuePlanContainer(repo);
-}
-
-function isAiHardwareRepository(repo = {}) {
-  const text = normalizePlanSearchText(repositoryPlanText(repo));
-  if (!text) return false;
-  if (/\b(?:do not use|stick to upstream|oiledmachine overlay|awesome list|paper list|curated list)\b/.test(text)) return false;
-
-  const aiContext =
-    /\b(?:ai|artificial intelligence|ml|machine learning|deep learning|neural|inference|tensor|pytorch|tensorflow|onnx|llm|llama|edge ai|tinyml|int8)\b|人工智能|机器学习|深度学习|神经网络|推理/.test(
-      text
-    );
-  const chipOrBoard =
-    /\b(?:npu|tpu|edge tpu|coral tpu|fpga|asic|neuromorphic|jetson|ai accelerator|ml accelerator|ai chip|neural processing unit|gpu delegate|neural engine|ai hardware)\b|ai\s*芯片|ai\s*硬件|推理加速/.test(
-      text
-    );
-  const runtimeOrCompiler =
-    /\b(?:cuda|cudnn|rocm|opencl|tensorrt|openvino|apache tvm|tvm inference|vitis ai|oneapi|coreml|tflite|tensorflow lite|onnx runtime|onnxruntime|xnnpack|ncnn|mnn|rknn|snpe)\b/.test(
-      text
-    );
-
-  if (chipOrBoard) return true;
-  return runtimeOrCompiler && aiContext;
 }
 
 function queryContainsPlanTerm(query = "", term = "") {
@@ -372,13 +224,6 @@ function isSpecificPlanQuery(query = "", plan = {}) {
 
 function planQueryFreshnessDays(query = "", plan = {}) {
   const text = `${query || ""} ${plan.name || ""} ${plan.description || ""}`.toLowerCase();
-  if (/\b(ugnx|nxopen|unigraphics)\b|ug\s+nx|siemens\s+nx/.test(text)) return 730;
-  if (
-    /\b(cad|bim|dwg|dxf|step|iges|stl|ifc|freecad|opencascade|cadquery|librecad|qcad|openscad|brl-cad|brlcad|nurbs|brep|b-rep|cam|cae)\b/.test(text) ||
-    /geometry kernel|parametric modeling|constraint solver/.test(text)
-  ) {
-    return 365;
-  }
   if (/\b(parser|converter|viewer|sdk|library|kernel|plugin|extension|addon|workbench|file format)\b/.test(text)) return 180;
   return 90;
 }
@@ -414,7 +259,6 @@ function scoreOrAlternative(term = "", planTerms = []) {
     return termLower && termLower.length >= 3 && lower.includes(termLower);
   });
   if (!exactPlanTerm && containedPlanTerms.length) score += 80 + containedPlanTerms.length * 8;
-  if (/\b(?:ai|ml|machine learning|deep learning|neural|inference|tensor|edge ai|tinyml)\b/.test(lower)) score += 36;
   if (/^[a-z0-9][a-z0-9+#.-]{3,}$/i.test(clean) && !GENERIC_SHORT_ALIAS_TERMS.has(lower)) score += 24;
   if (/^[A-Z0-9][A-Z0-9+#.-]{1,4}$/.test(clean) && !GENERIC_SHORT_ALIAS_TERMS.has(lower)) score += 20;
   if (/^[A-Z0-9][A-Z0-9+#.-]{1,4}$/.test(clean) && GENERIC_SHORT_ALIAS_TERMS.has(lower)) score += 22;
@@ -426,12 +270,8 @@ function scoreOrAlternative(term = "", planTerms = []) {
 function chooseOrAlternative(group = "", plan = {}) {
   const alternatives = splitOrGroupAlternatives(group);
   if (!alternatives.length) return "";
-  const planTerms = (isAiHardwareObservationPlan(plan) ? planFilterTerms(plan) : explicitPlanTerms(plan)).map((term) => term.toLowerCase());
-  const rankedAlternatives =
-    isAiHardwareObservationPlan(plan) && alternatives.some((term) => /\b(?:ai|ml|machine learning|deep learning|neural|inference|edge ai|tinyml)\b/i.test(term))
-      ? alternatives.filter((term) => /\b(?:ai|ml|machine learning|deep learning|neural|inference|edge ai|tinyml)\b/i.test(term))
-      : alternatives;
-  return rankedAlternatives
+  const planTerms = planFilterTerms(plan).map((term) => term.toLowerCase());
+  return alternatives
     .map((term, index) => ({ term, index, score: scoreOrAlternative(term, planTerms) }))
     .sort((a, b) => b.score - a.score || a.index - b.index)[0].term;
 }
@@ -491,28 +331,6 @@ function stripPlanGeneratedAntiNoise(query = "") {
     .trim();
 }
 
-function planQueryCore(query = "") {
-  return stripPlanGeneratedAntiNoise(query)
-    .toLowerCase()
-    .split(/\s+in:name,description,readme\b/)[0]
-    .replace(/\bstars:[^\s]+/g, "")
-    .replace(/\bpushed:>=\d{4}-\d{2}-\d{2}\b/g, "")
-    .replace(/\barchived:false\b|\bmirror:false\b/g, "")
-    .replace(/\s+/g, " ")
-    .trim();
-}
-
-function isWeakGenericCadPlanQuery(query = "", plan = {}) {
-  if (!isCadObservationPlan(plan)) return false;
-  return /^(cad|cad tool|cad workflow|cad viewer|cad converter)$/.test(planQueryCore(query));
-}
-
-function isMechanicalPlanExpansionQuery(query = "", plan = {}) {
-  const explicitTerms = explicitPlanTerms(plan);
-  if (!explicitTerms.length) return false;
-  const core = planQueryCore(query);
-  return /\bapp\s+dashboard\b/.test(core) && explicitTerms.some((term) => queryContainsPlanTerm(core, term));
-}
 
 const PROFILE_LABEL_ZH = {
   "self-hosted-apps": "自托管应用",
@@ -593,10 +411,6 @@ function buildObservationPlanProfiles(plan, defaults) {
       const label = typeof item === "string" ? item : item.label || item.name || query;
       const cleanQuery = normalizeGithubOrGroups(String(query || "").replace(/\s+/g, " ").trim(), plan);
       if (!cleanQuery) return null;
-      if (isWeakGenericCadPlanQuery(cleanQuery, plan)) return null;
-      if (isMechanicalPlanExpansionQuery(cleanQuery, plan)) return null;
-      const requiredTerms = planTerms;
-      if (requiredTerms.length && !requiredTerms.some((term) => queryContainsPlanTerm(cleanQuery, term))) return null;
       const keyBase = `${plan.id}-${index}-${cleanQuery}`
         .toLowerCase()
         .replace(/[^a-z0-9]+/g, "-")
@@ -619,7 +433,7 @@ function buildObservationPlanProfiles(plan, defaults) {
         labelZh: item.labelZh || label,
         q: completeQuery ? normalizedQuery : `${normalizedQuery} ${productScope} ${starPart} ${fresh}`.replace(/\s+/g, " ").trim(),
         observationPlanId: plan.id,
-        planTerms,
+        planTerms: Array.from(new Set([...planTerms, ...profileAnchorTerms(item, cleanQuery)])).slice(0, 32),
         planGenerated: true
       };
     })
@@ -956,17 +770,22 @@ function profileMemoryScore(profile, memory = {}) {
         Number(negative.licenses?.[key] || 0) * 0.8,
       0
     );
-  return positive - penalty;
+  const directProfileSignal = Number(memory.discoveryProfiles?.[profile.key] || 0) * 4;
+  return positive - penalty + directProfileSignal;
 }
 
 function applyMemoryToQueryProfiles(profiles = buildQueryProfiles(), memory = {}) {
   const hasObservationPlanProfiles = profiles.some((profile) => profile.planGenerated);
   const memoryProfiles = hasObservationPlanProfiles ? [] : buildMemoryQueryProfiles(memory);
-  const scored = profiles.map((profile, index) => ({
-    ...profile,
-    originalIndex: index,
-    memoryWeight: profileMemoryScore(profile, memory)
-  }));
+  const scored = profiles.map((profile, index) => {
+    const memoryWeight = profileMemoryScore(profile, memory);
+    return {
+      ...profile,
+      originalIndex: index,
+      memoryWeight,
+      profileCapMultiplier: Math.max(0.7, Math.min(2.2, Number(profile.profileCapMultiplier || 1) + memoryWeight / 24))
+    };
+  });
   const explorationRatio = Math.max(0.1, Math.min(0.45, Number(memory.antiBubble?.explorationRatio || 0.25)));
   const explorationStep = Math.max(3, Math.round(1 / explorationRatio));
 
@@ -1656,14 +1475,12 @@ async function searchCandidateRepositories(options) {
   const deduped = new Map();
   const errors = [];
   const usedProfiles = [];
-  const baseProfileCap = Math.max(12, Math.ceil(maxRepos / Math.max(1, profiles.length)));
-  const profileCapFor = (profile) => Math.max(12, Math.ceil(baseProfileCap * Math.max(1, Number(profile.profileCapMultiplier || 1))));
   const profileCounts = new Map();
   const totalSteps = profiles.length * pagesPerProfile;
   let completedSteps = 0;
 
   for (const profile of profiles) {
-    const profileCap = profileCapFor(profile);
+    const profileCap = candidateCapForProfile(maxRepos, profiles.length, profile);
     usedProfiles.push(profile.key);
     for (let page = 1; page <= pagesPerProfile; page += 1) {
       if (deduped.size >= maxRepos) {
@@ -1725,6 +1542,12 @@ async function searchCandidateRepositories(options) {
     profiles: usedProfiles,
     errors
   };
+}
+
+function candidateCapForProfile(maxRepos, profileCount, profile = {}) {
+  const baseProfileCap = Math.max(12, Math.ceil(Number(maxRepos || 0) / Math.max(1, Number(profileCount || 0))));
+  const multiplier = Math.max(0.7, Math.min(2.2, Number(profile.profileCapMultiplier || 1)));
+  return Math.max(12, Math.ceil(baseProfileCap * multiplier));
 }
 
 async function getAuthenticatedUser(token) {
@@ -2062,6 +1885,7 @@ async function forkRepository(token, fullName) {
 module.exports = {
   applyMemoryToQueryProfiles,
   buildQueryProfiles,
+  candidateCapForProfile,
   fetchTrendingRepositories,
   fetchJson,
   fetchRepositoryByFullName,

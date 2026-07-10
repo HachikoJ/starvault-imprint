@@ -1,5 +1,7 @@
 // Auth, CSRF, request-hardening and rate-limiting helpers for the HTTP server.
 const { timingSafeEqual } = require("node:crypto");
+const dns = require("node:dns").promises;
+const net = require("node:net");
 
 const SAFE_METHODS = new Set(["GET", "HEAD", "OPTIONS"]);
 const LOOPBACK_HOSTS = new Set(["127.0.0.1", "localhost", "::1", "[::1]"]);
@@ -38,8 +40,9 @@ function safeEqual(a, b) {
   }
 }
 
-// Extract a bearer/shared token from any of the supported locations.
-function extractRequestToken(req, url) {
+// Extract a bearer/shared token from headers or a same-site cookie. Query-string
+// tokens are deliberately rejected because URLs leak through logs and history.
+function extractRequestToken(req) {
   const auth = req.headers.authorization || "";
   if (auth.toLowerCase().startsWith("bearer ")) {
     return auth.slice(7).trim();
@@ -51,32 +54,41 @@ function extractRequestToken(req, url) {
   const match = cookie.match(/(?:^|;\s*)sv_token=([^;]+)/);
   if (match) return match[1].trim();
 
-  if (url && url.searchParams) {
-    const q = url.searchParams.get("token");
-    if (q) return q.trim();
-  }
   return "";
 }
 
 function isAuthorized(req, url, expectedToken) {
   if (!expectedToken) return true; // auth disabled
-  return safeEqual(extractRequestToken(req, url), expectedToken);
+  return safeEqual(extractRequestToken(req), expectedToken);
 }
 
 // CSRF mitigation: state-changing methods must come from a same-origin/loopback context.
 // Non-browser clients (no Origin) are allowed; cross-origin browsers are rejected.
-function originAllowed(req) {
+function requestOrigin(req, options = {}) {
+  const trustProxy = options.trustProxy === true;
+  const forwardedProto = trustProxy ? String(req.headers["x-forwarded-proto"] || "").split(",")[0].trim() : "";
+  const forwardedHost = trustProxy ? String(req.headers["x-forwarded-host"] || "").split(",")[0].trim() : "";
+  const protocol = forwardedProto || (req.socket?.encrypted ? "https" : "http");
+  const host = forwardedHost || String(req.headers.host || "").trim();
+  if (!host || !["http", "https"].includes(protocol)) return "";
+  try {
+    return new URL(`${protocol}://${host}`).origin.toLowerCase();
+  } catch {
+    return "";
+  }
+}
+
+function originAllowed(req, options = {}) {
   const origin = req.headers.origin;
   if (!origin) return true;
-  let hostname;
+  let normalizedOrigin;
   try {
-    hostname = new URL(origin).hostname.toLowerCase();
+    normalizedOrigin = new URL(origin).origin.toLowerCase();
   } catch {
     return false;
   }
-  if (LOOPBACK_HOSTS.has(hostname)) return true;
-  const reqHost = String(req.headers.host || "").split(":")[0].toLowerCase();
-  return Boolean(reqHost) && hostname === reqHost;
+  const expected = options.publicOrigin ? String(options.publicOrigin).replace(/\/$/, "").toLowerCase() : requestOrigin(req, options);
+  return Boolean(expected) && normalizedOrigin === expected;
 }
 
 function isSafeMethod(method) {
@@ -117,21 +129,82 @@ function createRateLimiter({ windowMs = 60_000, max = 10 } = {}) {
   };
 }
 
-function clientIp(req) {
+function clientIp(req, trustProxy = false) {
   const fwd = req.headers["x-forwarded-for"];
-  if (typeof fwd === "string" && fwd.trim()) {
+  if (trustProxy && typeof fwd === "string" && fwd.trim()) {
     return fwd.split(",")[0].trim();
   }
   return (req.socket && req.socket.remoteAddress) || "unknown";
+}
+
+function privateIpAddress(address = "") {
+  const value = String(address || "").toLowerCase().split("%")[0];
+  if (net.isIPv4(value)) {
+    const [a, b] = value.split(".").map(Number);
+    return (
+      a === 0 ||
+      a === 10 ||
+      a === 127 ||
+      (a === 100 && b >= 64 && b <= 127) ||
+      (a === 169 && b === 254) ||
+      (a === 172 && b >= 16 && b <= 31) ||
+      (a === 192 && b === 168) ||
+      a >= 224
+    );
+  }
+  if (net.isIPv6(value)) {
+    return value === "::" || value === "::1" || value.startsWith("fc") || value.startsWith("fd") || value.startsWith("fe8") || value.startsWith("fe9") || value.startsWith("fea") || value.startsWith("feb");
+  }
+  return false;
+}
+
+function validateExternalUrl(value, options = {}) {
+  let url;
+  try {
+    url = new URL(String(value || ""));
+  } catch {
+    throw new Error("Provider base URL is invalid");
+  }
+  if (url.protocol !== "https:") throw new Error("Provider base URL must use HTTPS");
+  if (url.username || url.password) throw new Error("Provider base URL must not contain credentials");
+  if (!options.allowPrivate) {
+    const hostname = url.hostname.toLowerCase();
+    if (LOOPBACK_HOSTS.has(hostname) || hostname.endsWith(".localhost") || hostname.endsWith(".local") || privateIpAddress(hostname)) {
+      throw new Error("Provider base URL must not target localhost or a private network");
+    }
+  }
+  return url;
+}
+
+const safeHostCache = new Map();
+
+async function assertSafeExternalUrl(value, options = {}) {
+  const url = validateExternalUrl(value, options);
+  if (options.allowPrivate) return url;
+  const cached = safeHostCache.get(url.hostname);
+  if (cached && cached.expiresAt > Date.now()) return url;
+  const addresses = await dns.lookup(url.hostname, { all: true, verbatim: true });
+  if (!addresses.length || addresses.some((entry) => privateIpAddress(entry.address))) {
+    throw new Error("Provider base URL resolves to a private or unavailable network address");
+  }
+  safeHostCache.set(url.hostname, { expiresAt: Date.now() + 5 * 60_000 });
+  return url;
 }
 
 function normalizeHost(host = "") {
   const raw = String(host || "").trim().toLowerCase();
   if (!raw) return "";
   if (raw.startsWith("[")) {
-    return raw.slice(0, raw.indexOf("]") + 1);
+    const closingBracket = raw.indexOf("]");
+    return closingBracket > 0 ? raw.slice(1, closingBracket) : raw;
   }
-  return raw.split(":")[0];
+  if (net.isIP(raw)) return raw;
+  const separator = raw.lastIndexOf(":");
+  const hasSingleSeparator = separator > 0 && raw.indexOf(":") === separator;
+  if (hasSingleSeparator && /^\d+$/.test(raw.slice(separator + 1))) {
+    return raw.slice(0, separator).replace(/\.$/, "");
+  }
+  return raw.replace(/\.$/, "");
 }
 
 function isWildcardHost(host = "") {
@@ -298,6 +371,10 @@ module.exports = {
   methodAllowed,
   createRateLimiter,
   clientIp,
+  requestOrigin,
+  validateExternalUrl,
+  assertSafeExternalUrl,
+  privateIpAddress,
   hostAllowed,
   requestTargetIssue,
   bodyLimitIssue,

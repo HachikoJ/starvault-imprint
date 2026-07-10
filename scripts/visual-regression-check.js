@@ -1,8 +1,10 @@
 #!/usr/bin/env node
 
 const fs = require("node:fs");
+const os = require("node:os");
 const path = require("node:path");
 const { spawn } = require("node:child_process");
+const { createStorage } = require("../src/lib/storage");
 
 const ROOT = path.resolve(__dirname, "..");
 const OUT_DIR = path.join(ROOT, "output", "visual-regression");
@@ -85,6 +87,17 @@ function loadPlaywright() {
   }
 }
 
+function chromiumLaunchOptions() {
+  const candidates = [
+    process.env.PLAYWRIGHT_EXECUTABLE_PATH,
+    "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+    "/Applications/Chromium.app/Contents/MacOS/Chromium",
+    "/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge"
+  ].filter(Boolean);
+  const executablePath = candidates.find((candidate) => fs.existsSync(candidate));
+  return executablePath ? { headless: true, executablePath } : { headless: true };
+}
+
 function ensureOutputDirs() {
   fs.mkdirSync(SCREENSHOT_DIR, { recursive: true });
 }
@@ -108,14 +121,77 @@ async function waitForHealth(server) {
   throw new Error(`Server did not become healthy at ${BASE_URL}`);
 }
 
-function startServer() {
+function visualRepositories() {
+  const fixtures = [
+    ["long-project-name-for-responsive-layout", "Self-hosted customer operations dashboard and workflow automation platform", "TypeScript", ["crm", "dashboard", "workflow"]],
+    ["knowledge-search-workbench", "Local-first RAG knowledge search workbench for research teams", "Python", ["rag", "knowledge-base", "search"]],
+    ["creative-video-studio", "Open source video editing, subtitles, recording and media workflow studio", "Rust", ["video-editor", "subtitle", "creator-tools"]],
+    ["developer-api-console", "API client, testing console and integration workflow for backend developers", "TypeScript", ["api-client", "developer-tools", "testing"]],
+    ["design-system-canvas", "Collaborative design system canvas and visual prototyping editor", "TypeScript", ["design-system", "canvas", "prototype"]],
+    ["privacy-security-scanner", "Privacy review and security scanning workflow for application teams", "Go", ["security", "privacy", "scanner"]]
+  ];
+  return Array.from({ length: 24 }, (_, index) => {
+    const fixture = fixtures[index % fixtures.length];
+    const suffix = String(index + 1).padStart(2, "0");
+    const stars = index === 0 ? 8888 : 320 + index * 137;
+    return {
+      id: index + 1,
+      fullName: `visual-fixture/${fixture[0]}-${suffix}`,
+      owner: "visual-fixture",
+      name: `${fixture[0]}-${suffix}`,
+      url: `https://github.com/visual-fixture/${fixture[0]}-${suffix}`,
+      description: fixture[1],
+      language: fixture[2],
+      topics: fixture[3],
+      stars,
+      forks: index === 0 ? 888 : 24 + index * 11,
+      openIssues: index % 7,
+      pushedAt: `2026-07-${String(10 - (index % 7)).padStart(2, "0")}T00:00:00.000Z`,
+      updatedAt: "2026-07-10T00:00:00.000Z",
+      license: { spdx_id: index % 5 === 0 ? "Apache-2.0" : "MIT" },
+      scores: {
+        opportunity: 90 - (index % 12),
+        quality: 82 - (index % 9),
+        actionability: 78 - (index % 8),
+        momentum: 72 - (index % 10),
+        risk: index % 6
+      },
+      trend: {
+        stars: 105 - (index % 12),
+        forks: 9 + (index % 5),
+        complete: true,
+        cached: true,
+        date: "2026-07-09"
+      }
+    };
+  });
+}
+
+function createVisualStore() {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "starvault-visual-"));
+  const legacyPath = path.join(dir, "store.json");
+  const storage = createStorage(legacyPath);
+  storage.upsertProjects(visualRepositories(), { observationPlanId: "default", status: "completed" });
+  storage.buildLeaderboard("daily", { limit: 20 });
+  return { dir, storePath: path.join(dir, "starvault.db") };
+}
+
+function startServer(storePath) {
   const server = spawn(process.execPath, ["src/server.js"], {
     cwd: ROOT,
     env: {
       ...process.env,
       PORT: String(PORT),
       HOST,
-      RUN_SCAN_ON_BOOT: "false"
+      RUN_SCAN_ON_BOOT: "false",
+      STORE_PATH: storePath,
+      GITHUB_TOKEN: "",
+      TAVILY_API_KEY: "",
+      EXA_API_KEY: "",
+      AUTH_TOKEN: "",
+      ACCESS_TOKEN: "",
+      PUBLIC_ORIGIN: "",
+      TRUST_PROXY: "0"
     },
     stdio: ["ignore", "pipe", "pipe"]
   });
@@ -272,10 +348,14 @@ async function collectLayoutIssues(page, context) {
           if (!hasText) continue;
           const widthOverflow = element.scrollWidth - element.clientWidth;
           const heightOverflow = element.scrollHeight - element.clientHeight;
+          const lineClamp = Number.parseInt(style.webkitLineClamp || "0", 10);
+          const intentionallyTruncated =
+            (style.textOverflow === "ellipsis" && style.whiteSpace === "nowrap") ||
+            (Number.isFinite(lineClamp) && lineClamp > 0);
           const hidesOverflow =
             ["hidden", "clip", "auto", "scroll"].includes(style.overflowX) ||
             ["hidden", "clip", "auto", "scroll"].includes(style.overflowY);
-          if ((widthOverflow > 2 || heightOverflow > 2) && hidesOverflow) {
+          if ((widthOverflow > 2 || heightOverflow > 2) && hidesOverflow && !intentionallyTruncated) {
             issues.push({
               type: "text-clipped",
               selector,
@@ -346,7 +426,7 @@ async function collectTooltipIssues(page, context) {
     });
     if (!visible) continue;
 
-    await handle.hover();
+    await handle.dispatchEvent("pointerover", { bubbles: true });
     await page.waitForTimeout(80);
     const tooltipIssue = await page.evaluate((element) => {
       const tooltip = document.querySelector(".floating-tooltip.visible");
@@ -381,7 +461,7 @@ async function collectTooltipIssues(page, context) {
     if (tooltipIssue) {
       issues.push(issue(context, "tooltip-position", tooltipIssue.label || "Tooltip position issue", tooltipIssue));
     }
-    await page.mouse.move(1, 1);
+    await handle.dispatchEvent("pointerout", { bubbles: true });
   }
 
   return issues;
@@ -390,15 +470,17 @@ async function collectTooltipIssues(page, context) {
 async function run() {
   const { chromium } = loadPlaywright();
   ensureOutputDirs();
-  const server = startServer();
+  const visualStore = createVisualStore();
+  const server = startServer(visualStore.storePath);
   let originalLanguage = "";
 
   try {
     await waitForHealth(server);
     const settings = await api("/api/settings");
     originalLanguage = settings?.language || "zh";
-    const browser = await chromium.launch({ headless: true });
+    const browser = await chromium.launch(chromiumLaunchOptions());
     const page = await browser.newPage();
+    await page.addInitScript(() => localStorage.setItem("starvault.guideSeen.v1", "1"));
     const issues = [];
     const consoleIssues = [];
 
@@ -470,7 +552,17 @@ async function run() {
     if (originalLanguage) {
       await restoreLanguage(originalLanguage).catch(() => {});
     }
-    server.kill("SIGTERM");
+    if (server.exitCode === null) {
+      await new Promise((resolve) => {
+        const timer = setTimeout(resolve, 3000);
+        server.once("exit", () => {
+          clearTimeout(timer);
+          resolve();
+        });
+        server.kill("SIGTERM");
+      });
+    }
+    fs.rmSync(visualStore.dir, { recursive: true, force: true });
   }
 }
 

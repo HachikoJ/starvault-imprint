@@ -177,14 +177,14 @@ flowchart LR
 
 ## 技术架构
 
-- Runtime: Node.js 18+
+- Runtime: Node.js 22.5+
 - Server: 原生 `node:http`
 - Frontend: 原生 HTML/CSS/JavaScript，无前端构建链
-- Storage: 本地开发默认 `data/store.json`；Web 静态模式可使用 IndexedDB；桌面端规划 SQLite + Keychain
+- Storage: Node 使用 SQLite WAL；Web 静态模式使用 IndexedDB v4 记录级存储；桌面端沿用 SQLite 并规划 Keychain
 - Discovery: GitHub Search API、GitHub Trending 辅助、可选 Tavily/Exa
 - AI: 默认适配 DeepSeek 的 OpenAI-compatible API，可按 Provider 结构继续扩展
-- Scheduler: 内置每日定时扫描和手动扫描
-- Quality: `node --check` 语法检查，配套视觉回归脚本
+- Scheduler: 内置每日定时扫描、手动扫描和持久化任务恢复
+- Quality: 语法、Node 测试、Chromium 多视口视觉矩阵、真实数据存储性能预算
 
 这个版本刻意保持依赖少、链路短、可审计，适合个人本地使用、研究和持续打磨。
 
@@ -194,11 +194,11 @@ flowchart LR
 
 | 形态 | 存储 | 密钥处理 | 状态 |
 |---|---|---|---|
-| 本地开发 | `data/store.json` | 当前本地 JSON 配置 | 默认运行路径 |
-| Web 静态部署 | IndexedDB | 导出时排除密钥 | 已预留本地模式 |
-| Mac 桌面应用 | SQLite | macOS Keychain | 方案与 schema 已补充 |
+| Node 本地服务 | SQLite WAL，项目/方案/扫描按记录写入 | SQLite 本机明文，导出与同步排除密钥 | 当前默认运行路径 |
+| Web 静态部署 | IndexedDB v4，项目与榜单分页同步 | IndexedDB 独立密钥记录，portable export 排除密钥 | 已实现 |
+| Mac 桌面应用 | SQLite WAL | macOS Keychain | 数据层已就绪，Keychain 尚待打包阶段接入 |
 
-桌面端详细设计见 [桌面端本地存储方案](docs/DESKTOP_STORAGE.md)。当前版本不会自动切换到 SQLite，避免影响已有 Node 本地和 Web IndexedDB 流程。
+旧 `data/store.json` 只在首次启动时导入 SQLite，之后保持不变，便于人工回退；它不再是运行时主库。浏览器同步不会下载完整项目池 JSON，而是读取约束后的核心快照、每页 250 个项目和每页 10 份榜单归档。桌面端详细设计见 [桌面端本地存储方案](docs/DESKTOP_STORAGE.md)。
 
 ## 快速开始
 
@@ -222,10 +222,34 @@ http://127.0.0.1:4173
 npm run check
 ```
 
+运行完整自动化测试：
+
+```bash
+npm run ci
+```
+
 运行视觉回归检查：
 
 ```bash
 npm run visual:check
+```
+
+用当前本地数据检查存储性能预算：
+
+```bash
+npm run perf:storage
+```
+
+用不含用户数据的 6K 合成库复现 CI 性能门禁：
+
+```bash
+npm run perf:storage:fixture
+```
+
+发布前总门禁：
+
+```bash
+npm run release:check
 ```
 
 ## 环境变量
@@ -263,6 +287,7 @@ npm run visual:check
 
 - [PRD](PRD.md)
 - [验收清单](ACCEPTANCE_CHECKLIST.md)
+- [2026-07-10 发布复盘](RELEASE_READINESS.md)
 - [机会分类体系](TAXONOMY.md)
 - [风险模型](RISK_MODEL.md)
 - [许可边界标签](LICENSE_POLICY.md)
@@ -276,16 +301,16 @@ npm run visual:check
 星仓印记当前是本地优先工具，不建议直接暴露到公网。
 
 - `.env` 存放本地环境变量，绝不能提交。
-- `data/store.json` 可能包含 API Key、GitHub 操作状态、项目笔记、AI 分析、用户行为和长期记忆，绝不能提交。
-- UI 中配置的 Key 会以明文形式保存在本地 `data/store.json`。
-- Web IndexedDB 和 portable JSON 导出不应包含真实 Key；桌面端规划使用 macOS Keychain 保存密钥。
-- 服务端默认监听 `127.0.0.1`，已内置轻量鉴权、Origin/Fetch Metadata 检查、请求限流、爬虫/扫描器限流、敏感路径探测拦截、请求体限制、`robots.txt`/noindex 和安全响应头，但没有多用户权限模型。
+- `data/` 可能包含 SQLite、迁移备份、API Key、GitHub 操作状态、项目笔记、AI 分析、用户行为和长期记忆，绝不能提交。
+- Node UI 中配置的 Key 以本机明文形式保存在 SQLite；Web 静态模式的 Key 以独立记录保存在 IndexedDB。设备失守或同源脚本被攻破时不能视为加密密钥库。
+- portable JSON、核心快照、项目分页和榜单分页都排除真实 Key；桌面端发布前仍需接入 macOS Keychain。
+- 服务端默认监听 `127.0.0.1`。非本机监听强制要求 `AUTH_TOKEN`，并内置 Origin/Fetch Metadata、SSRF、URL 白名单、分级限流、敏感路径拦截、请求体限制、`robots.txt`/noindex 和安全响应头，但没有账号体系或多租户权限模型。
 - `/api/settings?reveal=...` 会按本地界面需要返回密钥明文，请只在可信本机环境使用。
 - GitHub Star/Fork 会使用你配置的 GitHub Token 操作你的账号。
 - AI 分析会把选中仓库信息和你填写的分析需求发送给配置的大模型服务商。
 - Tavily、Exa、GitHub 和 AI 服务商会收到相应请求，请自行确认其服务条款与隐私政策。
 
-公网部署前必须补齐生产级认证、权限、密钥加密存储、访问审计、反向代理/CDN/WAF 和 DDoS 防护。详见 [SECURITY.md](SECURITY.md)。
+公网部署前必须增加 TLS、认证网关、访问审计、反向代理/CDN/WAF、DDoS 防护和外部 Secret Manager。不要把 Node 端口直接暴露到公网。详见 [SECURITY.md](SECURITY.md)。
 
 ## 发布前检查
 
@@ -293,7 +318,9 @@ npm run visual:check
 git status --short
 git status --ignored --short
 npm run check
+npm test
 npm run visual:check
+npm run perf:storage
 ```
 
 确认以下内容没有进入 Git：
@@ -341,12 +368,11 @@ npm run visual:check
 
 ## Roadmap
 
-- 更稳定的长扫描耗时估计和失败恢复。
-- 更强的动态 taxonomy 自进化与标签质量评估。
-- 更系统的视觉回归基线和英文溢出检查。
-- 可选加密本地密钥存储。
-- 面向私有部署的认证、权限和审计模块。
-- GH Archive / BigQuery 等大规模趋势数据管道。
+- 把 Node 端数万级项目的筛选、排序和摘要进一步下推到 SQL，降低全量内存占用。
+- 持续用真实陌生领域扩展观察方案审计矩阵，记录模型版本与通过率。
+- macOS 端接入 Keychain、签名、公证、沙盒权限和自动更新。
+- 面向私有部署补充账号权限、审计日志、外部 Secret Manager 与运维告警。
+- 引入 GH Archive / BigQuery 等更稳定的大规模历史趋势数据管道。
 
 ## 致谢
 

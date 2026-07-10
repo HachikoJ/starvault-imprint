@@ -21,6 +21,7 @@ const {
   sanitizeJsonBody,
   corsHeaders,
   securityHeaders,
+  assertSafeExternalUrl,
   DEFAULT_REQUEST_LIMITS
 } = require("./lib/security");
 const {
@@ -42,7 +43,6 @@ const {
 } = require("./lib/github");
 const { enrichRepository } = require("./lib/scoring");
 const { createStorage } = require("./lib/storage");
-const { focusedSpecificPlanKeywords, isNxObservationNeed } = require("./lib/domain-relevance");
 const { enrichTopProjectsWithExa, searchTopicSignals: searchExaTopicSignals } = require("./lib/exa");
 const { enrichTopProjectsWithTavily, searchTopicSignals: searchTavilyTopicSignals } = require("./lib/tavily");
 const { startScheduler } = require("./lib/scheduler");
@@ -71,6 +71,25 @@ let scanProgress = {
   updatedAt: null
 };
 let scanEta = null;
+const runningTasks = new Map();
+const MAX_DURABLE_TASK_CONCURRENCY = 2;
+let activeDurableTaskCount = 0;
+
+function publicTask(task = {}) {
+  return {
+    id: task.id,
+    type: task.type,
+    key: task.key || "",
+    status: task.status,
+    attempts: Number(task.attempts || 0),
+    result: task.status === "completed" ? task.result : null,
+    error: task.status === "failed" ? task.error || "Task failed" : "",
+    createdAt: task.createdAt || "",
+    startedAt: task.startedAt || "",
+    finishedAt: task.finishedAt || "",
+    updatedAt: task.updatedAt || ""
+  };
+}
 
 // Per-IP limits for expensive endpoints (protects GitHub/Tavily/Exa/LLM budgets).
 const apiRateLimiter = createRateLimiter({ windowMs: 60_000, max: 240 });
@@ -91,7 +110,7 @@ const LLM_HEAVY_POST_PATHS = new Set([
 ]);
 
 function enforceRateLimit(req, url) {
-  const ip = clientIp(req);
+  const ip = clientIp(req, config.trustProxy);
   const apiLimit = apiRateLimiter(ip);
   if (!apiLimit.allowed) {
     return { ...apiLimit, scope: "api" };
@@ -118,18 +137,18 @@ function enforceRateLimit(req, url) {
 }
 
 function enforceStaticRateLimit(req) {
-  const limit = staticRateLimiter(clientIp(req));
+  const limit = staticRateLimiter(clientIp(req, config.trustProxy));
   return limit.allowed ? null : { ...limit, scope: "static" };
 }
 
 function enforceCrawlerRateLimit(req) {
   if (!crawlerLikeRequest(req)) return null;
-  const limit = crawlerRateLimiter(`crawler:${clientIp(req)}`);
+  const limit = crawlerRateLimiter(`crawler:${clientIp(req, config.trustProxy)}`);
   return limit.allowed ? null : { ...limit, scope: "crawler" };
 }
 
 function enforceSensitiveProbeLimit(req) {
-  const limit = sensitiveProbeRateLimiter(`probe:${clientIp(req)}`);
+  const limit = sensitiveProbeRateLimiter(`probe:${clientIp(req, config.trustProxy)}`);
   return limit.allowed ? null : { ...limit, scope: "probe" };
 }
 
@@ -602,6 +621,12 @@ function getProviderOrThrow(settings, providerId) {
   if (!provider) {
     throw new Error("Provider not found");
   }
+  return provider;
+}
+
+async function assertProviderNetworkTarget(provider = {}) {
+  if (!provider.baseUrl) throw new Error("Provider base URL is empty");
+  await assertSafeExternalUrl(provider.baseUrl, { allowPrivate: config.allowPrivateProviderUrls });
   return provider;
 }
 
@@ -1268,475 +1293,14 @@ function cleanObservationKeywordList(values = [], need = "", limit = OBSERVATION
     .slice(0, limit || undefined);
 }
 
-const NX_OBSERVATION_TERM_RE = /^(?:ugnx|ug\s*nx|siemens\s+nx|nx\s*open|nxopen|ugopen|unigraphics)$/i;
-
-function pruneObservationTermsForNeed(values = [], need = "", limit = 80) {
-  const allowNxTerms = isNxObservationNeed(need);
+function pruneObservationTermsForNeed(values = [], _need = "", limit = 80) {
   const unique = uniqueStrings(values, limit ? limit * 2 : 0);
-  const pruned = unique.filter((term) => allowNxTerms || !NX_OBSERVATION_TERM_RE.test(String(term || "").trim()));
-  return limit ? pruned.slice(0, limit) : pruned;
+  return limit ? unique.slice(0, limit) : unique;
 }
-
-const NX_CAD_OBSERVATION_PACK = {
-  key: "nx-cad",
-  labelZh: "Siemens NX / UGNX 自动化",
-  labelEn: "Siemens NX and UGNX automation",
-  aliases: ["UGNX", "UG NX", "Siemens NX", "NXOpen", "NX Open", "UGOpen", "Unigraphics"],
-  definitions: ["Siemens NX 插件开发", "UGNX 插件", "NXOpen 自动化", "UGOpen 工程扩展", "Unigraphics NX"],
-  formats: ["PRT", "JT", "Parasolid", "STEP", "STP", "IGES", "STL"],
-  standards: ["Parasolid geometry kernel", "NXOpen API", "UGOpen API"],
-  software: ["Siemens NX", "UGNX", "Unigraphics", "Teamcenter"],
-  libraries: ["NXOpen", "UGOpen", "NX Journal", "MOM", "PostBuilder", "TCL"],
-  workflows: [
-    "NXOpen automation",
-    "Siemens NX plugin",
-    "UGNX extension",
-    "NX journal",
-    "CAM post processor",
-    "CAD model export",
-    "batch modeling",
-    "engineering drawing automation"
-  ],
-  users: ["mechanical engineers", "CAM programmers", "manufacturing engineers", "CAD automation developers"],
-  productSurfaces: ["plugin", "extension", "journal", "desktop tool", "automation script", "post processor", "workflow tool"],
-  excludeTerms: ["awesome list", "paper list", "tutorial", "course", "benchmark", "toy example", "video player", "opengl", "networkoptix"],
-  profiles: [
-    ["UGNX 核心项目", "UGNX core repositories", "ugnx", 0],
-    ["Siemens NX 项目", "Siemens NX repositories", "\"siemens nx\"", 0],
-    ["NXOpen 项目", "NXOpen repositories", "nxopen", 0],
-    ["NX Open 项目", "NX Open repositories", "\"nx open\"", 0],
-    ["UGOpen 项目", "UGOpen repositories", "ugopen", 0],
-    ["UGNX 插件", "UGNX plugins", "ugnx plugin", 0],
-    ["Siemens NX 插件", "Siemens NX plugins", "\"siemens nx\" plugin", 0],
-    ["NXOpen 自动化", "NXOpen automation", "nxopen automation", 0],
-    ["NX Journal", "NX journal", "\"nx journal\"", 0],
-    ["CAM 后处理", "CAM post processors", "\"siemens nx\" cam postprocessor", 0],
-    ["PostBuilder", "PostBuilder", "postbuilder nx", 0],
-    ["MOM/TCL", "MOM TCL", "mom tcl nx", 0]
-  ],
-  researchQueries: [
-    "UGNX Siemens NX NXOpen UGOpen GitHub plugin automation",
-    "Siemens NX NXOpen API journal plugin open source GitHub",
-    "UGNX CAM post processor PostBuilder MOM TCL GitHub",
-    "Siemens NX PRT JT Parasolid model export automation GitHub"
-  ]
-};
-
-const CAD_OBSERVATION_PACK = {
-  key: "cad",
-  labelZh: "CAD 工程设计",
-  labelEn: "CAD and engineering design",
-  aliases: [
-    "CAD",
-    "computer aided design",
-    "computer-aided design",
-    "2D drafting",
-    "3D CAD",
-    "parametric CAD",
-    "BIM",
-    "CAM",
-    "CAE",
-    "mechanical design",
-    "technical drawing"
-  ],
-  definitions: ["计算机辅助设计", "机械制图", "三维建模", "参数化建模", "工程图", "建筑信息模型", "数控制造", "仿真分析"],
-  formats: ["DWG", "DXF", "STEP", "STP", "IGES", "IGS", "STL", "OBJ", "3MF", "IFC", "BREP", "SVG", "G-code", "PLY", "LAS", "LAZ"],
-  standards: ["ISO 10303 STEP", "Industry Foundation Classes", "OpenCASCADE B-Rep", "NURBS", "geometric constraint solving"],
-  software: [
-    "AutoCAD",
-    "FreeCAD",
-    "LibreCAD",
-    "QCAD",
-    "OpenSCAD",
-    "BRL-CAD",
-    "SolveSpace",
-    "CadQuery",
-    "OpenCascade",
-    "IfcOpenShell",
-    "BlenderBIM",
-    "JSCAD",
-    "KiCad"
-  ],
-  libraries: ["OpenCascade", "OCCT", "IfcOpenShell", "CadQuery", "pythonOCC", "Maker.js", "JSCAD", "three.js", "xBIM", "verb-nurbs", "CGAL"],
-  workflows: [
-    "CAD viewer",
-    "CAD editor",
-    "CAD converter",
-    "2D drafting",
-    "3D modeling",
-    "parametric modeling",
-    "technical drawing",
-    "BIM coordination",
-    "CAM CNC toolpath",
-    "CAE simulation",
-    "model repair",
-    "mesh processing",
-    "point cloud measurement",
-    "web CAD collaboration",
-    "CAD version control"
-  ],
-  users: ["mechanical engineers", "architects", "BIM teams", "makers", "CNC operators", "industrial designers", "civil engineers", "hardware teams"],
-  productSurfaces: ["viewer", "editor", "converter", "plugin", "extension", "workbench", "desktop app", "web app", "API server", "collaboration tool", "workflow tool"],
-  excludeTerms: ["awesome list", "paper list", "tutorial", "course", "benchmark", "toy example", "only paper", "dataset"],
-  profiles: [
-    ["CAD 查看器", "CAD viewers", "cad viewer", 15],
-    ["CAD 编辑器", "CAD editors", "cad editor", 15],
-    ["2D 制图", "2D drafting", "2d drafting cad", 15],
-    ["3D CAD 建模", "3D CAD modeling", "3d cad modeling", 15],
-    ["参数化建模", "Parametric modeling", "parametric modeling cad", 15],
-    ["工程图工具", "Technical drawing", "technical drawing cad", 15],
-    ["DWG 查看编辑", "DWG viewer editor", "dwg viewer editor", 15],
-    ["DWG 转换", "DWG converters", "dwg converter cad", 15],
-    ["DXF 查看编辑", "DXF viewer editor", "dxf viewer editor", 15],
-    ["DXF 解析库", "DXF parser libraries", "dxf parser library", 15],
-    ["STEP 查看转换", "STEP viewer converter", "step file viewer converter", 15],
-    ["IGES 查看转换", "IGES viewer converter", "iges file viewer converter", 15],
-    ["STL 网格工具", "STL mesh tools", "stl viewer mesh repair", 15],
-    ["OBJ/3MF 工具", "OBJ 3MF tools", "obj 3mf viewer converter", 15],
-    ["IFC/BIM 查看器", "IFC BIM viewers", "ifc bim viewer", 15],
-    ["BIM 协同", "BIM coordination", "bim coordination viewer", 15],
-    ["几何内核", "Geometry kernels", "geometry kernel cad", 20],
-    ["约束求解", "Constraint solvers", "geometric constraint solver cad", 15],
-    ["NURBS/B-Rep", "NURBS B-Rep modeling", "nurbs brep cad", 15],
-    ["OpenCascade 项目", "OpenCascade projects", "opencascade cad", 15],
-    ["CadQuery 项目", "CadQuery projects", "cadquery cad", 10],
-    ["FreeCAD 扩展", "FreeCAD extensions", "freecad addon workbench", 10],
-    ["LibreCAD/QCAD", "LibreCAD QCAD", "librecad qcad dxf", 10],
-    ["OpenSCAD/JSCAD", "OpenSCAD JSCAD", "openscad jscad tool", 10],
-    ["BRL-CAD 相关", "BRL-CAD related", "brlcad cad", 10],
-    ["Web CAD", "Web CAD", "web cad viewer", 15],
-    ["Three.js CAD", "Three.js CAD", "three.js cad viewer", 15],
-    ["CAD 协作平台", "CAD collaboration", "cad collaboration platform", 15],
-    ["CAD 版本管理", "CAD version control", "cad version control", 15],
-    ["CAD API 服务", "CAD API servers", "cad api server", 15],
-    ["插件与工作台", "CAD plugins workbenches", "cad plugin workbench", 15],
-    ["CAM/CNC", "CAM CNC tools", "cam cnc toolpath", 15],
-    ["CAE/仿真", "CAE simulation", "cae simulation cad", 15],
-    ["切片与制造", "Slicing manufacturing", "stl slicer manufacturing", 15],
-    ["模型修复", "Model repair", "mesh repair cad", 15],
-    ["点云测量", "Point cloud metrology", "point cloud metrology cad", 15],
-    ["G-code 工具", "G-code tools", "g-code cnc cad", 15],
-    ["KiCad/ECAD", "KiCad ECAD tools", "kicad ecad plugin", 15]
-  ],
-  researchQueries: [
-    "CAD file formats DWG DXF STEP STL IGES IFC open source tools",
-    "CAD software FreeCAD LibreCAD OpenSCAD BRL-CAD OpenCascade CadQuery open source",
-    "CAD workflows viewer editor converter parametric modeling BIM CAM CAE",
-    "web CAD viewer editor open source GitHub",
-    "OpenCascade IfcOpenShell CadQuery geometry kernel GitHub"
-  ]
-};
-
-const OBSERVATION_DOMAIN_PACKS = [
-  NX_CAD_OBSERVATION_PACK,
-  CAD_OBSERVATION_PACK,
-  {
-    key: "business-crm",
-    labelZh: "CRM 与业务管理系统",
-    labelEn: "CRM and business operations systems",
-    aliases: [
-      "crm",
-      "CRM",
-      "customer relationship management",
-      "sales crm",
-      "sales pipeline",
-      "lead management",
-      "contact management",
-      "customer support",
-      "helpdesk",
-      "ticketing",
-      "erp",
-      "ERP",
-      "business management",
-      "admin dashboard",
-      "backoffice",
-      "SaaS CRM",
-      "客户关系管理",
-      "客户管理",
-      "销售管理",
-      "销售线索",
-      "商机管理",
-      "工单",
-      "客服系统",
-      "业务后台",
-      "进销存"
-    ],
-    definitions: ["客户关系管理", "销售线索管理", "商机管道", "客户支持", "工单系统", "业务后台", "SaaS 管理系统", "开源 CRM"],
-    formats: ["CSV", "vCard", "iCal", "webhook", "REST API"],
-    standards: ["OAuth", "SAML", "SCIM", "OpenAPI"],
-    software: ["CRM", "ERP", "Helpdesk", "Sales pipeline", "Contact management"],
-    libraries: ["admin dashboard", "workflow engine", "form builder", "notification service"],
-    workflows: [
-      "crm dashboard",
-      "crm system",
-      "crm platform",
-      "crm app",
-      "crm self hosted",
-      "open source crm",
-      "customer relationship management",
-      "sales pipeline",
-      "lead management",
-      "contact management",
-      "deal tracking",
-      "customer portal",
-      "helpdesk ticketing",
-      "support dashboard",
-      "marketing automation",
-      "business workflow",
-      "admin dashboard crm",
-      "saas crm starter"
-    ],
-    users: ["sales teams", "customer success teams", "support teams", "business operators", "SMB teams"],
-    productSurfaces: ["dashboard", "web app", "self-hosted app", "workflow", "template", "portal", "ticketing system", "admin panel"],
-    excludeTerms: ["awesome list", "paper list", "tutorial", "course", "benchmark", "toy example", "dataset", "demo"],
-    profiles: [
-      ["CRM 核心项目", "CRM core repositories", "crm", 0],
-      ["开源 CRM", "Open source CRM", "open source crm", 0],
-      ["自托管 CRM", "Self-hosted CRM", "self hosted crm", 0],
-      ["CRM 系统", "CRM systems", "crm system", 0],
-      ["CRM 平台", "CRM platforms", "crm platform", 0],
-      ["CRM 仪表盘", "CRM dashboards", "crm dashboard", 0],
-      ["CRM Web 应用", "CRM web apps", "crm web app", 0],
-      ["销售管道", "Sales pipeline", "sales pipeline crm", 0],
-      ["销售线索管理", "Lead management", "lead management crm", 0],
-      ["联系人管理", "Contact management", "contact management crm", 0],
-      ["商机跟进", "Deal tracking", "deal tracking crm", 0],
-      ["客户门户", "Customer portals", "customer portal crm", 0],
-      ["客服工单", "Helpdesk ticketing", "helpdesk ticketing", 0],
-      ["客服后台", "Support dashboards", "support dashboard", 0],
-      ["营销自动化", "Marketing automation", "marketing automation crm", 0],
-      ["业务工作流", "Business workflows", "business workflow crm", 0],
-      ["SaaS CRM 模板", "SaaS CRM starters", "saas crm starter", 0],
-      ["CRM 管理后台", "CRM admin panels", "admin dashboard crm", 0]
-    ],
-    researchQueries: [
-      "CRM customer relationship management open source GitHub sales pipeline helpdesk",
-      "open source CRM self hosted sales pipeline contact management GitHub",
-      "CRM SaaS starter admin dashboard customer portal helpdesk GitHub"
-    ]
-  },
-  {
-    key: "ai-hardware",
-    labelZh: "AI 硬件与推理加速",
-    labelEn: "AI hardware and inference acceleration",
-    aliases: [
-      "AI 硬件",
-      "人工智能硬件",
-      "AI 芯片",
-      "AI 加速器",
-      "AI accelerator",
-      "ML accelerator",
-      "AI hardware",
-      "AI chip",
-      "NPU",
-      "TPU",
-      "Edge TPU",
-      "Coral TPU",
-      "GPU delegate",
-      "FPGA",
-      "ASIC",
-      "CUDA",
-      "cuDNN",
-      "ROCm",
-      "OpenCL",
-      "TensorRT",
-      "OpenVINO",
-      "Apache TVM",
-      "Vitis AI",
-      "TinyML",
-      "Edge AI",
-      "Jetson",
-      "neuromorphic"
-    ],
-    definitions: ["边缘 AI 推理", "AI 加速器", "神经网络推理后端", "深度学习编译器", "异构计算", "量化推理", "端侧模型部署"],
-    formats: ["ONNX", "TFLite", "INT8", "FP16", "CUDA kernel", "OpenCL kernel"],
-    standards: ["ONNX Runtime Execution Provider", "TensorFlow Lite Delegate", "OpenCL", "SYCL", "oneAPI", "MLIR"],
-    software: ["CUDA", "ROCm", "TensorRT", "OpenVINO", "Apache TVM", "ONNX Runtime", "TFLite", "CoreML", "Vitis AI", "Jetson", "RKNN", "SNPE", "NCNN", "MNN", "XNNPACK"],
-    libraries: ["ONNX Runtime", "Apache TVM", "XNNPACK", "NCNN", "MNN", "TFLite Micro", "RKNN Toolkit", "SNPE", "TensorRT-LLM"],
-    workflows: [
-      "CUDA deep learning",
-      "ROCm machine learning",
-      "TensorRT inference",
-      "OpenVINO inference",
-      "TVM compiler",
-      "ONNX Runtime accelerator",
-      "TFLite delegate",
-      "CoreML Neural Engine",
-      "Edge TPU inference",
-      "Jetson inference",
-      "NPU SDK",
-      "FPGA Vitis AI",
-      "TinyML microcontroller",
-      "int8 quantized inference",
-      "GPU delegate",
-      "hardware backend"
-    ],
-    users: ["edge AI developers", "embedded engineers", "ML systems engineers", "robotics teams", "AI infrastructure engineers"],
-    productSurfaces: ["runtime", "compiler", "SDK", "driver", "benchmark tool", "deployment tool", "inference server", "edge device workflow", "hardware backend"],
-    excludeTerms: ["awesome list", "paper list", "tutorial", "course", "benchmark only", "toy example", "do not use", "profile readme"],
-    profiles: [
-      ["CUDA 深度学习", "CUDA deep learning", "cuda deep learning", 0],
-      ["ROCm 机器学习", "ROCm machine learning", "rocm machine learning", 0],
-      ["TensorRT 推理", "TensorRT inference", "tensorrt inference", 0],
-      ["OpenVINO 推理", "OpenVINO inference", "openvino inference", 0],
-      ["TVM 编译器", "TVM compiler", "apache tvm compiler", 0],
-      ["ONNX Runtime 加速", "ONNX Runtime acceleration", "onnxruntime accelerator", 0],
-      ["TFLite Delegate", "TFLite delegate", "tflite delegate", 0],
-      ["CoreML Neural Engine", "CoreML Neural Engine", "coreml neural engine", 0],
-      ["Edge TPU", "Edge TPU inference", "edge tpu inference", 0],
-      ["Jetson 推理", "Jetson inference", "jetson inference", 0],
-      ["NPU SDK", "NPU SDK", "npu sdk", 0],
-      ["FPGA Vitis AI", "FPGA Vitis AI", "fpga vitis ai", 0],
-      ["TinyML", "TinyML microcontroller", "tinyml microcontroller", 0],
-      ["INT8 推理", "INT8 quantized inference", "int8 inference", 0],
-      ["GPU Delegate", "GPU delegate", "gpu delegate", 0]
-    ],
-    researchQueries: [
-      "AI hardware accelerator CUDA ROCm TensorRT OpenVINO TVM ONNX Runtime GitHub",
-      "edge AI inference NPU TPU Edge TPU Jetson TFLite delegate GitHub",
-      "FPGA Vitis AI TinyML microcontroller neural network inference GitHub",
-      "AI accelerator SDK hardware backend open source GitHub"
-    ]
-  },
-  {
-    key: "media",
-    labelZh: "音视频与内容创作",
-    labelEn: "media and creator tools",
-    aliases: [
-      "video",
-      "video editor",
-      "video editing",
-      "video editing software",
-      "nle",
-      "timeline editor",
-      "audio",
-      "music",
-      "podcast",
-      "subtitle",
-      "creator",
-      "media",
-      "streaming",
-      "CapCut",
-      "capcut",
-      "Jianying",
-      "JianYing",
-      "剪映",
-      "视频剪辑",
-      "视频剪辑软件",
-      "剪辑软件",
-      "视频编辑器",
-      "非线性编辑"
-    ],
-    definitions: ["视频编辑", "视频剪辑", "剪映/CapCut 剪辑生态", "非线性编辑", "时间线剪辑", "音频编辑", "音乐制作", "字幕", "配音", "录屏", "内容创作", "素材管理"],
-    formats: ["MP4", "MOV", "WebM", "MP3", "WAV", "FLAC", "SRT", "VTT", "ASS", "MIDI"],
-    software: ["CapCut", "Jianying", "剪映", "FFmpeg", "Whisper", "OBS", "Audacity", "Blender", "Kdenlive", "Shotcut", "OpenShot", "Olive", "Remotion", "GStreamer", "MLT"],
-    workflows: [
-      "CapCut template",
-      "CapCut automation",
-      "CapCut subtitle workflow",
-      "Jianying template",
-      "剪映 模板",
-      "剪映 字幕",
-      "video editor",
-      "video timeline editor",
-      "nonlinear video editor",
-      "ffmpeg video workflow",
-      "audio editor",
-      "subtitle editor",
-      "dubbing",
-      "screen recorder",
-      "podcast workflow",
-      "asset manager",
-      "publishing workflow"
-    ],
-    users: ["creators", "podcasters", "video editors", "marketers", "educators"],
-    productSurfaces: ["studio", "editor", "recorder", "converter", "plugin", "workflow", "desktop app", "web app"],
-    excludeTerms: ["movie list", "music list", "paper", "dataset", "tutorial"],
-    profiles: [
-      ["剪映/CapCut 核心项目", "CapCut Jianying projects", "capcut jianying", 0],
-      ["剪映模板", "CapCut templates", "capcut template", 0],
-      ["剪映自动化", "CapCut automation", "capcut automation", 0],
-      ["剪映字幕工作流", "CapCut subtitle workflows", "capcut subtitle workflow", 0],
-      ["视频剪辑软件", "Video editing software", "video editing software", 15],
-      ["视频编辑器", "Video editors", "video editor", 15],
-      ["时间线剪辑", "Timeline editors", "timeline video editor", 15],
-      ["非线性编辑", "Nonlinear editors", "nonlinear video editor", 15],
-      ["FFmpeg 剪辑工作流", "FFmpeg editing workflows", "ffmpeg video editor", 15],
-      ["Kdenlive/Shotcut", "Kdenlive Shotcut", "kdenlive shotcut", 10],
-      ["OpenShot/Olive", "OpenShot Olive", "openshot olive video editor", 10],
-      ["Remotion 视频工具", "Remotion video tools", "remotion video", 10],
-      ["字幕工具", "Subtitle tools", "subtitle editor", 15],
-      ["配音工具", "Dubbing tools", "dubbing voice tool", 15],
-      ["录屏演示", "Screen demos", "screen recorder demo", 15],
-      ["音频编辑器", "Audio editors", "audio editor", 15],
-      ["播客工具", "Podcast tools", "podcast workflow tool", 15],
-      ["素材管理", "Media asset managers", "media asset manager", 15],
-      ["FFmpeg 工作流", "FFmpeg workflows", "ffmpeg workflow app", 15],
-      ["音乐制作", "Music production", "music production tool", 15],
-      ["发布工作流", "Publishing workflows", "publishing workflow", 15]
-    ],
-    researchQueries: [
-      "open source video editing software timeline editor FFmpeg MLT GitHub",
-      "Kdenlive Shotcut OpenShot Olive Remotion video editor GitHub",
-      "creator tools video audio subtitle podcast open source GitHub",
-      "FFmpeg Whisper OBS creator workflow open source tools"
-    ]
-  },
-  {
-    key: "design",
-    labelZh: "设计与可视化工具",
-    labelEn: "design and visual tools",
-    aliases: ["design", "image editing", "photo editing", "photoshop", "adobe photoshop", "figma", "canvas", "whiteboard", "diagram", "prototype", "ui builder"],
-    definitions: ["设计工具", "图像编辑", "照片编辑", "修图", "画布编辑", "白板", "图表", "原型", "视觉素材", "演示文稿"],
-    formats: ["PSD", "PSB", "SVG", "PNG", "PDF", "HTML", "CSS", "Figma", "Excalidraw"],
-    software: ["Photoshop", "Adobe Photoshop", "Figma", "Excalidraw", "tldraw", "Penpot", "Framer", "Mermaid"],
-    workflows: [
-      "Photoshop plugin",
-      "Photoshop extension",
-      "Photoshop script",
-      "Photoshop action",
-      "Photoshop brush",
-      "Photoshop preset",
-      "PSD workflow",
-      "UXP plugin",
-      "CEP extension",
-      "image editor",
-      "canvas editor",
-      "whiteboard",
-      "diagram editor",
-      "prototype tool",
-      "ui builder",
-      "presentation generator",
-      "visual asset generator"
-    ],
-    users: ["designers", "product managers", "developers", "teachers", "teams"],
-    productSurfaces: ["editor", "builder", "plugin", "extension", "script", "template", "preset", "web app", "collaboration tool"],
-    excludeTerms: ["dribbble", "showcase", "gallery only", "tutorial"],
-    profiles: [
-      ["设计工具", "Design tools", "design tool", 20],
-      ["画布编辑器", "Canvas editors", "canvas editor", 20],
-      ["白板工具", "Whiteboard tools", "whiteboard app", 20],
-      ["图表工具", "Diagram tools", "diagram editor", 20],
-      ["原型工具", "Prototyping tools", "prototyping tool", 20],
-      ["UI 构建器", "UI builders", "ui builder", 20],
-      ["演示工具", "Presentation tools", "presentation generator", 20],
-      ["视觉素材", "Visual assets", "visual asset generator", 20]
-    ],
-    researchQueries: ["design canvas whiteboard diagram prototype open source GitHub", "Figma Penpot Excalidraw tldraw open source alternatives"]
-  }
-];
 
 const OBSERVATION_CUSTOM_QUERY_LIMIT = 30;
 const OBSERVATION_KEYWORD_LIMIT = 48;
 const OBSERVATION_EXCLUDE_LIMIT = 36;
-function detectedObservationPacks(text = "") {
-  const clean = String(text || "").toLowerCase();
-  return OBSERVATION_DOMAIN_PACKS.filter((pack) => {
-    const aliases = [pack.key, ...(pack.aliases || []), ...(pack.definitions || [])];
-    return aliases.some((alias) => clean.includes(String(alias || "").toLowerCase()));
-  });
-}
-
 function extractSignalTerms(text = "") {
   const upperTerms = String(text || "").match(/\b[A-Z][A-Z0-9.+#-]{1,12}\b/g) || [];
   const extensionTerms = String(text || "").match(/\b(?:[A-Za-z0-9-]+\.)?(?:[A-Z0-9]{2,6})\b/g) || [];
@@ -1749,11 +1313,7 @@ function extractSignalTerms(text = "") {
     .slice(0, 40);
 }
 
-const GENERIC_CHINESE_EXPLICIT_TERMS = new Set(["视频", "音频", "剪辑", "软件", "工具", "平台", "视频剪辑", "视频剪辑软件", "剪辑软件", "视频编辑器", "音视频", "内容创作"]);
-
-function namedMediaNeedTerms(text = "") {
-  return /剪映|cap\s*cut|capcut|jian\s*ying|jianying/i.test(String(text || "")) ? ["剪映", "CapCut", "Jianying", "JianYing"] : [];
-}
+const GENERIC_CHINESE_EXPLICIT_TERMS = new Set(["方案名称", "详细需求", "历史需求", "相关", "项目", "开源", "关注", "监控", "检索", "观察"]);
 
 function explicitPlanNameFromNeed(need = "") {
   const match = String(need || "").match(/方案名称[:：]\s*([^\n\r]+)/);
@@ -1776,28 +1336,20 @@ function isLikelyChineseNamedProductTerm(term = "", need = "") {
 
 function explicitNeedTerms(need = "") {
   const text = String(need || "");
+  const planName = explicitPlanNameFromNeed(text);
   const generic = new Set([
-    "api",
     "app",
     "apps",
-    "ai",
-    "bim",
-    "cad",
-    "cae",
-    "cam",
     "dashboard",
     "github",
-    "llm",
     "open",
     "opensource",
     "plugin",
     "plugins",
     "project",
     "projects",
-    "rag",
     "repository",
     "repositories",
-    "sdk",
     "source",
     "tool",
     "tools",
@@ -1828,13 +1380,10 @@ function explicitNeedTerms(need = "") {
   ]);
   const rawTerms = uniqueStrings(
     [
+      planName,
       ...extractSignalTerms(text),
-      ...namedMediaNeedTerms(text),
       ...extractChineseTerms(text, 8),
-      ...(text.match(/\b[A-Za-z][A-Za-z0-9.+#-]{2,30}\b/g) || []),
-      ...(/(?:\bugnx\b|ug\s*nx|siemens\s+nx|nx\s*open|nxopen|ugopen|unigraphics)/i.test(text)
-        ? ["UGNX", "Siemens NX", "NXOpen", "NX Open", "UGOpen", "Unigraphics", "UG NX"]
-        : [])
+      ...(text.match(/\b[A-Za-z][A-Za-z0-9.+#-]{1,30}\b/g) || [])
     ],
     20
   );
@@ -1842,6 +1391,7 @@ function explicitNeedTerms(need = "") {
     .map((term) => term.replace(/^["“]|["”]$/g, "").trim())
     .filter((term) => {
       const lower = term.toLowerCase();
+      if (term === planName) return true;
       return Array.from(term).length >= 2 && !generic.has(lower) && !GENERIC_CHINESE_EXPLICIT_TERMS.has(term) && !/^\d+$/.test(lower);
     })
     .slice(0, 8);
@@ -1863,84 +1413,6 @@ function compactObservationProfiles(items = [], _domainModel = {}, limit = OBSER
     unique.push(item);
   });
   return unique.slice(0, Math.max(1, Number(limit || OBSERVATION_CUSTOM_QUERY_LIMIT)));
-}
-
-function observationProfileFloor(domainModel = {}, keywordCount = 0) {
-  const activity = domainModel.githubActivity || {};
-  const maxTotalCount = Number(activity.maxTotalCount || domainModel.githubActivityMaxTotalCount || 0);
-  const activityLevel = activity.activityLevel || domainModel.activityLevel || "unknown";
-  const richness = [
-    domainModel.aliases,
-    domainModel.definitions,
-    domainModel.formats,
-    domainModel.standards,
-    domainModel.software,
-    domainModel.libraries,
-    domainModel.workflows,
-    domainModel.productSurfaces,
-    domainModel.sampleTerms
-  ].reduce((total, value) => total + (Array.isArray(value) ? value.filter(Boolean).length : 0), 0);
-  if (activityLevel === "high" || maxTotalCount >= 5000 || richness >= 36 || keywordCount >= 24) return 12;
-  if (activityLevel === "medium" || maxTotalCount >= 500 || richness >= 22 || keywordCount >= 16) return 10;
-  if (activityLevel === "low" || maxTotalCount >= 50 || richness >= 12 || keywordCount >= 10) return 8;
-  return 6;
-}
-
-function isUsefulObservationBackfillTerm(term = "", need = "", domainModel = {}) {
-  const clean = normalizeObservationKeyword(term);
-  const lower = clean.toLowerCase();
-  if (!clean || isNoisyObservationKeyword(clean)) return false;
-  if (/^(?:重点关注|详细需求|方案名称|历史需求)/.test(clean)) return false;
-  if (/^(?:工程设计|文件格式|建模|查看转换|插件|自动化|业务流程|产品形态|开源生态)$/i.test(clean)) return false;
-  if (OBSERVATION_KEYWORD_STOP_WORDS.has(lower)) return false;
-  if (isUnrequestedObservationSurface({ label: clean, query: clean }, need)) return false;
-  if (isWeakGenericCadQuery({ query: clean }, domainModel)) return false;
-  return Array.from(clean).length >= 2 && Array.from(clean).length <= 48;
-}
-
-function observationKeywordBackfillProfiles(options = {}) {
-  const {
-    existing = [],
-    terms = [],
-    need = "",
-    domainModel = {},
-    floor = 0,
-    minStars = 0
-  } = options;
-  if (!floor || existing.length >= floor) return [];
-  const seen = new Set(existing.map((item) => observationQueryCore(item)).filter(Boolean));
-  const profiles = [];
-  for (const term of terms) {
-    if (existing.length + profiles.length >= floor) break;
-    const clean = normalizeObservationKeyword(term);
-    if (!isUsefulObservationBackfillTerm(clean, need, domainModel)) continue;
-    const query = completeObservationQuery(quoteObservationSearchTerm(clean), minStars, {
-      need,
-      includeAntiNoise: false
-    });
-    const item = {
-      label: clean,
-      labelZh: clean,
-      labelEn: clean,
-      query,
-      stars: minStars
-    };
-    const core = observationQueryCore(item);
-    if (!core || seen.has(core)) continue;
-    if (
-      isObservationPlatformNoise(item, need) ||
-      isMechanicalObservationExpansion(item, need) ||
-      isOverSpecificAcronymProjectQuery(item, need) ||
-      isUnrequestedObservationSurface(item, need) ||
-      isWeakGenericCadQuery(item, domainModel) ||
-      !queryMatchesDomain(item, domainModel, need)
-    ) {
-      continue;
-    }
-    seen.add(core);
-    profiles.push(item);
-  }
-  return profiles;
 }
 
 function executableObservationCustomQueries(plan = {}, searchLogic = {}) {
@@ -1970,23 +1442,24 @@ function buildObservationDomainModel(need = "", researchContext = {}) {
   const signals = compactResearchSignals(researchContext.signals || []);
   const researchText = signals.map((item) => `${item.title} ${item.content}`).join(" ");
   const text = `${need}\n${researchText}`;
-  const needPacks = detectedObservationPacks(need);
   const hasSpecificNeedAnchor = explicitNeedTerms(need).some(isSpecificObservationTerm);
-  const packs = needPacks.length ? needPacks : hasSpecificNeedAnchor ? [] : detectedObservationPacks(text);
-  const primary = packs[0] || null;
-  const useResearchWordTerms = Boolean(primary) || !hasSpecificNeedAnchor;
+  const useResearchWordTerms = !hasSpecificNeedAnchor;
   const needEnglishTerms = extractEnglishTerms(need, 24);
   const needChineseTerms = extractChineseTerms(need, 24);
   const englishTerms = extractEnglishTerms(text, 60);
   const chineseTerms = extractChineseTerms(text, 24);
   const signalTerms = extractSignalTerms(text);
-  const trustedSignalTerms = useResearchWordTerms ? signalTerms : [];
+  const trustedSignalTerms = signalTerms.filter((term) => {
+    const normalized = String(term || "").toLowerCase();
+    return !/^(?:github|readme|repository|repositories|project|projects|open|source)$/.test(normalized);
+  });
   const githubSampleTerms = cleanObservationKeywordList(researchContext.githubSamples?.keywords || [], need, 24);
   const githubActivity = researchContext.githubActivity || {};
-  const model = {
-    key: primary?.key || "custom",
-    labelZh: primary?.labelZh || "自定义领域",
-    labelEn: primary?.labelEn || "custom domain",
+  const explicitTerms = explicitNeedTerms(need);
+  return {
+    key: "generated",
+    labelZh: explicitPlanNameFromNeed(need) || explicitTerms[0] || "自定义领域",
+    labelEn: explicitPlanNameFromNeed(need) || explicitTerms[0] || "custom domain",
     githubActivity: {
       activityLevel: githubActivity.activityLevel || "unknown",
       maxTotalCount: Number(githubActivity.maxTotalCount || 0)
@@ -1995,7 +1468,7 @@ function buildObservationDomainModel(need = "", researchContext = {}) {
     githubActivityMaxTotalCount: Number(githubActivity.maxTotalCount || 0),
     aliases: pruneObservationTermsForNeed(
       [
-        ...(primary?.aliases || []),
+        ...explicitTerms,
         ...(useResearchWordTerms ? chineseTerms.slice(0, 12) : needChineseTerms.slice(0, 12)),
         ...(useResearchWordTerms ? englishTerms.slice(0, 12) : needEnglishTerms.slice(0, 12)),
         ...trustedSignalTerms.filter((term) => /[A-Z]/.test(term)).slice(0, 12),
@@ -2004,195 +1477,24 @@ function buildObservationDomainModel(need = "", researchContext = {}) {
       need,
       40
     ),
-    definitions: pruneObservationTermsForNeed([...(primary?.definitions || []), ...(useResearchWordTerms ? chineseTerms : needChineseTerms).slice(0, 8)], need, 40),
-    formats: pruneObservationTermsForNeed([...(primary?.formats || []), ...trustedSignalTerms.filter((term) => /^[A-Z0-9.+#-]{2,8}$/.test(term))], need, 60),
-    standards: uniqueStrings(primary?.standards || [], 40),
+    definitions: pruneObservationTermsForNeed((useResearchWordTerms ? chineseTerms : needChineseTerms).slice(0, 8), need, 40),
+    formats: pruneObservationTermsForNeed(trustedSignalTerms.filter((term) => /^[A-Z0-9.+#-]{2,12}$/.test(term)), need, 60),
+    standards: [],
     software: pruneObservationTermsForNeed(
-      [...(primary?.software || []), ...trustedSignalTerms.filter((term) => /[A-Z]/.test(term) && !/^[A-Z0-9.+#-]{2,8}$/.test(term))],
+      trustedSignalTerms.filter((term) => /[A-Z]/.test(term) && !/^[A-Z0-9.+#-]{2,12}$/.test(term)),
       need,
       60
     ),
-    libraries: pruneObservationTermsForNeed(primary?.libraries || [], need, 50),
-    workflows: pruneObservationTermsForNeed(primary?.workflows || [], need, 60),
+    libraries: [],
+    workflows: [],
     sampleTerms: githubSampleTerms,
-    users: uniqueStrings(primary?.users || [], 40),
-    productSurfaces: uniqueStrings(primary?.productSurfaces || ["app", "tool", "dashboard", "editor", "viewer", "plugin", "extension", "template", "workflow", "self-hosted"], 40),
-    excludeTerms: uniqueStrings([...(primary?.excludeTerms || []), "awesome list", "paper list", "course", "tutorial", "benchmark", "toy example"], 40),
+    users: [],
+    productSurfaces: [],
+    excludeTerms: [],
     researchSignals: signals.length,
     researchQueries: researchContext.queries || [],
-    profiles: primary?.profiles || []
+    profiles: []
   };
-
-  if (model.key === "custom") {
-    const domainSeeds = uniqueStrings(
-      [
-        ...needChineseTerms,
-        ...needEnglishTerms,
-        ...(useResearchWordTerms ? chineseTerms : []),
-        ...(useResearchWordTerms ? englishTerms : []),
-        ...trustedSignalTerms.filter((term) => /[A-Z]/.test(term))
-      ],
-      16
-    );
-    model.workflows = uniqueStrings(
-      [
-        ...domainSeeds.map((term) => `${term} app`),
-        ...domainSeeds.map((term) => `${term} tool`),
-        ...domainSeeds.slice(0, 8).map((term) => `${term} workflow`)
-      ],
-      40
-    );
-    model.profiles = domainSeeds.flatMap((term) => [
-      [`${term} 工具`, `${term} tools`, `${term} tool`, 15],
-      [`${term} 应用`, `${term} apps`, `${term} app`, 15]
-    ]);
-  }
-
-  return model;
-}
-
-function domainVocabulary(domainModel = {}, need = "") {
-  const values = [
-    need,
-    domainModel.labelZh,
-    domainModel.labelEn,
-    ...(domainModel.aliases || []),
-    ...(domainModel.definitions || []),
-    ...(domainModel.formats || []),
-    ...(domainModel.standards || []),
-    ...(domainModel.software || []),
-    ...(domainModel.libraries || []),
-    ...(domainModel.workflows || []),
-    ...(domainModel.sampleTerms || [])
-  ];
-  const phraseTerms = uniqueStrings(values, 160).filter((term) => Array.from(term).length >= 3);
-  const wordTerms = extractEnglishTerms(values.join(" "), 80).filter((term) => !["viewer", "editor", "tool", "tools", "plugin", "app", "workflow", "dashboard"].includes(term));
-  return uniqueStrings([...phraseTerms, ...wordTerms], 180).map((term) => term.toLowerCase());
-}
-
-function aiProfileKeywordCandidates(profiles = [], need = "", limit = 80) {
-  const explicitTerms = explicitNeedTerms(need).filter(isSpecificObservationTerm);
-  const candidates = [];
-  const push = (value) => {
-    const clean = normalizeObservationKeyword(value);
-    if (clean) candidates.push(clean);
-  };
-  for (const profile of profiles || []) {
-    const core = observationQueryCore(profile);
-    const quoted = Array.from(String(core || "").matchAll(/"([^"]{2,60})"/g)).map((match) => match[1]);
-    quoted.forEach(push);
-    const normalized = String(core || "")
-      .replace(/"([^"]+)"/g, "$1")
-      .replace(/[()]/g, "|")
-      .replace(/\b(?:OR|AND)\b/gi, "|")
-      .split("|")
-      .map((part) => {
-        let clean = part.replace(/\s+/g, " ").trim();
-        explicitTerms.forEach((term) => {
-          clean = clean.replace(new RegExp(`(^|[^a-z0-9])${escapeRegExp(term)}($|[^a-z0-9])`, "gi"), " ");
-        });
-        return clean.replace(/\s+/g, " ").trim();
-      })
-      .filter(Boolean);
-    normalized.forEach(push);
-  }
-  return cleanObservationKeywordList(candidates, need, limit);
-}
-
-function queryMatchesDomain(item = {}, domainModel = {}, need = "") {
-  const vocab = domainVocabulary(domainModel, need);
-  if (!vocab.length) return true;
-  const text = `${item.label || ""} ${item.labelZh || ""} ${item.labelEn || ""} ${item.query || item.q || ""}`.toLowerCase();
-  return vocab.some((term) => text.includes(term));
-}
-
-function observationNeedHasPack(need = "", keys = []) {
-  const wanted = new Set(Array.isArray(keys) ? keys : [keys]);
-  return detectedObservationPacks(need).some((pack) => wanted.has(pack.key));
-}
-
-function isMediaObservationNeed(need = "") {
-  return (
-    observationNeedHasPack(need, "media") ||
-    /剪映|cap\s*cut|capcut|jian\s*ying|jianying|视频剪辑|视频编辑|非线性编辑|\b(?:video editing|video editor|timeline editor|subtitle|audio editor|podcast)\b/i.test(
-      String(need || "")
-    )
-  );
-}
-
-function isDesignObservationNeed(need = "") {
-  return (
-    observationNeedHasPack(need, "design") ||
-    /photoshop|adobe\s+photoshop|\bpsd\b|\bpsb\b|\bfigma\b|\buxp\b|\bcep\b|图像编辑|照片编辑|修图|白板|原型|设计工具/i.test(
-      String(need || "")
-    )
-  );
-}
-
-function isCadObservationNeedText(need = "") {
-  return (
-    isNxObservationNeed(need) ||
-    observationNeedHasPack(need, ["cad", "nx-cad"]) ||
-    /\b(?:cad|dwg|dxf|step|stp|iges|igs|stl|ifc|freecad|opencascade|cadquery|librecad|qcad|openscad|brl-cad|brlcad|bim|cam|cae)\b|计算机辅助设计|机械制图|参数化建模|三维建模|工程图/i.test(
-      String(need || "")
-    )
-  );
-}
-
-function isUnrequestedObservationSurface(item = {}, need = "") {
-  const text = observationProfileText(item).toLowerCase();
-  if (!isMediaObservationNeed(need)) {
-    if (
-      /\b(?:capcut|jianying|video editor|video editing|timeline editor|nonlinear video|nle|subtitle|audio editor|podcast|ffmpeg|kdenlive|shotcut|openshot|remotion|gstreamer|mlt|mp4|mov|srt|vtt)\b|剪映|视频剪辑|视频编辑|字幕|非线性编辑/.test(
-        text
-      )
-    ) {
-      return true;
-    }
-  }
-  if (!isDesignObservationNeed(need)) {
-    if (
-      /\b(?:photoshop|figma|psd|psb|uxp|cep|whiteboard|diagram|prototype|canvas editor|image editor|photo editing)\b|图像编辑|照片编辑|修图|白板|原型/.test(
-        text
-      )
-    ) {
-      return true;
-    }
-  }
-  if (!isCadObservationNeedText(need)) {
-    if (
-      /\b(?:cad|dwg|dxf|step|stp|iges|igs|stl|ifc|freecad|opencascade|cadquery|librecad|qcad|openscad|brl-cad|brlcad|bim|cam|cae|nurbs|brep|g-code|cnc)\b|计算机辅助设计|机械制图|参数化建模|三维建模|工程图/.test(
-        text
-      )
-    ) {
-      return true;
-    }
-  }
-  return false;
-}
-
-function cleanObservationKeywordsForNeed(values = [], need = "", limit = OBSERVATION_KEYWORD_LIMIT) {
-  return pruneObservationTermsForNeed(
-    cleanObservationKeywordList(values, need, limit ? limit * 2 : 0).filter((keyword) => !isUnrequestedObservationSurface({ label: keyword, query: keyword }, need)),
-    need,
-    limit
-  );
-}
-
-function isObservationPlatformNoise(item = {}, need = "") {
-  const needText = String(need || "").toLowerCase();
-  if (/\bobservation\b|天文观测|观测设备|观测数据/.test(needText)) return false;
-  const text = observationProfileText(item).toLowerCase();
-  return /\b(?:observation|observations|starvault|imprint)\b/.test(text);
-}
-
-function isMechanicalObservationExpansion(item = {}, need = "") {
-  const explicitTerms = explicitNeedTerms(need)
-    .filter(isSpecificObservationTerm)
-    .map((term) => term.toLowerCase());
-  if (!explicitTerms.length) return false;
-  const core = observationQueryCore(item);
-  return /\bapp\s+dashboard\b/.test(core) && explicitTerms.some((term) => queryContainsObservationTerm(core, term));
 }
 
 function observationQueryCore(item = {}) {
@@ -2206,24 +1508,6 @@ function observationQueryCore(item = {}) {
     .trim();
 }
 
-function isWeakGenericCadQuery(item = {}, domainModel = {}) {
-  const core = observationQueryCore(item);
-  const cadContext = domainModel.key === "cad" || /\bcad\b/.test(core);
-  if (!cadContext) return false;
-  return /^(cad|cad tool|cad workflow|cad viewer|cad converter)$/.test(core);
-}
-
-function isOverSpecificAcronymProjectQuery(item = {}, need = "") {
-  const acronyms = explicitNeedTerms(need).filter((term) => /^[A-Z0-9][A-Z0-9.+#-]{1,5}$/.test(String(term || "").trim()));
-  if (!acronyms.length) return false;
-  const core = observationQueryCore(item).replace(/["“”]/g, " ");
-  const tokens = core.split(/\s+/).filter(Boolean);
-  return acronyms.some((term) => {
-    const lower = term.toLowerCase();
-    return tokens.some((token) => token.includes(lower) && token !== lower && token.length > lower.length + 2);
-  });
-}
-
 function quoteObservationSearchTerm(term = "") {
   const clean = String(term || "").replace(/^["“]|["”]$/g, "").trim();
   if (!clean) return "";
@@ -2233,8 +1517,6 @@ function quoteObservationSearchTerm(term = "") {
 function observationResearchQueries(need = "") {
   const cleanNeed = String(need || "").replace(/\s+/g, " ").trim().slice(0, 300);
   if (!cleanNeed) return [];
-  const packs = detectedObservationPacks(cleanNeed);
-  const packQueries = packs.flatMap((pack) => pack.researchQueries || []);
   return uniqueStrings(
     [
       `${cleanNeed} key concepts definitions terminology taxonomy`,
@@ -2242,8 +1524,7 @@ function observationResearchQueries(need = "") {
       `${cleanNeed} software tools libraries frameworks open source`,
       `${cleanNeed} workflows users use cases product categories`,
       `${cleanNeed} GitHub open source repositories viewer editor dashboard plugin template workflow`,
-      `${cleanNeed} open source alternatives products apps`,
-      ...packQueries
+      `${cleanNeed} open source alternatives products apps`
     ],
     10
   );
@@ -2251,11 +1532,6 @@ function observationResearchQueries(need = "") {
 
 function observationResearchSingleQuery(need = "", queries = []) {
   const cleanNeed = String(need || "").replace(/\s+/g, " ").trim().slice(0, 260);
-  const packHints = detectedObservationPacks(cleanNeed)
-    .flatMap((pack) => [pack.labelEn, ...(pack.aliases || []), ...(pack.formats || []), ...(pack.software || []), ...(pack.workflows || [])])
-    .filter(Boolean)
-    .slice(0, 22)
-    .join(" ");
   const dimensions = [
     "key concepts definitions terminology taxonomy",
     "file formats standards protocols extensions",
@@ -2263,31 +1539,12 @@ function observationResearchSingleQuery(need = "", queries = []) {
     "workflows users use cases product categories",
     "open source GitHub repositories viewer editor dashboard plugin template workflow"
   ].join(" ");
-  return uniqueStrings([cleanNeed, packHints, dimensions, ...queries.slice(0, 3)], 8)
+  return uniqueStrings([cleanNeed, dimensions, ...queries.slice(0, 3)], 8)
     .join(" ")
     .replace(/\s+/g, " ")
     .trim()
     .slice(0, 900);
 }
-
-const GITHUB_ACTIVITY_GENERIC_TERMS = new Set([
-  "ai",
-  "api",
-  "app",
-  "bim",
-  "cad",
-  "cae",
-  "cam",
-  "dashboard",
-  "github",
-  "llm",
-  "plugin",
-  "project",
-  "rag",
-  "sdk",
-  "tool",
-  "workflow"
-]);
 
 function githubActivityProbeTerms(need = "") {
   const text = String(need || "");
@@ -2296,7 +1553,7 @@ function githubActivityProbeTerms(need = "") {
     .replace(/\s+/g, " ")
     .trim();
   const primaryName =
-    /^[A-Za-z][A-Za-z0-9.+#-]{2,40}$/.test(planName) && !GITHUB_ACTIVITY_GENERIC_TERMS.has(planName.toLowerCase()) ? planName : "";
+    Array.from(planName).length >= 2 && !/^(?:默认观察|新方案|default observation|new plan)$/i.test(planName) ? planName : "";
   return uniqueStrings([primaryName, ...explicitNeedTerms(text)], 3);
 }
 
@@ -2470,29 +1727,6 @@ function normalizeObservationExcludeTerm(term = "") {
     .trim();
 }
 
-function isLowValueObservationExcludeTerm(term = "") {
-  const clean = normalizeObservationExcludeTerm(term);
-  if (!clean) return false;
-  if (/^(?:awesome(?: list)?|paper(?: list)?|tutorial|course|benchmark|toy example|dataset|demo|sample|example|showcase|gallery(?: only)?|movie list|music list)$/i.test(clean)) {
-    return true;
-  }
-  return /教程|课程|论文|数据集|示例|样例|演示|榜单|清单|列表/.test(clean);
-}
-
-function filterObservationExcludeTerms(values = [], options = {}) {
-  const trustedTerms = new Set(
-    uniqueStrings(options.trustedTerms || [], 80)
-      .map((term) => normalizeObservationExcludeTerm(term).toLowerCase())
-      .filter(Boolean)
-  );
-  return uniqueStrings(
-    (values || [])
-      .map(normalizeObservationExcludeTerm)
-      .filter(Boolean),
-    80
-  ).filter((term) => trustedTerms.has(term.toLowerCase()) || isLowValueObservationExcludeTerm(term));
-}
-
 function isSpecificObservationQuery(query = "", options = {}) {
   const explicitTerms = explicitNeedTerms(options.need || "")
     .filter(isSpecificObservationTerm)
@@ -2521,15 +1755,6 @@ function queryMatchesExplicitNeed(item = {}, need = "") {
 
 function observationQueryFreshnessDays(query = "", options = {}) {
   const text = `${query || ""} ${options.need || ""}`.toLowerCase();
-  if (/\b(ugnx|nxopen|unigraphics)\b|ug\s+nx|siemens\s+nx/.test(text)) {
-    return 730;
-  }
-  if (
-    /\b(cad|bim|dwg|dxf|step|iges|stl|ifc|freecad|opencascade|cadquery|librecad|qcad|openscad|brl-cad|brlcad|nurbs|brep|b-rep|cam|cae)\b/.test(text) ||
-    /geometry kernel|parametric modeling|constraint solver/.test(text)
-  ) {
-    return 365;
-  }
   if (/\b(parser|converter|viewer|sdk|library|kernel|plugin|extension|addon|workbench|file format)\b/.test(text)) {
     return 180;
   }
@@ -2581,10 +1806,9 @@ function completeObservationPlanQueries(plan = {}) {
     .join(" ");
   const primaryNeedText = `${plan.name || ""} ${plan.nameEn || ""} ${requirementText}`.trim();
   const rawKeywordContext = [primaryNeedText, rawStrategyKeywords.join(" ")].filter(Boolean).join("\n") || `${plan.description || ""} ${plan.descriptionEn || ""}`;
-  const strategyKeywordList = cleanObservationKeywordsForNeed(rawStrategyKeywords, primaryNeedText || rawKeywordContext, OBSERVATION_KEYWORD_LIMIT);
-  const strategyKeywords = strategyKeywordList.join(" ");
-  const needText = primaryNeedText || strategyKeywords || `${plan.description || ""} ${plan.descriptionEn || ""}`;
-  const domainModel = buildObservationDomainModel(needText, {});
+  const needText = primaryNeedText || rawStrategyKeywords.join(" ") || `${plan.description || ""} ${plan.descriptionEn || ""}`;
+  const strategyKeywordList = cleanObservationKeywordList(rawStrategyKeywords, needText || rawKeywordContext, OBSERVATION_KEYWORD_LIMIT);
+  const trustedTerms = uniqueStrings([...explicitNeedTerms(needText), ...strategyKeywordList], OBSERVATION_KEYWORD_LIMIT * 2);
   const customQueries = Array.isArray(strategy.customQueries)
     ? strategy.customQueries.map((item) => ({
         ...item,
@@ -2595,71 +1819,22 @@ function completeObservationPlanQueries(plan = {}) {
         })
       }))
     : [];
-  const aiProfileKeywords = aiProfileKeywordCandidates(customQueries, needText, OBSERVATION_KEYWORD_LIMIT);
-  const queryDomainModel = {
-    ...domainModel,
-    sampleTerms: uniqueStrings([...(domainModel.sampleTerms || []), ...strategyKeywordList, ...aiProfileKeywords], 120)
-  };
-  const expandedNeedText = [needText, strategyKeywords, ...aiProfileKeywords].filter(Boolean).join(" ");
-  const relevantCustomQueries = customQueries.filter(
-    (item) =>
-      !isObservationPlatformNoise(item, needText) &&
-      !isMechanicalObservationExpansion(item, needText) &&
-      !isOverSpecificAcronymProjectQuery(item, needText) &&
-      !isUnrequestedObservationSurface(item, needText) &&
-      !isWeakGenericCadQuery(item, domainModel) &&
-      queryMatchesDomain(item, queryDomainModel, needText) &&
-      queryMatchesExplicitNeed(item, expandedNeedText)
+  const relevantCustomQueries = compactObservationProfiles(
+    customQueries.filter((item) => {
+      if (!String(item.query || item.q || "").trim()) return false;
+      if (!trustedTerms.length) return true;
+      const text = observationProfileText(item);
+      return trustedTerms.some((term) => queryContainsObservationTerm(text, term));
+    }),
+    {},
+    OBSERVATION_CUSTOM_QUERY_LIMIT
   );
-  const profileFloor = observationProfileFloor(queryDomainModel, strategyKeywordList.length);
-  const backfillTerms = cleanObservationKeywordsForNeed(
-    [
-      ...aiProfileKeywords,
-      ...(queryDomainModel.formats || []),
-      ...(queryDomainModel.software || []),
-      ...(queryDomainModel.libraries || []),
-      ...(queryDomainModel.workflows || []),
-      ...(queryDomainModel.aliases || []),
-      ...(queryDomainModel.sampleTerms || []),
-      ...strategyKeywordList
-    ],
-    needText,
-    OBSERVATION_KEYWORD_LIMIT
-  );
-  const backfilledCustomQueries = observationKeywordBackfillProfiles({
-    existing: relevantCustomQueries,
-    terms: backfillTerms,
-    need: expandedNeedText,
-    domainModel: queryDomainModel,
-    floor: Math.min(profileFloor, OBSERVATION_CUSTOM_QUERY_LIMIT),
-    minStars: Math.max(0, Number(strategy.minStars || 0))
-  });
-  const combinedCustomQueries = compactObservationProfiles([...relevantCustomQueries, ...backfilledCustomQueries], queryDomainModel, OBSERVATION_CUSTOM_QUERY_LIMIT);
   const searchLogic = {
     ...strategy,
-    excludeTerms: filterObservationExcludeTerms(strategy.excludeTerms || [], {
-      trustedTerms: domainModel.excludeTerms || []
-    }),
-    keywords: cleanObservationKeywordsForNeed(
-      [
-        ...strategyKeywordList,
-        ...aiProfileKeywords
-      ],
-      needText,
-      OBSERVATION_KEYWORD_LIMIT
-    ),
-    customQueries: []
+    excludeTerms: uniqueStrings((strategy.excludeTerms || []).map(normalizeObservationExcludeTerm).filter(Boolean), 12),
+    keywords: strategyKeywordList,
+    customQueries: relevantCustomQueries
   };
-  searchLogic.customQueries = executableObservationCustomQueries(
-    {
-      ...plan,
-      requirements: Array.isArray(plan.requirements) ? plan.requirements : []
-    },
-    {
-      ...searchLogic,
-      customQueries: combinedCustomQueries
-    }
-  );
   return {
     ...plan,
     strategy: searchLogic,
@@ -3169,6 +2344,214 @@ function exportProjects(format, filters) {
   return JSON.stringify(payload, null, 2);
 }
 
+async function executeProjectAnalysisTask(input = {}) {
+  const observationPlanId = String(input.observationPlanId || "").trim();
+  const project = storage.getProject(input.fullName, { observationPlanId });
+  if (!project) throw new Error("Project not found");
+  const settings = storage.getSettings(true);
+  const provider = activeProvider(settings);
+  if (!provider?.apiKey) throw new Error("请先在设置里配置并保存可用的 AI 模型 API Key");
+  await assertProviderNetworkTarget(provider);
+  const analysisContext = {
+    method: String(input.method || "balanced").slice(0, 40),
+    methodLabel: String(input.methodLabel || "").slice(0, 80),
+    userNeed: String(input.userNeed || "").slice(0, 1000)
+  };
+  const analysis = await analyzeWithProvider({
+    provider,
+    project,
+    language: settings.language || "zh",
+    context: analysisContext
+  });
+  const savedProject = storage.setAnalysis(input.fullName, analysis.result, {
+    raw: analysis.raw,
+    provider: provider?.name || "",
+    model: provider?.model || "",
+    language: settings.language || "zh",
+    context: analysisContext,
+    observationPlanId
+  });
+  return {
+    provider: provider?.name || "",
+    model: provider?.model || "",
+    analysis: savedProject.analysis,
+    project: savedProject
+  };
+}
+
+async function executeObservationPlanGenerationTask(input = {}) {
+  const settings = storage.getSettings(true);
+  const provider = activeProvider(settings);
+  const language = settings.language || "zh";
+  const planName = String(input.name || "").trim();
+  const latestNeed = uniqueStrings([input.idea, input.detailedNeed], 2).join("\n").trim();
+  if (!planName || !latestNeed) throw new Error("方案名称和详细需求不能为空");
+  if (!provider?.apiKey) throw new Error("请先在设置里配置并保存可用的 AI 模型 API Key 后再生成观察方案");
+  await assertProviderNetworkTarget(provider);
+
+  const requirementRecords = draftObservationRequirements(latestNeed);
+  const combinedNeed = requirementRecords.map((item) => item.text).filter(Boolean).join("\n") || latestNeed;
+  const combinedPrompt = [`方案名称：${planName}`, `详细需求：${latestNeed}`].join("\n");
+  const researchNeed = combinedPrompt;
+  const baseResearchContext = await researchObservationPlanContext(researchNeed);
+  const githubActivity = await probeGithubActivityForObservationNeed(researchNeed, effectiveGithubToken()).catch((error) => ({
+    terms: githubActivityProbeTerms(researchNeed),
+    probes: [],
+    maxTotalCount: 0,
+    activityLevel: "unknown",
+    errors: [error?.message || "GitHub activity probe failed"]
+  }));
+  const githubSamples = await sampleGithubObservationSignals(researchNeed, effectiveGithubToken(), githubActivity.terms || []);
+  const researchContext = {
+    ...baseResearchContext,
+    githubActivity,
+    githubSamples
+  };
+  researchContext.domainModel = buildObservationDomainModel(researchNeed, researchContext);
+  researchContext.metacognition = researchContext.domainModel;
+  const promptResearchContext = compactObservationResearchContextForPrompt(researchContext);
+  const result = await generateObservationPlanWithProvider({
+    provider,
+    language,
+    payload: {
+      coreKeyword: planName,
+      name: planName,
+      idea: combinedPrompt,
+      detailedNeed: combinedNeed,
+      latestNeed,
+      requirementHistory: requirementRecords,
+      researchContext: promptResearchContext
+    }
+  });
+  const providerPlan = {
+    ...result.plan,
+    name: planName,
+    nameEn: planName
+  };
+  const completedPlan = completeObservationPlanQueries({
+    ...providerPlan,
+    requirements: requirementRecords.length ? requirementRecords : providerPlan.requirements || []
+  });
+  if (!completedPlan.searchLogic?.customQueries?.length) {
+    throw new Error("AI 生成方案未返回可执行 GitHub 检索逻辑，请补充需求后重试");
+  }
+  return {
+    ok: true,
+    source: "ai",
+    raw: result.raw,
+    plan: completedPlan
+  };
+}
+
+function taskRunner(task = {}) {
+  if (task.type === "scan") return () => runScan(task.input || {});
+  if (task.type === "analysis") return () => executeProjectAnalysisTask(task.input || {});
+  if (task.type === "plan-generation") return () => executeObservationPlanGenerationTask(task.input || {});
+  return null;
+}
+
+function startDurableTask(task) {
+  if (!task?.id || runningTasks.has(task.id)) return task;
+  if (activeDurableTaskCount >= MAX_DURABLE_TASK_CONCURRENCY) return storage.updateTask(task.id, { status: "queued" });
+  const runner = taskRunner(task);
+  if (!runner) return storage.updateTask(task.id, { status: "failed", error: `Unsupported task type: ${task.type}`, finishedAt: new Date().toISOString() });
+  const startedAt = new Date().toISOString();
+  const running = storage.updateTask(task.id, {
+    status: "running",
+    error: "",
+    attempts: Number(task.attempts || 0) + 1,
+    startedAt,
+    finishedAt: ""
+  });
+  activeDurableTaskCount += 1;
+  const promise = Promise.resolve()
+    .then(runner)
+    .then((result) =>
+      storage.updateTask(task.id, {
+        status: "completed",
+        result,
+        error: "",
+        finishedAt: new Date().toISOString()
+      })
+    )
+    .catch((error) =>
+      storage.updateTask(task.id, {
+        status: "failed",
+        result: null,
+        error: error?.message || "Task failed",
+        finishedAt: new Date().toISOString()
+      })
+    )
+    .finally(() => {
+      runningTasks.delete(task.id);
+      activeDurableTaskCount = Math.max(0, activeDurableTaskCount - 1);
+      pumpDurableTaskQueue();
+    });
+  runningTasks.set(task.id, promise);
+  return running;
+}
+
+function pumpDurableTaskQueue() {
+  if (activeDurableTaskCount >= MAX_DURABLE_TASK_CONCURRENCY) return;
+  const queued = storage.listTasks({ status: "queued", limit: MAX_DURABLE_TASK_CONCURRENCY - activeDurableTaskCount });
+  queued.forEach(startDurableTask);
+}
+
+function enqueueDurableTask(type, key, input = {}) {
+  const existing = storage
+    .listTasks({ type, key, limit: 10 })
+    .find((task) => task.status === "queued" || task.status === "running");
+  if (existing) {
+    if (existing.status === "queued") startDurableTask(existing);
+    return publicTask(storage.getTask(existing.id));
+  }
+  const task = storage.createTask({ type, key, input, status: "queued" });
+  startDurableTask(task);
+  return publicTask(storage.getTask(task.id));
+}
+
+async function waitForDurableTask(task) {
+  let current = storage.getTask(task.id);
+  while (current && (current.status === "queued" || current.status === "running")) {
+    const promise = runningTasks.get(task.id);
+    if (promise) await promise;
+    else await new Promise((resolve) => setTimeout(resolve, 250));
+    current = storage.getTask(task.id);
+  }
+  const completed = current;
+  if (completed?.status === "failed") throw new Error(completed.error || "Task failed");
+  return completed?.result;
+}
+
+async function enqueueScheduledScan(options = {}) {
+  const activePlan = storage.getObservationPlan();
+  const task = enqueueDurableTask("scan", "scan", {
+    ...options,
+    observationPlanId: activePlan.id
+  });
+  return waitForDurableTask(task);
+}
+
+function resumeDurableTasks() {
+  const recovered = storage.recoverInterruptedTasks();
+  const queued = storage.listTasks({ status: "queued", limit: 120 });
+  const candidates = [...recovered, ...queued];
+  const seen = new Set();
+  for (const task of candidates) {
+    if (seen.has(task.id)) continue;
+    seen.add(task.id);
+    if (Number(task.attempts || 0) >= 3) {
+      storage.updateTask(task.id, {
+        status: "failed",
+        error: "Task was interrupted too many times",
+        finishedAt: new Date().toISOString()
+      });
+      continue;
+    }
+    startDurableTask(task);
+  }
+}
+
 async function runScan(options = {}) {
   if (scanInProgress) {
     return {
@@ -3186,7 +2569,8 @@ async function runScan(options = {}) {
     const pagesPerProfile = Math.max(1, Math.min(Number(options.pagesPerProfile ?? config.githubSearchPages), 8));
     const plannedTrendLimit = Math.max(0, Math.min(Number(options.trendCount ?? config.githubTrendLimit ?? 80), maxRepos));
     const language = storage.getSettings(false).language || "zh";
-    const activePlan = hydrateObservationPlanSearchLogic(storage.getObservationPlan(), language);
+    const requestedPlanId = String(options.observationPlanId || "").trim();
+    const activePlan = hydrateObservationPlanSearchLogic(storage.getObservationPlan(requestedPlanId), language);
     const isDefaultObservationPlan = activePlan.id === "default";
     let trendingMaxRepos = isDefaultObservationPlan ? Math.max(0, Math.min(Number(options.trendingCount ?? config.githubTrendingMaxRepos ?? 60), 120)) : 0;
     const trendingPerPeriod = Math.max(5, Math.min(Number(options.trendingPerPeriod ?? config.githubTrendingPerPeriod ?? 25), 50));
@@ -3209,7 +2593,9 @@ async function runScan(options = {}) {
       progressUnits: 5
     });
     await refreshProviderCatalogIfStale(false);
-    const activeMemory = storage.getMemory();
+    const activeMemory = requestedPlanId
+      ? storage.getObservationPlan(requestedPlanId, { includeMemory: true }).memory
+      : storage.getMemory();
     const previous = previousProjectMap();
     const profiles = applyMemoryToQueryProfiles(buildQueryProfiles(isDefaultObservationPlan ? null : activePlan), activeMemory);
     setScanProgress({
@@ -3631,6 +3017,31 @@ async function routeStatic(req, res, url) {
 }
 
 async function routeApi(req, res, url) {
+  if (req.method === "GET" && url.pathname === "/api/tasks") {
+    sendJson(res, 200, {
+      tasks: storage
+        .listTasks({
+          type: url.searchParams.get("type") || "",
+          status: url.searchParams.get("status") || "",
+          key: url.searchParams.get("key") || "",
+          limit: url.searchParams.get("limit") || 30
+        })
+        .map(publicTask)
+    });
+    return;
+  }
+
+  if (req.method === "GET" && url.pathname.startsWith("/api/tasks/")) {
+    const id = decodeURIComponent(url.pathname.slice("/api/tasks/".length));
+    const task = storage.getTask(id);
+    if (!task) {
+      sendError(res, 404, "Task not found");
+      return;
+    }
+    sendJson(res, 200, { task: publicTask(task) });
+    return;
+  }
+
   if (req.method === "GET" && url.pathname === "/api/health") {
     sendJson(res, 200, {
       ok: true,
@@ -3659,6 +3070,9 @@ async function routeApi(req, res, url) {
   if (req.method === "POST" && url.pathname === "/api/settings") {
     try {
       const body = await parseBody(req);
+      for (const provider of body.llmProviders || []) {
+        if (provider.baseUrl) await assertProviderNetworkTarget(provider);
+      }
       storage.updateSettings(body);
       const keyValidation = await validateSavedServiceKeys();
       sendJson(res, 200, {
@@ -3752,17 +3166,8 @@ async function routeApi(req, res, url) {
       const body = await parseBody(req);
       const settings = storage.getSettings(true);
       const provider = activeProvider(settings);
-      const language = settings.language || "zh";
       const planName = String(body.name || "").trim();
       const latestNeed = uniqueStrings([body.idea, body.detailedNeed], 2).join("\n").trim();
-      const requirementRecords = draftObservationRequirements(latestNeed);
-      const combinedNeed = requirementRecords.map((item) => item.text).filter(Boolean).join("\n") || latestNeed;
-      const combinedPrompt = [
-        planName ? `方案名称：${planName}` : "",
-        latestNeed ? `详细需求：${latestNeed}` : ""
-      ]
-        .filter(Boolean)
-        .join("\n");
       if (!planName || !latestNeed) {
         sendError(res, 400, "方案名称和详细需求不能为空");
         return;
@@ -3771,64 +3176,12 @@ async function routeApi(req, res, url) {
         sendError(res, 400, "请先在设置里配置并保存可用的 AI 模型 API Key 后再生成观察方案");
         return;
       }
-      const researchNeed = combinedPrompt || latestNeed || planName;
-      const baseResearchContext = await researchObservationPlanContext(researchNeed);
-      const githubActivity = await probeGithubActivityForObservationNeed(researchNeed, effectiveGithubToken()).catch((error) => ({
-        terms: githubActivityProbeTerms(researchNeed),
-        probes: [],
-        maxTotalCount: 0,
-        activityLevel: "unknown",
-        errors: [error?.message || "GitHub activity probe failed"]
-      }));
-      const githubSamples = await sampleGithubObservationSignals(researchNeed, effectiveGithubToken(), githubActivity.terms || []);
-      const researchContext = {
-        ...baseResearchContext,
-        githubActivity,
-        githubSamples
-      };
-      researchContext.domainModel = buildObservationDomainModel(researchNeed, researchContext);
-      researchContext.metacognition = researchContext.domainModel;
-      const promptResearchContext = compactObservationResearchContextForPrompt(researchContext);
-      const coreKeyword = planName || explicitNeedTerms(researchNeed)[0] || "";
-      try {
-        const result = await generateObservationPlanWithProvider({
-          provider,
-          language,
-          payload: {
-            coreKeyword,
-            name: planName,
-            idea: combinedPrompt || latestNeed || combinedNeed,
-            detailedNeed: combinedNeed,
-            latestNeed,
-            requirementHistory: requirementRecords || [],
-            researchContext: promptResearchContext
-          }
-        });
-        const providerPlan = {
-          ...result.plan,
-          name: planName || result.plan.name,
-          nameEn: planName || result.plan.nameEn || result.plan.name
-        };
-        const completedPlan = completeObservationPlanQueries({
-          ...providerPlan,
-          requirements: requirementRecords.length ? requirementRecords : providerPlan.requirements || []
-        });
-        if (!completedPlan.searchLogic?.customQueries?.length) {
-          throw new Error("AI 生成方案未返回可执行 GitHub 检索逻辑，请补充需求后重试");
-        }
-        sendJson(res, 200, {
-          ok: true,
-          source: "ai",
-          raw: result.raw,
-          plan: completedPlan
-        });
-      } catch (aiError) {
-        const message =
-          aiError.message === "AI 生成方案未返回可执行 GitHub 检索逻辑，请补充需求后重试"
-            ? aiError.message
-            : "AI 生成方案失败，请稍后重试或检查模型配置";
-        sendError(res, 502, message, { providerMessage: aiError.message });
-      }
+      const task = enqueueDurableTask("plan-generation", `plan:${planName.toLowerCase()}`, {
+        name: planName.slice(0, 80),
+        idea: String(body.idea || "").slice(0, 6000),
+        detailedNeed: String(body.detailedNeed || "").slice(0, 6000)
+      });
+      sendJson(res, 202, { status: "started", task });
     } catch (error) {
       sendError(res, 400, error.message);
     }
@@ -3843,9 +3196,33 @@ async function routeApi(req, res, url) {
 
   if (req.method === "GET" && url.pathname === "/api/local-snapshot") {
     sendJson(res, 200, {
-      ...storage.exportLocalSnapshot(),
+      ...storage.exportLocalSnapshot({ includeProjects: false, includeLeaderboards: false, includeComputed: false }),
       config: publicConfig(config)
     });
+    return;
+  }
+
+  if (req.method === "GET" && url.pathname === "/api/local-projects") {
+    sendJson(
+      res,
+      200,
+      storage.exportLocalProjectPage({
+        cursor: url.searchParams.get("cursor") || "",
+        limit: url.searchParams.get("limit") || 250
+      })
+    );
+    return;
+  }
+
+  if (req.method === "GET" && url.pathname === "/api/local-leaderboards") {
+    sendJson(
+      res,
+      200,
+      storage.exportLocalLeaderboardPage({
+        cursor: url.searchParams.get("cursor") || "",
+        limit: url.searchParams.get("limit") || 10
+      })
+    );
     return;
   }
 
@@ -4106,6 +3483,7 @@ async function routeApi(req, res, url) {
       const harness = storage.evaluateMemoryHarness();
       const settings = storage.getSettings(true);
       const provider = activeProvider(settings);
+      await assertProviderNetworkTarget(provider);
       const memory = storage.getMemory();
       const payload = {
         harness,
@@ -4202,13 +3580,17 @@ async function routeApi(req, res, url) {
     try {
       const body = await parseBody(req);
       if (scanInProgress) {
-        sendJson(res, 200, { status: "already-running" });
+        const existing = storage.listTasks({ type: "scan", status: "running", limit: 1 })[0] || null;
+        sendJson(res, 200, { status: "already-running", task: existing ? publicTask(existing) : null });
         return;
       }
-      runScan(body).catch((error) => {
-        console.error(`Background scan failed: ${error.message}`);
+      const activePlan = storage.getObservationPlan();
+      const task = enqueueDurableTask("scan", "scan", {
+        ...body,
+        observationPlanId: activePlan.id,
+        mode: body.mode || "manual"
       });
-      sendJson(res, 202, { status: "started" });
+      sendJson(res, 202, { status: "started", task });
     } catch (error) {
       sendError(res, isGithubAuthError(error) ? 401 : isGithubRateLimitError(error) ? 429 : 502, "Scan failed", { message: error.message });
     }
@@ -4216,9 +3598,11 @@ async function routeApi(req, res, url) {
   }
 
   if (req.method === "GET" && url.pathname === "/api/scan/status") {
+    const task = storage.listTasks({ type: "scan", limit: 1 })[0] || null;
     sendJson(res, 200, {
       ...scanProgress,
-      running: scanInProgress
+      running: scanInProgress || task?.status === "running" || task?.status === "queued",
+      task: task ? publicTask(task) : null
     });
     return;
   }
@@ -4324,30 +3708,18 @@ async function routeApi(req, res, url) {
       }
       const settings = storage.getSettings(true);
       const provider = activeProvider(settings);
-      const analysisContext = {
+      if (!provider?.apiKey) {
+        sendError(res, 400, "请先在设置里配置并保存可用的 AI 模型 API Key");
+        return;
+      }
+      const task = enqueueDurableTask("analysis", `analysis:${String(body.fullName || "").toLowerCase()}`, {
+        fullName: String(body.fullName || "").slice(0, 240),
         method: String(body.method || "balanced").slice(0, 40),
         methodLabel: String(body.methodLabel || "").slice(0, 80),
-        userNeed: String(body.userNeed || "").slice(0, 1000)
-      };
-      const analysis = await analyzeWithProvider({
-        provider,
-        project,
-        language: settings.language || "zh",
-        context: analysisContext
+        userNeed: String(body.userNeed || "").slice(0, 1000),
+        observationPlanId: storage.getObservationPlan().id
       });
-      const savedProject = storage.setAnalysis(body.fullName, analysis.result, {
-        raw: analysis.raw,
-        provider: provider?.name || "",
-        model: provider?.model || "",
-        language: settings.language || "zh",
-        context: analysisContext
-      });
-      sendJson(res, 200, {
-        provider: provider?.name || "",
-        model: provider?.model || "",
-        analysis: savedProject.analysis,
-        project: savedProject
-      });
+      sendJson(res, 202, { status: "started", task });
     } catch (error) {
       sendError(res, 400, error.message);
     }
@@ -4373,6 +3745,7 @@ async function routeApi(req, res, url) {
       const providerId = body.providerId || "deepseek";
       const settings = storage.getSettings(true);
       const provider = getProviderOrThrow(settings, providerId);
+      await assertProviderNetworkTarget(provider);
       const models = await listProviderModels(provider);
       const nextModel = models.includes(provider.model) ? provider.model : models[0] || provider.model || "";
       storage.updateSettings(
@@ -4400,6 +3773,7 @@ async function routeApi(req, res, url) {
       const providerId = body.providerId || "deepseek";
       const settings = storage.getSettings(true);
       const provider = getProviderOrThrow(settings, providerId);
+      await assertProviderNetworkTarget(provider);
       const result = await testProviderConnection(provider);
       storage.updateSettings(
         mergeProviderUpdate(settings, providerId, {
@@ -4516,7 +3890,7 @@ async function handle(req, res) {
       }
 
       if (config.authToken && !isAuthorized(req, url, config.authToken)) {
-        const authLimit = authFailureRateLimiter(`auth:${clientIp(req)}`);
+        const authLimit = authFailureRateLimiter(`auth:${clientIp(req, config.trustProxy)}`);
         if (!authLimit.allowed) {
           sendRateLimited(res, { ...authLimit, scope: "auth" });
           return;
@@ -4526,7 +3900,7 @@ async function handle(req, res) {
       }
 
       // CSRF: block cross-origin state-changing requests from browsers.
-      if (!isSafeMethod(req.method) && !originAllowed(req)) {
+      if (!isSafeMethod(req.method) && !originAllowed(req, { trustProxy: config.trustProxy, publicOrigin: config.publicOrigin })) {
         sendJson(res, 403, { error: "Forbidden", reason: "cross-origin" });
         return;
       }
@@ -4546,8 +3920,6 @@ async function handle(req, res) {
   }
 }
 
-ensureDemoData();
-
 const server = http.createServer(handle);
 server.headersTimeout = 10_000;
 server.requestTimeout = 30_000;
@@ -4558,35 +3930,57 @@ server.on("clientError", (_error, socket) => {
     socket.end("HTTP/1.1 400 Bad Request\r\nConnection: close\r\n\r\n");
   }
 });
-server.listen(config.port, config.host, () => {
-  console.log(`StarVault Imprint listening on http://${config.host}:${config.port}`);
-  console.log(
-    `GitHub token: ${effectiveGithubToken() ? "configured" : "not configured"}; Tavily: ${
-      effectiveTavilyKey() ? "configured" : "not configured"
-    }`
-  );
-  if (!config.authToken && !["127.0.0.1", "localhost", "::1"].includes(config.host)) {
-    console.warn("Security warning: AUTH_TOKEN is recommended when binding outside localhost.");
+let runtimeInitialized = false;
+let shutdownHandlersInstalled = false;
+
+function initializeRuntime() {
+  if (runtimeInitialized) return;
+  ensureDemoData();
+  resumeDurableTasks();
+  runtimeInitialized = true;
+}
+
+function startServer() {
+  initializeRuntime();
+  if (!server.listening) {
+    server.listen(config.port, config.host, () => {
+      console.log(`StarVault Imprint listening on http://${config.host}:${config.port}`);
+      console.log(
+        `GitHub token: ${effectiveGithubToken() ? "configured" : "not configured"}; Tavily: ${
+          effectiveTavilyKey() ? "configured" : "not configured"
+        }`
+      );
+    });
   }
-});
+  if (!scheduler) {
+    scheduler = startScheduler({
+      scanFn: enqueueScheduledScan,
+      scanHour: config.scanHour,
+      runOnBoot: config.runScanOnBoot,
+      timeZone: config.timeZone,
+      initialLastRunDate: storage.getRuntimeState("scheduler")?.lastRunDate || "",
+      onLastRunDate: (lastRunDate) => storage.setRuntimeState("scheduler", { lastRunDate })
+    });
+  }
+  if (!shutdownHandlersInstalled) {
+    const shutdown = () => {
+      scheduler?.stop();
+      if (server.listening) server.close(() => process.exit(0));
+      else process.exit(0);
+    };
+    process.on("SIGTERM", shutdown);
+    process.on("SIGINT", shutdown);
+    shutdownHandlersInstalled = true;
+  }
+  return server;
+}
 
-scheduler = startScheduler({
-  scanFn: runScan,
-  scanHour: config.scanHour,
-  runOnBoot: config.runScanOnBoot
-});
-
-process.on("SIGTERM", () => {
-  scheduler?.stop();
-  server.close(() => process.exit(0));
-});
-
-process.on("SIGINT", () => {
-  scheduler?.stop();
-  server.close(() => process.exit(0));
-});
+if (require.main === module) startServer();
 
 module.exports = {
+  handle,
+  initializeRuntime,
   runScan,
-  server
+  server,
+  startServer
 };

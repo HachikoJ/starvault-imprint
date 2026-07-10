@@ -2393,6 +2393,10 @@ const GUIDE_TOUR_STEPS = [
 const INDEXEDDB_SNAPSHOT_MIN_AGE_MS = 5 * 60 * 1000;
 const INDEXEDDB_SNAPSHOT_BOOT_DELAY_MS = 1800;
 const INDEXEDDB_SNAPSHOT_MUTATION_DELAY_MS = 2400;
+const INDEXEDDB_PROJECT_SYNC_REVISION_KEY = "serverProjectSyncRevision";
+const INDEXEDDB_PROJECT_SYNC_PAGE_SIZE = 250;
+const INDEXEDDB_LEADERBOARD_SYNC_REVISION_KEY = "serverLeaderboardSyncRevision";
+const INDEXEDDB_LEADERBOARD_SYNC_PAGE_SIZE = 10;
 const SERVICE_KEY_ISSUE_LABELS = {
   github: "Token 已过期",
   tavily: "Key 无效",
@@ -2608,6 +2612,7 @@ const state = {
   scanEtaDisplaySeconds: null,
   scanEtaUpdatedAt: 0,
   scanProgressTimer: null,
+  durableTasksRestored: false,
   scanIdleTimer: null,
   projects: [],
   dismissedProjects: [],
@@ -4121,6 +4126,18 @@ function escapeHtml(value) {
     .replaceAll("'", "&#039;");
 }
 
+function safeExternalUrl(value, options = {}) {
+  try {
+    const url = new URL(String(value || ""));
+    if (!["http:", "https:"].includes(url.protocol) || url.username || url.password) return "";
+    const hosts = Array.isArray(options.hosts) ? options.hosts.map((host) => String(host).toLowerCase()) : [];
+    if (hosts.length && !hosts.some((host) => url.hostname.toLowerCase() === host || url.hostname.toLowerCase().endsWith(`.${host}`))) return "";
+    return url.href;
+  } catch {
+    return "";
+  }
+}
+
 function cssEscape(value) {
   return window.CSS?.escape ? CSS.escape(String(value || "")) : String(value || "").replaceAll('"', '\\"');
 }
@@ -4622,14 +4639,14 @@ function setAuthToken(token) {
   }
 }
 
-// Allow bootstrapping the token via ?token= on first page load.
-(function bootstrapToken() {
+// Remove legacy query-string tokens from browser history. Authentication tokens
+// are accepted only through the in-app credential flow and request headers.
+(function cleanLegacyTokenParameter() {
   try {
-    const params = new URLSearchParams(window.location.search);
-    const qToken = params.get("token");
-    if (qToken) {
-      setAuthToken(qToken.trim());
-    }
+    const url = new URL(window.location.href);
+    if (!url.searchParams.has("token")) return;
+    url.searchParams.delete("token");
+    window.history.replaceState(window.history.state, "", `${url.pathname}${url.search}${url.hash}`);
   } catch {
     /* ignore */
   }
@@ -4696,6 +4713,51 @@ async function api(path, options = {}) {
   return json;
 }
 
+const DURABLE_TASK_IDS_KEY = "starvault.pendingTaskIds";
+
+function durableTaskIds() {
+  try {
+    const parsed = JSON.parse(localStorage.getItem(DURABLE_TASK_IDS_KEY) || "[]");
+    return Array.isArray(parsed) ? parsed.map(String).filter(Boolean) : [];
+  } catch {
+    return [];
+  }
+}
+
+function setDurableTaskIds(ids = []) {
+  try {
+    const unique = Array.from(new Set(ids.map(String).filter(Boolean))).slice(-30);
+    if (unique.length) localStorage.setItem(DURABLE_TASK_IDS_KEY, JSON.stringify(unique));
+    else localStorage.removeItem(DURABLE_TASK_IDS_KEY);
+  } catch {
+    /* ignore */
+  }
+}
+
+function rememberDurableTask(task) {
+  if (!task?.id) return;
+  setDurableTaskIds([...durableTaskIds(), task.id]);
+}
+
+function forgetDurableTask(id) {
+  setDurableTaskIds(durableTaskIds().filter((taskId) => taskId !== id));
+}
+
+async function waitForDurableTaskResponse(response) {
+  if (!response?.task?.id) return response;
+  const taskId = response.task.id;
+  rememberDurableTask(response.task);
+  let task = response.task;
+  while (task.status === "queued" || task.status === "running") {
+    await new Promise((resolve) => setTimeout(resolve, 850));
+    const latest = await api(`/api/tasks/${encodeURIComponent(taskId)}`);
+    task = latest.task;
+  }
+  forgetDurableTask(taskId);
+  if (task.status === "failed") throw new Error(task.error || "Task failed");
+  return task.result;
+}
+
 function indexedDbStore() {
   return window.StarVaultIndexedDB && window.StarVaultIndexedDB.isSupported?.() ? window.StarVaultIndexedDB : null;
 }
@@ -4711,8 +4773,64 @@ async function refreshIndexedDbSnapshot(options = {}) {
   state.indexedDbSnapshotSyncing = true;
   try {
     const snapshot = await api("/api/local-snapshot", { skipIndexedDbSync: true });
-    const meta = await store.putSnapshot(snapshot);
+    const previousProjectRevision = String((await store.getValue(INDEXEDDB_PROJECT_SYNC_REVISION_KEY).catch(() => "")) || "");
+    const previousLeaderboardRevision = String((await store.getValue(INDEXEDDB_LEADERBOARD_SYNC_REVISION_KEY).catch(() => "")) || "");
+    const localProjectCount = await store.countProjects().catch(() => 0);
+    const localLeaderboardCount = await store.countLeaderboards().catch(() => 0);
+    const expectedProjectCount = Number(snapshot?.counts?.projects || 0);
+    const expectedLeaderboardCount = Number(snapshot?.counts?.leaderboards || 0);
+    const projectRevision = String(snapshot?.sync?.projectRevision || "");
+    const leaderboardRevision = String(snapshot?.sync?.leaderboardRevision || "");
+    const meta = await store.putSnapshot(snapshot, { preserveProjects: true, preserveLeaderboards: true });
     state.indexedDbSnapshotMeta = meta;
+    const shouldSyncProjects =
+      options.syncProjects === true ||
+      localProjectCount !== expectedProjectCount ||
+      previousProjectRevision !== projectRevision;
+    if (shouldSyncProjects) {
+      const retainedKeys = [];
+      let cursor = "";
+      let done = false;
+      while (!done) {
+        const params = new URLSearchParams({ limit: String(INDEXEDDB_PROJECT_SYNC_PAGE_SIZE) });
+        if (cursor) params.set("cursor", cursor);
+        const page = await api(`/api/local-projects?${params.toString()}`, { skipIndexedDbSync: true });
+        if (String(page.projectRevision || "") !== projectRevision) {
+          throw new Error("Project data changed during IndexedDB synchronization");
+        }
+        const items = Array.isArray(page.items) ? page.items : [];
+        await store.putProjects(items);
+        retainedKeys.push(...items.map((project) => String(project?.fullName || "").toLowerCase()).filter(Boolean));
+        cursor = String(page.nextCursor || "");
+        done = Boolean(page.done) || !items.length;
+      }
+      await store.deleteProjectsExcept(retainedKeys);
+      await store.putValue(INDEXEDDB_PROJECT_SYNC_REVISION_KEY, projectRevision);
+    }
+    const shouldSyncLeaderboards =
+      options.syncLeaderboards === true ||
+      localLeaderboardCount !== expectedLeaderboardCount ||
+      previousLeaderboardRevision !== leaderboardRevision;
+    if (shouldSyncLeaderboards) {
+      const retainedIds = [];
+      let cursor = "";
+      let done = false;
+      while (!done) {
+        const params = new URLSearchParams({ limit: String(INDEXEDDB_LEADERBOARD_SYNC_PAGE_SIZE) });
+        if (cursor) params.set("cursor", cursor);
+        const page = await api(`/api/local-leaderboards?${params.toString()}`, { skipIndexedDbSync: true });
+        if (String(page.leaderboardRevision || "") !== leaderboardRevision) {
+          throw new Error("Leaderboard data changed during IndexedDB synchronization");
+        }
+        const items = Array.isArray(page.items) ? page.items : [];
+        await store.putLeaderboardRecords(items);
+        retainedIds.push(...items.map((record) => String(record?.id || "")).filter(Boolean));
+        cursor = String(page.nextCursor || "");
+        done = Boolean(page.done) || !items.length;
+      }
+      await store.deleteLeaderboardsExcept(retainedIds);
+      await store.putValue(INDEXEDDB_LEADERBOARD_SYNC_REVISION_KEY, leaderboardRevision);
+    }
     return meta;
   } finally {
     state.indexedDbSnapshotSyncing = false;
@@ -4733,10 +4851,20 @@ function handleIndexedDbApiSuccess(path, options = {}, json = null) {
   const store = indexedDbStore();
   if (!store || !String(path || "").startsWith("/api/")) return;
   if (path === "/api/local-snapshot" && json?.schema === "starvault-indexeddb-snapshot/v1") {
-    store.putSnapshot(json).then((meta) => {
+    store.putSnapshot(json, { preserveProjects: true, preserveLeaderboards: true }).then((meta) => {
       state.indexedDbSnapshotMeta = meta;
     }).catch(() => {});
     return;
+  }
+  const projectItems = Array.isArray(json?.items)
+    ? json.items
+    : json?.project?.fullName
+      ? [json.project]
+      : json?.fullName
+        ? [json]
+        : [];
+  if (projectItems.length && ["/api/project", "/api/projects", "/api/leaderboard"].some((prefix) => String(path).startsWith(prefix))) {
+    store.putProjects(projectItems).catch(() => {});
   }
   const method = String(options.method || "GET").toUpperCase();
   if (method !== "GET") {
@@ -6595,16 +6723,21 @@ function activeObservationPlanLabel() {
   return observationPlanLabel(active) || t("defaultObservationPlan");
 }
 
-function renderProjectPoolHeading(summaryText = "") {
+function renderProjectPoolHeading(summaryContent = "") {
   const planLabel = activeObservationPlanLabel();
-  const summary = String(summaryText || "").trim();
+  const summary = Array.isArray(summaryContent)
+    ? summaryContent
+        .filter((item) => item?.text)
+        .map((item, index) => `${index ? '<span class="project-count-separator">·</span>' : ""}<span class="${escapeHtml(item.className || "")}">${escapeHtml(item.text)}</span>`)
+        .join("")
+    : escapeHtml(String(summaryContent || "").trim());
   return `
     <button class="project-plan-chip" type="button" data-action="open-observation-plans" aria-label="${escapeHtml(t("activeObservationPlan"))}：${escapeHtml(planLabel)}">
       ${iconSvg("settings")}
       <span>${escapeHtml(t("activeObservationPlan"))}</span>
       <strong>${escapeHtml(planLabel)}</strong>
     </button>
-    ${summary ? `<span class="project-count-summary">${escapeHtml(summary)}</span>` : ""}
+    ${summary ? `<span class="project-count-summary">${summary}</span>` : ""}
   `;
 }
 
@@ -6945,7 +7078,7 @@ function renderLeaderboard(leaderboard) {
                 <div class="leaderboard-actions">
                   ${favoriteActionButton(project, "compact")}
                   ${dismissProjectButton(project, "compact", "leaderboard")}
-                  <a class="repo-link repo-link-icon has-tooltip" href="${escapeHtml(project.url)}" target="_blank" rel="noreferrer" aria-label="${escapeHtml(t("openGitHub"))}" data-tooltip="${escapeHtml(t("openGitHub"))}" data-memory-link="open_github" data-full-name="${escapeHtml(project.fullName)}">${iconOnly("external", t("openGitHub"))}</a>
+                  <a class="repo-link repo-link-icon has-tooltip" href="${escapeHtml(safeExternalUrl(project.url, { hosts: ["github.com"] }))}" target="_blank" rel="noopener noreferrer" aria-label="${escapeHtml(t("openGitHub"))}" data-tooltip="${escapeHtml(t("openGitHub"))}" data-memory-link="open_github" data-full-name="${escapeHtml(project.fullName)}">${iconOnly("external", t("openGitHub"))}</a>
                 </div>
               </div>
             </article>
@@ -7576,7 +7709,10 @@ function renderProjects(response) {
     return;
   }
   const total = state.projectPool.total;
-  elements.projectCount.innerHTML = renderProjectPoolHeading(`${t("matchesShort")} ${fmtNumber(total)} · ${t("previewShort")} ${fmtNumber(projects.length)}`);
+  elements.projectCount.innerHTML = renderProjectPoolHeading([
+    { className: "project-match-count", text: `${t("matchesShort")} ${fmtNumber(total)}` },
+    { className: "project-preview-count", text: `${t("previewShort")} ${fmtNumber(projects.length)}` }
+  ]);
 
   const rowsHtml = projects
     .map((project) => {
@@ -7615,7 +7751,7 @@ function renderProjects(response) {
             <div class="repo-primary-actions">
               ${favoriteActionButton(project, "compact")}
               ${dismissProjectButton(project, "compact")}
-              <a class="repo-link repo-link-icon has-tooltip" href="${escapeHtml(project.url)}" target="_blank" rel="noreferrer" aria-label="${escapeHtml(t("openGitHub"))}" data-tooltip="${escapeHtml(t("openGitHub"))}" data-memory-link="open_github" data-full-name="${escapeHtml(project.fullName)}">${iconOnly("external", t("openGitHub"))}</a>
+              <a class="repo-link repo-link-icon has-tooltip" href="${escapeHtml(safeExternalUrl(project.url, { hosts: ["github.com"] }))}" target="_blank" rel="noopener noreferrer" aria-label="${escapeHtml(t("openGitHub"))}" data-tooltip="${escapeHtml(t("openGitHub"))}" data-memory-link="open_github" data-full-name="${escapeHtml(project.fullName)}">${iconOnly("external", t("openGitHub"))}</a>
             </div>
           </div>
         </article>
@@ -7829,6 +7965,8 @@ function renderDetail(project) {
   }
 
   const risk = project.scores?.risk || 0;
+  const githubUrl = safeExternalUrl(project.url, { hosts: ["github.com"] });
+  const homepageUrl = safeExternalUrl(project.homepage);
   const semanticProfile = projectSemanticProfile(project);
   const semanticCards = [semanticProfile.problem, semanticProfile.audience, semanticProfile.shape, semanticProfile.scene]
     .map(
@@ -7910,12 +8048,12 @@ function renderDetail(project) {
         </div>
       `
     : "";
-  const homepageLabel = project.homepage
+  const homepageLabel = homepageUrl
     ? (() => {
         try {
-          return new URL(project.homepage).hostname;
+          return new URL(homepageUrl).hostname;
         } catch {
-          return String(project.homepage).replace(/^https?:\/\//, "").slice(0, 42);
+          return String(homepageUrl).replace(/^https?:\/\//, "").slice(0, 42);
         }
       })()
     : "";
@@ -7923,7 +8061,7 @@ function renderDetail(project) {
     [t("language"), escapeHtml(languageLabel(project.language))],
     [t("issues"), escapeHtml(fmtNumber(project.openIssues || 0))],
     [t("updated"), escapeHtml(fmtDate(project.pushedAt || project.updatedAt))],
-    [t("projectHomepage"), project.homepage ? `<a href="${escapeHtml(project.homepage)}" target="_blank" rel="noreferrer">${escapeHtml(homepageLabel)}</a>` : `<span>${escapeHtml(t("noHomepage"))}</span>`]
+    [t("projectHomepage"), homepageUrl ? `<a href="${escapeHtml(homepageUrl)}" target="_blank" rel="noopener noreferrer">${escapeHtml(homepageLabel)}</a>` : `<span>${escapeHtml(t("noHomepage"))}</span>`]
   ]
     .map(([label, value]) => `<div><span>${escapeHtml(label)}</span><strong>${value}</strong></div>`)
     .join("");
@@ -7954,8 +8092,8 @@ function renderDetail(project) {
         <div class="detail-action-buttons">
           ${favoriteActionButton(project, "compact")}
           ${dismissProjectButton(project, "compact")}
-          <button class="ghost-button detail-icon-button copy-action ${copyUrlClass} has-tooltip" type="button" data-action="copy-url" data-url="${escapeHtml(project.url)}" data-full-name="${escapeHtml(project.fullName)}" aria-label="${escapeHtml(copyUrlLabel)}" data-tooltip="${escapeHtml(copyUrlLabel)}">${iconOnly(copyUrlDone ? "check" : "copy", copyUrlLabel)}</button>
-          <a class="ghost-button detail-icon-button has-tooltip" href="${escapeHtml(project.url)}" target="_blank" rel="noreferrer" data-memory-link="open_github" data-full-name="${escapeHtml(project.fullName)}" aria-label="${escapeHtml(t("openGitHub"))}" data-tooltip="${escapeHtml(t("openGitHub"))}">${iconOnly("external", t("openGitHub"))}</a>
+          <button class="ghost-button detail-icon-button copy-action ${copyUrlClass} has-tooltip" type="button" data-action="copy-url" data-url="${escapeHtml(githubUrl)}" data-full-name="${escapeHtml(project.fullName)}" aria-label="${escapeHtml(copyUrlLabel)}" data-tooltip="${escapeHtml(copyUrlLabel)}">${iconOnly(copyUrlDone ? "check" : "copy", copyUrlLabel)}</button>
+          <a class="ghost-button detail-icon-button has-tooltip" href="${escapeHtml(githubUrl)}" target="_blank" rel="noopener noreferrer" data-memory-link="open_github" data-full-name="${escapeHtml(project.fullName)}" aria-label="${escapeHtml(t("openGitHub"))}" data-tooltip="${escapeHtml(t("openGitHub"))}">${iconOnly("external", t("openGitHub"))}</a>
         </div>
         <div class="detail-github-inline">
           ${githubActionButtons(project)}
@@ -8177,7 +8315,7 @@ function renderSettings() {
             <label class="secret-label">
               <span class="field-title-row">
                 <span>${t("apiKey")}</span>
-                ${keyUrl ? `<a class="key-source-link" href="${escapeHtml(keyUrl)}" target="_blank" rel="noopener noreferrer">${escapeHtml(t("getKey"))}</a>` : ""}
+                ${safeExternalUrl(keyUrl) ? `<a class="key-source-link" href="${escapeHtml(safeExternalUrl(keyUrl))}" target="_blank" rel="noopener noreferrer">${escapeHtml(t("getKey"))}</a>` : ""}
               </span>
               <div class="secret-field">
                 <input data-provider-field="apiKey" type="${providerVisible ? "text" : "password"}" value="${providerPendingClear ? "" : providerVisible ? escapeHtml(provider.apiKey || "") : ""}" placeholder="${escapeHtml(status)}" />
@@ -8913,7 +9051,7 @@ function renderGithubPanel() {
           <strong>${escapeHtml(user.name || user.login || "GitHub")}</strong>
           <span>${escapeHtml(t("githubConnected"))} · @${escapeHtml(user.login || "-")}</span>
         </div>
-        ${user.url ? `<a class="repo-link" href="${escapeHtml(user.url)}" target="_blank" rel="noreferrer">${escapeHtml(t("openGitHub"))}</a>` : ""}
+        ${safeExternalUrl(user.url, { hosts: ["github.com"] }) ? `<a class="repo-link" href="${escapeHtml(safeExternalUrl(user.url, { hosts: ["github.com"] }))}" target="_blank" rel="noopener noreferrer">${escapeHtml(t("openGitHub"))}</a>` : ""}
       </div>
     `
     : `
@@ -8962,7 +9100,7 @@ function renderGithubPanel() {
                 <p>${escapeHtml(description)}</p>
                 <span>${escapeHtml(visibility)} · ${fmtNumber(repo.stars)} ${escapeHtml(t("stars"))} · ${fmtNumber(repo.forks)} ${escapeHtml(t("forks"))} · ${escapeHtml(languageLabel(repo.language))}</span>
               </div>
-              <a class="repo-link" href="${escapeHtml(repo.url)}" target="_blank" rel="noreferrer">${escapeHtml(t("openRepo"))}</a>
+              <a class="repo-link" href="${escapeHtml(safeExternalUrl(repo.url, { hosts: ["github.com"] }))}" target="_blank" rel="noopener noreferrer">${escapeHtml(t("openRepo"))}</a>
             </article>
           `;
         })
@@ -9176,6 +9314,74 @@ async function loadLeaderboard(period = state.leaderboardPeriod, date = state.le
   renderLeaderboard(state.leaderboard);
 }
 
+async function restoreDurableTask(task) {
+  if (!task?.id) return;
+  const fullName = task.type === "analysis" ? String(task.key || "").replace(/^analysis:/, "") : "";
+  if (task.type === "analysis" && fullName) {
+    state.analysisInFlight = { ...(state.analysisInFlight || {}), [fullName]: true };
+  }
+  if (task.type === "plan-generation") state.observationPlanGenerating = true;
+  try {
+    const result = await waitForDurableTaskResponse({ task });
+    if (task.type === "analysis" && result) {
+      state.analysis[fullName] = result.analysis || null;
+      if (result.project) mergeLocalProject(result.project);
+      delete state.analysisInFlight[fullName];
+      renderGithubActionSurfaces();
+      if (state.selected?.fullName === fullName) {
+        showAnalysisCompleteStatus(fullName);
+        scrollAnalysisSectionToTop();
+      }
+    }
+    if (task.type === "plan-generation" && result?.plan) {
+      state.observationPlanDraft = { ...result.plan, name: result.plan.name, nameEn: result.plan.nameEn || result.plan.name };
+      state.observationPlanEditMode = "draft";
+      state.observationPlanDraftNotice = t("observationPlanDraftReady");
+      showObservationPlanInlineStatus("saved", t("observationPlanGenerated"), { preserveInputs: true });
+      renderObservationPlans();
+    }
+    if (task.type === "scan") {
+      state.projectPool.page = 1;
+      state.selected = null;
+      switchView("projects");
+      await loadProjects({ resetPosition: true });
+      await loadLeaderboard(state.leaderboardPeriod, state.leaderboardDate).catch(() => {});
+      queueIndexedDbSnapshotSync("restored-scan-complete", 250, { force: true, syncProjects: true });
+    }
+  } catch (error) {
+    if (task.type === "plan-generation") showObservationPlanInlineStatus("failed", error.message, { preserveInputs: true });
+    if (task.type === "scan") {
+      renderScanStatus({ status: "failed", stage: "failed", percent: 0, error: error.message });
+    }
+  } finally {
+    if (fullName) delete state.analysisInFlight[fullName];
+    if (task.type === "plan-generation") state.observationPlanGenerating = false;
+  }
+}
+
+async function restoreDurableTasks() {
+  if (state.durableTasksRestored) return;
+  state.durableTasksRestored = true;
+  const remembered = durableTaskIds();
+  const tasks = [];
+  for (const id of remembered) {
+    try {
+      const response = await api(`/api/tasks/${encodeURIComponent(id)}`);
+      if (response.task) tasks.push(response.task);
+    } catch {
+      forgetDurableTask(id);
+    }
+  }
+  try {
+    const response = await api("/api/tasks?limit=30");
+    tasks.push(...(response.tasks || []).filter((task) => task.status === "queued" || task.status === "running"));
+  } catch {
+    /* Local browser mode completes operations in the current tab. */
+  }
+  const unique = Array.from(new Map(tasks.map((task) => [task.id, task])).values());
+  await Promise.all(unique.map(restoreDurableTask));
+}
+
 async function loadAll(options = {}) {
   const leaderboardParams = new URLSearchParams({
     period: state.leaderboardPeriod,
@@ -9219,6 +9425,7 @@ async function loadAll(options = {}) {
   });
   scheduleSummaryRefresh(700);
   loadSecondaryData(leaderboardParams).catch(() => {});
+  restoreDurableTasks().catch(() => {});
   queueIndexedDbSnapshotSync("boot", INDEXEDDB_SNAPSHOT_BOOT_DELAY_MS);
 }
 
@@ -9761,10 +9968,12 @@ async function analyzeProject(fullName) {
   };
   renderDetailPreservingScroll(state.selected);
   try {
-    const result = await api("/api/analyze", {
-      method: "POST",
-      body: JSON.stringify({ fullName, method, userNeed })
-    });
+    const result = await waitForDurableTaskResponse(
+      await api("/api/analyze", {
+        method: "POST",
+        body: JSON.stringify({ fullName, method, userNeed })
+      })
+    );
     state.analysis[fullName] = result.analysis || null;
     const analyzedProject = result.project
       ? { ...result.project, analysis: result.analysis || result.project.analysis || null }
@@ -9807,6 +10016,7 @@ async function runScan(options = {}) {
       method: "POST",
       body: JSON.stringify({ mode: "manual" })
     });
+    if (result.task) rememberDurableTask(result.task);
     if (result.status === "already-running") {
       const finalProgress = await loadScanProgress({ scheduleIdleReset: false }).catch(() => null);
       if (finalProgress) renderScanStatus(finalProgress);
@@ -9820,6 +10030,8 @@ async function runScan(options = {}) {
     if (finalProgress?.status === "failed") {
       throw new Error(finalProgress.error || "Scan failed");
     }
+    if (result.task?.id) forgetDurableTask(result.task.id);
+    queueIndexedDbSnapshotSync("scan-complete", 250, { force: true, syncProjects: true });
     clearScanIdleReset();
     renderScanStatus(finalProgress || {
       status: "completed",
@@ -9982,13 +10194,15 @@ async function generateObservationPlan() {
   const isEditingObservationPlan = state.observationPlanEditMode === "edit" && Boolean(state.observationPlanDraft);
   const editingPlanId = isEditingObservationPlan ? state.observationPlanDraft?.id || currentPlan?.id || "" : "";
   try {
-    const result = await api("/api/observation-plans/generate", {
-      method: "POST",
-      body: JSON.stringify({
-        name: nameInput,
-        idea
+    const result = await waitForDurableTaskResponse(
+      await api("/api/observation-plans/generate", {
+        method: "POST",
+        body: JSON.stringify({
+          name: nameInput,
+          idea
+        })
       })
-    });
+    );
     await refreshObservationPlans();
     if (elements.observationPlanSelect && editingPlanId) {
       elements.observationPlanSelect.value = editingPlanId;

@@ -1,21 +1,21 @@
 # 星仓印记桌面端本地存储方案
 
-本文档补充一套面向本地桌面应用的存储方案。它与当前 Node 本地 JSON 存储、Web 静态模式 IndexedDB 存储并列存在，不改变现有功能、不切换现有运行路径，也不引入新的运行依赖。
+本文档描述面向本地桌面应用的存储方案，并区分已经落地的数据层与桌面壳仍需完成的能力。当前 Node 运行时已经使用 SQLite WAL，Web 静态模式已经使用 IndexedDB v4；Mac 应用仍需补 Keychain、签名、公证和沙盒适配。
 
 ## 目标
 
 - 桌面端支持长期、本地、离线优先保存项目池、观察方案、学习中枢、研判、AI 分析、隐藏项目、榜单归档和扫描记录。
 - 密钥不落入业务数据库，GitHub Token、Tavily Key、Exa Key、AI Provider Key 统一进入系统安全存储。
-- Web 端继续使用 IndexedDB，当前本地开发继续使用 `data/store.json`，桌面端未来使用 SQLite + Keychain。
+- Web 端继续使用 IndexedDB v4，Node 与桌面端共享 SQLite 数据模型，桌面端密钥迁移到 Keychain。
 - 导入导出继续使用不含密钥的 JSON，保证 Web、Node 本地、桌面端之间可以迁移用户数据。
 
 ## 推荐组合
 
 | 场景 | 存储 | 密钥 | 说明 |
 |---|---|---|---|
-| 当前本地开发 | `data/store.json` | 当前仍在本地 JSON 中 | 保持现状，避免影响已有功能 |
-| Web 静态部署 | IndexedDB | 浏览器本地配置，导出时排除 | 适合无账号、纯本地保存 |
-| Mac 桌面应用 | SQLite | macOS Keychain | 面向大数据量、长期使用、备份恢复 |
+| Node 本地服务 | SQLite WAL | 当前在 SQLite 本机明文状态中 | 已实现，旧 JSON 只做迁移备份 |
+| Web 静态部署 | IndexedDB v4 | 浏览器 IndexedDB 独立记录，导出时排除 | 已实现，适合无账号、纯本地保存 |
+| Mac 桌面应用 | SQLite WAL | macOS Keychain | 数据层已实现，Keychain 和桌面壳待接入 |
 
 桌面端不建议使用 MySQL、SQL Server、Supabase 作为默认存储。星仓印记是本地优先工具，没有账号系统时把用户行为、项目研判、AI 分析和偏好记忆放到远端数据库，会增加隐私、权限、合规和运维成本。SQLite 更适合单用户桌面应用。
 
@@ -58,7 +58,7 @@ storage.json
 
 - 高频筛选字段结构化：项目名、语言、许可、Star、Fork、更新时间、分类、用途、方案 ID。
 - 复杂对象保留 JSON：评分细节、AI 分析结果、学习中枢上下文、Provider 目录、扫描摘要。
-- 所有项目、方案、研判和记忆都要能从 SQLite 无损恢复为当前 `data/store.json` / IndexedDB snapshot 的数据形态。
+- 所有项目、方案、研判和记忆都要能从 SQLite 无损恢复为 portable JSON / IndexedDB snapshot 的数据形态。
 
 这样做能减少迁移风险：查询速度比大 JSON 文件稳定，同时不会因为过早拆表破坏现有业务结构。
 
@@ -84,11 +84,11 @@ macOS Keychain 建议：
 
 ## 迁移路径
 
-### 从当前 Node 本地 JSON 迁移
+### 从旧 Node 本地 JSON 迁移
 
 1. 读取 `data/store.json`。
 2. 使用现有 storage normalize 逻辑生成规范化 store。
-3. 写入 SQLite 前创建 `.backup` 文件或复制原始 JSON。
+3. 保留原始 `store.json` 不变，作为人工回退来源。
 4. 业务数据写入 SQLite。
 5. 真实密钥写入 Keychain。
 6. SQLite 中只保存密钥配置状态和 Keychain account 名称。
@@ -103,7 +103,7 @@ macOS Keychain 建议：
 
 ### 回滚
 
-桌面端首次启用 SQLite 时不删除原始 `data/store.json` 或导入文件。迁移失败时直接保留原文件，并提示用户重新导入。
+首次启用 SQLite 时不删除原始 `data/store.json` 或导入文件。当前 Node 迁移已经遵循这一规则；桌面端仍应保持相同行为。
 
 ## 运行策略
 
@@ -159,7 +159,7 @@ PRAGMA wal_autocheckpoint = 1000;
 
 ## 桌面端适配器边界
 
-未来接入桌面壳时建议保留一个统一接口：
+接入桌面壳时应保留统一接口：
 
 ```text
 StorageAdapter
@@ -178,7 +178,7 @@ StorageAdapter
   importPortableData(snapshot)
 ```
 
-当前 Node 版可以继续由 `src/lib/storage.js` 提供；桌面端 SQLite adapter 在桌面壳中实现同一能力，避免前端业务逻辑分叉。
+当前 Node 版由 `src/lib/storage.js` 和 `src/lib/sqlite-store.js` 提供；桌面壳应复用同一能力边界，避免前端业务逻辑分叉。
 
 ## 备份与恢复
 
@@ -201,9 +201,7 @@ StorageAdapter
 
 ## 当前落地状态
 
-本次补充的是桌面端存储方案和 schema 草案，不改变当前运行逻辑：
-
-- Node 本地开发仍读写 `data/store.json`。
-- Web 静态模式仍使用 IndexedDB。
-- 桌面端 SQLite + Keychain 是后续 Mac App 壳接入时的目标方案。
-
+- 已完成：Node SQLite WAL、旧 JSON 一次性迁移、项目/方案/扫描记录增量写入、方案归属索引、持久化任务、Web IndexedDB v4 记录级存储与分页同步。
+- 已完成：portable export、核心快照、项目分页和榜单分页排除密钥。
+- 待完成：macOS Keychain、桌面 IPC 权限边界、应用签名、公证、沙盒 entitlement、自动更新和 SQLite 在线备份界面。
+- 当前 SQLite runtime schema 位于 `src/lib/sqlite-store.js`；`desktop/desktop-storage-schema.sql` 是更细粒度桌面长期演进草案，不应误认为已经全部启用。

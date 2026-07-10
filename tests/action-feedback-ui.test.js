@@ -429,7 +429,9 @@ test("project pool heading exposes the active observation plan and opens plan se
   assert.match(heading, /activeObservationPlanLabel\(\)/);
   assert.match(heading, /data-action="open-observation-plans"/);
   assert.match(heading, /project-count-summary/);
-  assert.match(renderer, /elements\.projectCount\.innerHTML = renderProjectPoolHeading\(`/);
+  assert.match(renderer, /elements\.projectCount\.innerHTML = renderProjectPoolHeading\(\[/);
+  assert.match(renderer, /project-match-count/);
+  assert.match(renderer, /project-preview-count/);
   assert.match(poolTransition, /elements\.projectCount\.innerHTML = renderProjectPoolHeading\(transitionHeadingText\(\)\)/);
   assert.match(opener, /switchView\("settings"\)/);
   assert.match(opener, /observation-plan-select-module/);

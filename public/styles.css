@@ -23483,3 +23483,144 @@ body {
     padding-inline: 8px;
   }
 }
+
+/* Responsive overflow guard for the project pool and leaderboard action rows. */
+#view-projects .project-count-summary {
+  display: inline-flex !important;
+  align-items: center !important;
+  gap: 5px !important;
+}
+
+#view-projects #problem-chips .semantic-filter-chip,
+#view-projects #audience-chips .semantic-filter-chip,
+#view-projects #shape-chips .semantic-filter-chip {
+  height: max-content !important;
+}
+
+#view-projects #license-chips .chip[data-filter-value="permissive-commercial"] {
+  padding-inline: 2px !important;
+  font-size: 10px !important;
+}
+
+@media (max-width: 560px) {
+  #view-projects .project-table-panel > .section-heading,
+  #view-projects .project-table-panel > .section-heading:has(#scan-status.is-running) {
+    grid-template-columns: minmax(0, 1fr) 167px !important;
+    gap: 5px !important;
+  }
+
+  #view-projects .project-plan-chip {
+    max-width: 86px !important;
+    padding-inline: 7px !important;
+  }
+
+  #view-projects .project-plan-chip > span,
+  #view-projects .project-preview-count,
+  #view-projects .project-count-separator,
+  #view-projects .project-pool-metrics .metric-tile.accent > span {
+    display: none !important;
+  }
+
+  #view-projects .project-plan-chip > strong {
+    max-width: 54px !important;
+  }
+
+  #view-projects .project-count-summary {
+    flex: 0 0 auto !important;
+    gap: 0 !important;
+    overflow: visible !important;
+    font-size: 11px !important;
+    text-overflow: clip !important;
+  }
+
+  #view-projects .project-heading-tools,
+  #view-projects .project-pool-metrics {
+    width: 167px !important;
+  }
+
+  #view-projects #scan-status,
+  #view-projects #scan-status.is-idle {
+    box-sizing: border-box !important;
+    width: 68px !important;
+    flex: 0 0 68px !important;
+    flex-basis: 68px !important;
+    min-width: 68px !important;
+    max-width: 68px !important;
+  }
+
+  #view-projects .project-pool-metrics .metric-tile.accent {
+    box-sizing: border-box !important;
+    width: 94px !important;
+    flex: 0 0 94px !important;
+    min-width: 94px !important;
+    max-width: 94px !important;
+  }
+
+  #view-projects .project-pool-metrics:has(#scan-status.is-running) .metric-tile.accent {
+    display: none !important;
+  }
+
+  #view-projects .project-pool-metrics:has(#scan-status.is-running) #scan-status {
+    box-sizing: border-box !important;
+    width: 167px !important;
+    flex: 0 0 167px !important;
+    min-width: 167px !important;
+    max-width: 167px !important;
+  }
+
+  #view-projects .repo-main,
+  #view-leaderboard .leaderboard-main {
+    grid-column: 2 / 4 !important;
+    grid-row: 1 !important;
+  }
+
+  #view-projects .repo-title,
+  #view-leaderboard .leaderboard-main .repo-title {
+    padding-right: 98px !important;
+  }
+
+  #view-projects .repo-actions,
+  #view-leaderboard .leaderboard-score {
+    grid-column: 3 !important;
+    grid-row: 1 !important;
+    position: relative !important;
+    z-index: 2 !important;
+  }
+
+  #view-projects .repo-github-row,
+  #view-leaderboard .leaderboard-github-row {
+    width: 100% !important;
+    overflow: hidden !important;
+  }
+
+  #view-projects .repo-github-row .github-stat-actions.compact,
+  #view-leaderboard .leaderboard-github-row .github-stat-actions.compact {
+    flex: 0 0 202px !important;
+    gap: 4px !important;
+  }
+
+  #view-projects .repo-github-row .github-stat-action,
+  #view-leaderboard .leaderboard-github-row .github-stat-action {
+    width: 99px !important;
+    min-width: 99px !important;
+    grid-template-columns: 58px 41px !important;
+  }
+
+  #view-projects .repo-github-row .github-stat-button,
+  #view-projects .repo-github-row .github-stat-count,
+  #view-leaderboard .leaderboard-github-row .github-stat-button,
+  #view-leaderboard .leaderboard-github-row .github-stat-count {
+    min-width: 0 !important;
+    padding-inline: 4px !important;
+  }
+
+  #view-projects .repo-github-row .trend-tag,
+  #view-leaderboard .leaderboard-github-row .trend-tag {
+    flex: 1 1 0 !important;
+    min-width: 0 !important;
+    max-width: none !important;
+    justify-content: flex-start !important;
+    padding-inline: 5px !important;
+    text-align: left !important;
+  }
+}

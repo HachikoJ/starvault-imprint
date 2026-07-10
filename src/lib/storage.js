@@ -1,8 +1,10 @@
 const fs = require("node:fs");
 const path = require("node:path");
+const { createHash, randomUUID } = require("node:crypto");
 const { classifyRepository, inferUseCase } = require("./scoring");
 const { isNxCadRepository } = require("./domain-relevance");
 const { buildQueryProfiles } = require("./github");
+const { isSqlitePath, readSqliteStore, writeSqliteStore } = require("./sqlite-store");
 
 // Passive browsing must stay weak; explicit actions carry the learning signal.
 const MEMORY_EVENT_WEIGHTS = {
@@ -63,6 +65,7 @@ function defaultMemory() {
     events: [],
     preferences: emptyPreferenceRoot(),
     negativePreferences: emptyNegativePreferenceRoot(),
+    discoveryProfiles: {},
     manualPreferences: emptyPreferenceRoot(),
     manualNegativePreferences: emptyNegativePreferenceRoot(),
     antiBubble: {
@@ -155,8 +158,15 @@ function emptyStore() {
     version: 1,
     createdAt: new Date().toISOString(),
     updatedAt: new Date().toISOString(),
+    projectRevision: "",
     projects: {},
     scans: [],
+    tasks: {},
+    runtime: {
+      scheduler: {
+        lastRunDate: ""
+      }
+    },
     leaderboards: {
       daily: {}
     },
@@ -190,61 +200,83 @@ function ensureDir(filePath) {
   fs.mkdirSync(path.dirname(filePath), { recursive: true });
 }
 
+function normalizeStoreData(parsed = {}) {
+  const defaults = emptyStore();
+  const observationPlans = normalizeObservationPlans(parsed.observationPlans, parsed.memory, defaults.observationPlans);
+  const merged = {
+    ...defaults,
+    ...parsed,
+    tasks: Object.fromEntries(
+      Object.entries(parsed.tasks || {})
+        .filter(([id, task]) => id && task && typeof task === "object")
+        .slice(-120)
+    ),
+    runtime: {
+      ...defaults.runtime,
+      ...(parsed.runtime || {}),
+      scheduler: {
+        ...defaults.runtime.scheduler,
+        ...(parsed.runtime?.scheduler || {})
+      }
+    },
+    leaderboards: normalizeLeaderboards(parsed.leaderboards, defaults.leaderboards),
+    githubActions: {
+      ...defaults.githubActions,
+      ...(parsed.githubActions || {})
+    },
+    analysis: {
+      ...defaults.analysis,
+      ...(parsed.analysis || {})
+    },
+    memory: normalizeMemory(parsed.memory, defaults.memory),
+    observationPlans,
+    settings: {
+      ...defaults.settings,
+      ...(parsed.settings || {}),
+      providerCatalog: {
+        ...defaults.settings.providerCatalog,
+        ...(parsed.settings?.providerCatalog || {})
+      },
+      activeObservationPlanId: normalizeActiveObservationPlanId(parsed.settings?.activeObservationPlanId, observationPlans),
+      llmProviders: mergeProviders(defaults.settings.llmProviders, parsed.settings?.llmProviders || [])
+    }
+  };
+  const activePlan = merged.observationPlans[merged.settings.activeObservationPlanId] || merged.observationPlans.default;
+  merged.settings.activeObservationPlanId = activePlan.id;
+  if (!hasPlanUserData(merged.observationPlans.default?.userData)) {
+    merged.observationPlans.default = {
+      ...merged.observationPlans.default,
+      userData: normalizePlanUserData({
+        watchlist: merged.watchlist,
+        githubActions: merged.githubActions,
+        notes: merged.notes,
+        analysis: merged.analysis
+      })
+    };
+  }
+  merged.memory = normalizeMemory(activePlan.memory || merged.memory, defaults.memory);
+  merged.observationPlans[activePlan.id] = {
+    ...activePlan,
+    userData: normalizePlanUserData(activePlan.userData || {}),
+    memory: merged.memory
+  };
+  return merged;
+}
+
 function readStore(filePath) {
   ensureDir(filePath);
-  if (!fs.existsSync(filePath)) {
-    return emptyStore();
+  if (isSqlitePath(filePath)) {
+    const stored = readSqliteStore(filePath);
+    if (stored) return normalizeStoreData(stored);
+    const legacyPath = path.join(path.dirname(filePath), "store.json");
+    const imported = fs.existsSync(legacyPath) ? JSON.parse(fs.readFileSync(legacyPath, "utf8")) : emptyStore();
+    const normalized = normalizeStoreData(imported);
+    return writeSqliteStore(filePath, normalized, { force: true });
   }
+  if (!fs.existsSync(filePath)) return emptyStore();
 
   try {
-    const parsed = JSON.parse(fs.readFileSync(filePath, "utf8"));
-    const defaults = emptyStore();
-    const observationPlans = normalizeObservationPlans(parsed.observationPlans, parsed.memory, defaults.observationPlans);
-    const merged = {
-      ...defaults,
-      ...parsed,
-      leaderboards: normalizeLeaderboards(parsed.leaderboards, defaults.leaderboards),
-      githubActions: {
-        ...defaults.githubActions,
-        ...(parsed.githubActions || {})
-      },
-      analysis: {
-        ...defaults.analysis,
-        ...(parsed.analysis || {})
-      },
-      memory: normalizeMemory(parsed.memory, defaults.memory),
-      observationPlans,
-      settings: {
-        ...defaults.settings,
-        ...(parsed.settings || {}),
-        providerCatalog: {
-          ...defaults.settings.providerCatalog,
-          ...(parsed.settings?.providerCatalog || {})
-        },
-        activeObservationPlanId: normalizeActiveObservationPlanId(parsed.settings?.activeObservationPlanId, observationPlans),
-        llmProviders: mergeProviders(defaults.settings.llmProviders, parsed.settings?.llmProviders || [])
-      }
-    };
-    const activePlan = merged.observationPlans[merged.settings.activeObservationPlanId] || merged.observationPlans.default;
-    merged.settings.activeObservationPlanId = activePlan.id;
-    if (!hasPlanUserData(merged.observationPlans.default?.userData)) {
-      merged.observationPlans.default = {
-        ...merged.observationPlans.default,
-        userData: normalizePlanUserData({
-          watchlist: merged.watchlist,
-          githubActions: merged.githubActions,
-          notes: merged.notes,
-          analysis: merged.analysis
-        })
-      };
-    }
-    merged.memory = normalizeMemory(activePlan.memory || merged.memory, defaults.memory);
-    merged.observationPlans[activePlan.id] = {
-      ...activePlan,
-      userData: normalizePlanUserData(activePlan.userData || {}),
-      memory: merged.memory
-    };
-    return merged;
+    return normalizeStoreData(JSON.parse(fs.readFileSync(filePath, "utf8")));
   } catch (error) {
     const backupPath = `${filePath}.corrupt-${Date.now()}`;
     fs.copyFileSync(filePath, backupPath);
@@ -277,6 +309,36 @@ function normalizeLeaderboards(saved = {}, defaults = { daily: {} }) {
     },
     byPlan
   };
+}
+
+function localLeaderboardRecords(leaderboards = {}, options = {}) {
+  const records = [];
+  const append = (planId, daily = {}) => {
+    for (const [date, value] of Object.entries(daily || {})) {
+      records.push({
+        id: `${encodeURIComponent(planId)}|${date}`,
+        planId,
+        date,
+        generatedAt: String(value?.generatedAt || ""),
+        value: options.cloneValues === false ? value : cloneJson(value, value)
+      });
+    }
+  };
+  append("default", leaderboards.daily);
+  for (const [planId, archive] of Object.entries(leaderboards.byPlan || {})) append(planId, archive?.daily);
+  return records.sort((a, b) => a.id.localeCompare(b.id));
+}
+
+function localLeaderboardRevision(leaderboards = {}) {
+  const metadata = localLeaderboardRecords(leaderboards, { cloneValues: false }).map((record) => {
+    const items = Array.isArray(record.value?.items) ? record.value.items : [];
+    return [
+      record.id,
+      record.generatedAt,
+      items.map((item) => `${item.fullName || ""}:${item.rank || ""}:${item.leaderboardScore || ""}`).join("|")
+    ];
+  });
+  return createHash("sha256").update(JSON.stringify(metadata)).digest("hex").slice(0, 20);
 }
 
 function normalizeActiveObservationPlanId(activeId, plans) {
@@ -451,38 +513,49 @@ function activeObservationPlanId(store) {
   return activeObservationPlan(store).id;
 }
 
-function observationPlanMemory(store) {
-  return normalizeMemory(activeObservationPlan(store).memory || store.memory);
+function observationPlanMemory(store, requestedPlanId = "") {
+  const planId = requestedPlanId ? normalizeObservationPlanId(requestedPlanId) : activeObservationPlanId(store);
+  const plan = store.observationPlans?.[planId] || activeObservationPlan(store);
+  const fallback = planId === activeObservationPlanId(store) ? store.memory : defaultMemory();
+  return normalizeMemory(plan.memory || fallback);
 }
 
-function syncActivePlanMemory(store, memory) {
-  const planId = activeObservationPlanId(store);
+function syncPlanMemory(store, memory, requestedPlanId = "") {
+  const planId = requestedPlanId ? normalizeObservationPlanId(requestedPlanId) : activeObservationPlanId(store);
   store.observationPlans = store.observationPlans || {};
-  const plan = normalizeObservationPlan(store.observationPlans[planId] || { id: planId }, store.memory);
-  const normalized = normalizeMemory(memory || plan.memory || store.memory);
-  store.memory = normalized;
+  const isActive = planId === activeObservationPlanId(store);
+  const plan = normalizeObservationPlan(store.observationPlans[planId] || { id: planId }, isActive ? store.memory : defaultMemory());
+  const normalized = normalizeMemory(memory || plan.memory || (isActive ? store.memory : defaultMemory()));
+  if (isActive) store.memory = normalized;
   store.observationPlans[planId] = {
     ...plan,
     memory: normalized,
     updatedAt: new Date().toISOString()
   };
-  store.settings = {
-    ...(store.settings || {}),
-    activeObservationPlanId: planId
-  };
   return normalized;
 }
 
-function activePlanUserData(store) {
-  const planId = activeObservationPlanId(store);
+function syncActivePlanMemory(store, memory) {
+  return syncPlanMemory(store, memory, activeObservationPlanId(store));
+}
+
+function planUserData(store, requestedPlanId = "") {
+  const planId = requestedPlanId ? normalizeObservationPlanId(requestedPlanId) : activeObservationPlanId(store);
   store.observationPlans = store.observationPlans || {};
-  const plan = normalizeObservationPlan(store.observationPlans[planId] || { id: planId }, store.memory);
+  const plan = normalizeObservationPlan(
+    store.observationPlans[planId] || { id: planId },
+    planId === activeObservationPlanId(store) ? store.memory : defaultMemory()
+  );
   const userData = normalizePlanUserData(plan.userData || {});
   store.observationPlans[planId] = {
     ...plan,
     userData
   };
   return userData;
+}
+
+function activePlanUserData(store) {
+  return planUserData(store, activeObservationPlanId(store));
 }
 
 function observationPlanSummary(plan = {}) {
@@ -569,11 +642,28 @@ function observationPlanMatchAliases(plan = {}, planId = "") {
     .filter((item, index, list) => item && item !== "default" && item.length >= 2 && list.indexOf(item) === index);
 }
 
+function observationPlanMatchMap(projectOrMatches = {}) {
+  const source = projectOrMatches?.observationPlanMatches ?? projectOrMatches?.observationMatches ?? {};
+  if (!Array.isArray(source)) return source && typeof source === "object" ? source : {};
+  return Object.fromEntries(
+    source
+      .map((match) => {
+        const id = String(typeof match === "string" ? match : match?.planId || match?.id || "");
+        if (!id) return null;
+        return [id, typeof match === "object" ? { ...match, planId: id } : { planId: id }];
+      })
+      .filter(Boolean)
+  );
+}
+
 function projectMatchesObservationPlan(project, planId, plan = null) {
   const id = String(planId || "default");
-  if (id === "default") return true;
-  const matches = project.observationPlanMatches || {};
-  if (matches[id]) return true;
+  const matches = observationPlanMatchMap(project);
+  const matchIds = Object.keys(matches);
+  if (id === "default") {
+    return matchIds.length === 0 || matchIds.includes("default");
+  }
+  if (matchIds.includes(id)) return true;
   const aliases = observationPlanMatchAliases(plan || {}, id);
   if (!aliases.length) return false;
   return Object.entries(matches).some(([matchId, match]) => {
@@ -609,6 +699,10 @@ function normalizeMemory(saved = {}, defaults = defaultMemory()) {
     ...(saved || {}),
     shortTerm: Array.isArray(saved?.shortTerm) ? saved.shortTerm : [],
     events: Array.isArray(saved?.events) ? saved.events : Array.isArray(saved?.shortTerm) ? saved.shortTerm : [],
+    discoveryProfiles: {
+      ...defaults.discoveryProfiles,
+      ...(saved?.discoveryProfiles || {})
+    },
     preferences: {
       ...defaults.preferences,
       ...(saved?.preferences || {}),
@@ -842,6 +936,7 @@ function mergePortableSettings(existing = {}, imported = {}) {
 }
 
 function writeStore(filePath, store) {
+  if (isSqlitePath(filePath)) return writeSqliteStore(filePath, store);
   ensureDir(filePath);
   const next = {
     ...store,
@@ -1588,6 +1683,21 @@ function applyMemorySignal(memory, project, weight = 1, eventType = "") {
   return keys;
 }
 
+function adjustDiscoveryProfileSignal(memory, project, weight = 0, eventType = "", direction = 1) {
+  const profileKey = String(project?.profileKey || "").trim();
+  if (!profileKey) return;
+  const semanticScale = eventType === "dismiss_project" ? dismissProjectSignalScales(project).semantic : 1;
+  const delta = Number(weight || 0) * semanticScale * direction;
+  const current = Number(memory.discoveryProfiles?.[profileKey] || 0);
+  const next = Math.max(-40, Math.min(40, current + delta));
+  memory.discoveryProfiles = memory.discoveryProfiles || {};
+  if (Math.abs(next) < 0.005) {
+    delete memory.discoveryProfiles[profileKey];
+  } else {
+    memory.discoveryProfiles[profileKey] = Number(next.toFixed(3));
+  }
+}
+
 function rollbackMemorySignal(memory, project, event = {}) {
   const weight = Number.isFinite(Number(event.weight)) ? Number(event.weight) : eventWeight(event.type || legacyMemoryEventType(event.reason));
   const eventType = event.type || legacyMemoryEventType(event.reason);
@@ -1595,6 +1705,7 @@ function rollbackMemorySignal(memory, project, event = {}) {
   const preferences = memory.preferences || defaultMemory().preferences;
   const negative = memory.negativePreferences || defaultMemory().negativePreferences;
   const absWeight = Math.abs(Number(weight || 0));
+  adjustDiscoveryProfileSignal(memory, project, weight, eventType, -1);
   const restoreIfPresent = (bucket, key, delta, max) => {
     if (Number(bucket?.[key] || 0) > 0) {
       adjustPreferenceBucket(bucket, key, delta, max);
@@ -1653,10 +1764,12 @@ function legacyMemoryEventType(reason = "") {
 
 function appendMemoryEvent(store, project, eventType, options = {}) {
   if (!project) return null;
-  const memory = observationPlanMemory(store);
+  const planId = options.observationPlanId || activeObservationPlanId(store);
+  const memory = observationPlanMemory(store, planId);
   const computed = withComputedUseCase(project);
   const weight = eventWeight(eventType, options.weight);
   const keys = applyMemorySignal(memory, computed, weight, eventType);
+  adjustDiscoveryProfileSignal(memory, computed, weight, eventType, 1);
   const at = new Date().toISOString();
   const entry = {
     at,
@@ -1669,6 +1782,8 @@ function appendMemoryEvent(store, project, eventType, options = {}) {
     language: keys.language,
     license: keys.license,
     risk: keys.risk,
+    profileKey: String(computed.profileKey || ""),
+    profileLabel: String(computed.profileLabel || ""),
     source: options.source || "system"
   };
 
@@ -1680,7 +1795,7 @@ function appendMemoryEvent(store, project, eventType, options = {}) {
   memory.stats.eventCounts[eventType] = (memory.stats.eventCounts[eventType] || 0) + 1;
   memory.stats.lastEventAt = at;
   compactMemoryContextInPlace(memory, { force: false });
-  syncActivePlanMemory(store, memory);
+  syncPlanMemory(store, memory, planId);
   return entry;
 }
 
@@ -3691,11 +3806,102 @@ function createStorage(filePath) {
     return storeCache;
   }
 
-  function getProject(fullName) {
+  function createTask(task = {}) {
+    const store = load();
+    const now = new Date().toISOString();
+    const id = String(task.id || `task-${randomUUID()}`);
+    const record = {
+      id,
+      type: String(task.type || "unknown"),
+      key: String(task.key || ""),
+      status: task.status || "queued",
+      input: cloneJson(task.input || {}, {}),
+      result: task.result === undefined ? null : cloneJson(task.result, null),
+      error: String(task.error || ""),
+      attempts: Math.max(0, Number(task.attempts || 0)),
+      createdAt: task.createdAt || now,
+      updatedAt: now,
+      startedAt: task.startedAt || "",
+      finishedAt: task.finishedAt || ""
+    };
+    store.tasks = store.tasks || {};
+    store.tasks[id] = record;
+    const ordered = Object.values(store.tasks).sort((a, b) => String(b.updatedAt || "").localeCompare(String(a.updatedAt || "")));
+    store.tasks = Object.fromEntries(ordered.slice(0, 120).map((item) => [item.id, item]));
+    save(store);
+    return cloneJson(record, record);
+  }
+
+  function updateTask(id, patch = {}) {
+    const store = load();
+    const current = store.tasks?.[id];
+    if (!current) return null;
+    const now = new Date().toISOString();
+    const next = {
+      ...current,
+      ...cloneJson(patch, {}),
+      id: current.id,
+      type: current.type,
+      input: patch.input === undefined ? current.input : cloneJson(patch.input, {}),
+      result: patch.result === undefined ? current.result : cloneJson(patch.result, null),
+      updatedAt: now
+    };
+    store.tasks[id] = next;
+    save(store);
+    return cloneJson(next, next);
+  }
+
+  function getTask(id) {
+    return cloneJson(load().tasks?.[id] || null, null);
+  }
+
+  function listTasks(filters = {}) {
+    return Object.values(load().tasks || {})
+      .filter((task) => !filters.type || task.type === filters.type)
+      .filter((task) => !filters.status || task.status === filters.status)
+      .filter((task) => !filters.key || task.key === filters.key)
+      .sort((a, b) => String(b.updatedAt || "").localeCompare(String(a.updatedAt || "")))
+      .slice(0, Math.max(1, Math.min(120, Number(filters.limit || 30))))
+      .map((task) => cloneJson(task, task));
+  }
+
+  function recoverInterruptedTasks() {
+    const store = load();
+    const now = new Date().toISOString();
+    const recovered = [];
+    for (const task of Object.values(store.tasks || {})) {
+      if (task.status !== "running") continue;
+      task.status = "queued";
+      task.interruptedAt = now;
+      task.updatedAt = now;
+      task.error = "";
+      recovered.push(cloneJson(task, task));
+    }
+    if (recovered.length) save(store);
+    return recovered;
+  }
+
+  function getRuntimeState(key) {
+    return cloneJson(load().runtime?.[key] || null, null);
+  }
+
+  function setRuntimeState(key, value = {}) {
+    const store = load();
+    store.runtime = store.runtime || {};
+    store.runtime[key] = {
+      ...(store.runtime[key] || {}),
+      ...cloneJson(value, {}),
+      updatedAt: new Date().toISOString()
+    };
+    save(store);
+    return cloneJson(store.runtime[key], store.runtime[key]);
+  }
+
+  function getProject(fullName, options = {}) {
     const store = load();
     const key = projectKey(fullName);
     const project = store.projects[key] || null;
-    const userData = activePlanUserData(store);
+    const userData = planUserData(store, options.observationPlanId || "");
     const note = userData.notes?.[key] || {};
     return project
       ? withComputedUseCase({
@@ -3710,13 +3916,16 @@ function createStorage(filePath) {
       : null;
   }
 
-  function projectItems(store) {
+  function projectItems(store, planId = activeObservationPlanId(store), plan = null) {
     const userData = activePlanUserData(store);
-    const version = `${store.updatedAt || ""}:${activeObservationPlanId(store)}:${Object.keys(store.projects || {}).length}:${Object.keys(userData.watchlist || {}).length}:${Object.keys(userData.notes || {}).length}:${Object.keys(userData.analysis || {}).length}:${Object.keys(userData.dismissedProjects || {}).length}`;
+    const version = `${store.updatedAt || ""}:${planId}:${Object.keys(store.projects || {}).length}:${Object.keys(userData.watchlist || {}).length}:${Object.keys(userData.notes || {}).length}:${Object.keys(userData.analysis || {}).length}:${Object.keys(userData.dismissedProjects || {}).length}`;
     if (computedProjectItemsCache && computedProjectItemsVersion === version) {
       return computedProjectItemsCache.slice();
     }
-    computedProjectItemsCache = Object.values(store.projects).map((project) => {
+    const activePlan = plan || store.observationPlans?.[planId] || store.observationPlans?.default || null;
+    computedProjectItemsCache = Object.values(store.projects)
+      .filter((project) => projectMatchesObservationPlan(project, planId, activePlan))
+      .map((project) => {
       const key = projectKey(project.fullName);
       const note = userData.notes?.[key] || {};
       return withComputedUseCase({
@@ -3728,7 +3937,7 @@ function createStorage(filePath) {
         analysis: userData.analysis?.[key] || null,
         dismissed: Boolean(userData.dismissedProjects?.[key])
       });
-    });
+      });
     computedProjectItemsVersion = version;
     return computedProjectItemsCache.slice();
   }
@@ -3737,10 +3946,7 @@ function createStorage(filePath) {
     const planId = filters.observationPlanId || activeObservationPlanId(store);
     const plan = store.observationPlans?.[planId] || store.observationPlans?.default || null;
     const memory = observationPlanMemory(store);
-    let items = projectItems(store);
-    if (planId !== "default") {
-      items = items.filter((project) => projectMatchesObservationPlan(project, planId, plan));
-    }
+    let items = projectItems(store, planId, plan);
     if (filters.includeDismissed !== "true" && filters.includeDismissed !== true) {
       items = items.filter((project) => !project.dismissed);
     }
@@ -4000,10 +4206,24 @@ function createStorage(filePath) {
     }
     syncActivePlanMemory(store, store.memory);
     delete store.observationPlans[planId];
+    for (const [key, project] of Object.entries(store.projects || {})) {
+      const nextMatches = { ...observationPlanMatchMap(project) };
+      if (!nextMatches[planId]) continue;
+      delete nextMatches[planId];
+      if (Object.keys(nextMatches).length === 0) {
+        delete store.projects[key];
+      } else {
+        store.projects[key] = {
+          ...project,
+          observationPlanMatches: nextMatches
+        };
+      }
+    }
     if (store.settings?.activeObservationPlanId === planId) {
       store.settings.activeObservationPlanId = "default";
       store.memory = normalizeMemory(store.observationPlans.default?.memory || store.memory);
     }
+    store.projectRevision = new Date().toISOString();
     const saved = save(store);
     return {
       ok: true,
@@ -4147,16 +4367,23 @@ function createStorage(filePath) {
         version: store.version || 1,
         createdAt: store.createdAt || "",
         updatedAt: store.updatedAt || "",
-        projects: cloneJson(store.projects || {}, {}),
+        projects: options.includeProjects === false ? {} : cloneJson(store.projects || {}, {}),
         scans: cloneJson(store.scans || [], []),
-        leaderboards: cloneJson(store.leaderboards || { daily: {} }, { daily: {} }),
+        leaderboards: options.includeLeaderboards === false ? { daily: {}, byPlan: {} } : cloneJson(store.leaderboards || { daily: {} }, { daily: {} }),
         memory: normalizeMemory(store.memory),
         observationPlans: plans
       },
       counts: {
         projects: Object.keys(store.projects || {}).length,
         scans: Array.isArray(store.scans) ? store.scans.length : 0,
-        observationPlans: Object.keys(store.observationPlans || {}).length
+        observationPlans: Object.keys(store.observationPlans || {}).length,
+        leaderboards: localLeaderboardRecords(store.leaderboards, { cloneValues: false }).length
+      },
+      sync: {
+        projectRevision: store.projectRevision || "",
+        projectsIncluded: options.includeProjects !== false,
+        leaderboardRevision: localLeaderboardRevision(store.leaderboards),
+        leaderboardsIncluded: options.includeLeaderboards !== false
       }
     };
     if (options.includeComputed !== false) {
@@ -4164,6 +4391,53 @@ function createStorage(filePath) {
       snapshot.leaderboard = buildLeaderboard("daily", { limit: 20, persist: false });
     }
     return snapshot;
+  }
+
+  function exportLocalProjectPage(options = {}) {
+    const store = load();
+    const cursor = projectKey(options.cursor || "");
+    const limit = Math.max(25, Math.min(500, Number(options.limit || 250)));
+    const keys = Object.keys(store.projects || {}).sort();
+    const start = cursor ? keys.findIndex((key) => key > cursor) : 0;
+    const pageKeys = (start < 0 ? [] : keys.slice(start, start + limit));
+    const items = pageKeys.map((key) => {
+      const project = cloneJson(store.projects[key], {});
+      delete project.watched;
+      delete project.note;
+      delete project.triageStatus;
+      delete project.noteUpdatedAt;
+      delete project.analysis;
+      delete project.dismissed;
+      delete project.githubAction;
+      return project;
+    });
+    const nextCursor = pageKeys.length ? pageKeys[pageKeys.length - 1] : "";
+    return {
+      schema: "starvault-indexeddb-project-page/v1",
+      projectRevision: store.projectRevision || "",
+      total: keys.length,
+      items,
+      nextCursor,
+      done: start < 0 || start + pageKeys.length >= keys.length
+    };
+  }
+
+  function exportLocalLeaderboardPage(options = {}) {
+    const store = load();
+    const cursor = String(options.cursor || "");
+    const limit = Math.max(10, Math.min(100, Number(options.limit || 10)));
+    const records = localLeaderboardRecords(store.leaderboards, { cloneValues: false });
+    const start = cursor ? records.findIndex((record) => record.id > cursor) : 0;
+    const items = start < 0 ? [] : records.slice(start, start + limit).map((record) => cloneJson(record, record));
+    const nextCursor = items.length ? items[items.length - 1].id : "";
+    return {
+      schema: "starvault-indexeddb-leaderboard-page/v1",
+      leaderboardRevision: localLeaderboardRevision(store.leaderboards),
+      total: records.length,
+      items,
+      nextCursor,
+      done: start < 0 || start + items.length >= records.length
+    };
   }
 
   function importPortableData(payload = {}, options = {}) {
@@ -4252,6 +4526,7 @@ function createStorage(filePath) {
       store.projects[key].trend = trend;
       if (!trend.error) updated += 1;
     }
+    if (updated || Object.keys(trends || {}).length) store.projectRevision = new Date().toISOString();
     save(store);
     buildLeaderboard("daily", { limit: 20 });
     return updated;
@@ -4276,8 +4551,8 @@ function createStorage(filePath) {
 
     if (scanMeta.replaceObservationPlanMatches && planId !== "default") {
       for (const [key, project] of Object.entries(store.projects || {})) {
-        if (!project?.observationPlanMatches?.[planId] || incomingKeys.has(key)) continue;
-        const nextMatches = { ...(project.observationPlanMatches || {}) };
+        const nextMatches = { ...observationPlanMatchMap(project) };
+        if (!nextMatches[planId] || incomingKeys.has(key)) continue;
         delete nextMatches[planId];
         store.projects[key] = {
           ...project,
@@ -4289,7 +4564,7 @@ function createStorage(filePath) {
     for (const project of projects) {
       const key = projectKey(project.fullName);
       const previous = store.projects[key];
-      const previousMatches = previous?.observationPlanMatches || {};
+      const previousMatches = observationPlanMatchMap(previous || {});
       const observationPlanMatches = {
         ...previousMatches,
         [planId]: {
@@ -4345,6 +4620,7 @@ function createStorage(filePath) {
     });
 
     store.scans = store.scans.slice(0, 120);
+    store.projectRevision = now;
     const saved = save(store);
     buildLeaderboard("daily", { limit: 20 });
     return saved;
@@ -4591,7 +4867,8 @@ function createStorage(filePath) {
       throw new Error("Project not found");
     }
     const now = new Date().toISOString();
-    const userData = activePlanUserData(store);
+    const planId = meta.observationPlanId || activeObservationPlanId(store);
+    const userData = planUserData(store, planId);
     userData.analysis[key] = {
       fullName,
       result,
@@ -4605,13 +4882,14 @@ function createStorage(filePath) {
     };
     store.projects[key].analysis = userData.analysis[key];
     appendMemoryEvent(store, store.projects[key], "ai_analyze", {
-      source: meta.provider || "llm"
+      source: meta.provider || "llm",
+      observationPlanId: planId
     });
     const saved = save(store);
     buildLeaderboard("daily", { limit: 20 });
     return withComputedUseCase({
       ...saved.projects[key],
-      analysis: normalizePlanUserData(saved.observationPlans?.[activeObservationPlanId(saved)]?.userData || {}).analysis?.[key] || null
+      analysis: normalizePlanUserData(saved.observationPlans?.[planId]?.userData || {}).analysis?.[key] || null
     });
   }
 
@@ -4628,7 +4906,7 @@ function createStorage(filePath) {
     const planId = activeObservationPlanId(store);
     const plan = store.observationPlans?.[planId] || store.observationPlans?.default || null;
     const memory = observationPlanMemory(store);
-    const allProjects = projectItems(store).filter((project) => projectMatchesObservationPlan(project, planId, plan));
+    const allProjects = projectItems(store, planId, plan);
     const totalProjects = allProjects.length;
     const pool = projectPool(
       store,
@@ -5394,13 +5672,18 @@ function createStorage(filePath) {
     buildLeaderboard,
     clearMemoryEvents,
     compactMemoryContext,
+    createTask,
     evaluateMemoryHarness,
     getGithubActions,
     getMemory,
     getSettings,
+    getTask,
+    getRuntimeState,
     getProject,
     getObservationPlan,
     exportObservationPlans,
+    exportLocalProjectPage,
+    exportLocalLeaderboardPage,
     exportLocalSnapshot,
     exportPortableData,
     importObservationPlans,
@@ -5409,9 +5692,11 @@ function createStorage(filePath) {
     listDismissedProjects,
     listObservationPlans,
     listProjects,
+    listTasks,
     load,
     projectPoolPosition,
     recordMemoryEvent,
+    recoverInterruptedTasks,
     recordLeaderboardFeedback,
     save,
     saveObservationPlan,
@@ -5419,12 +5704,14 @@ function createStorage(filePath) {
     setActiveObservationPlan,
     deleteObservationPlan,
     setGithubAction,
+    setRuntimeState,
     setProjectDismissed,
     setAnalysis,
     setNote,
     setWatch,
     summary,
     trendRefreshCandidates,
+    updateTask,
     updateProjectTrends,
     updateLatestScan,
     updateDismissedProjectFeedback,

@@ -232,9 +232,9 @@ function observationPlanPrompt(payload = {}, language = "zh") {
           stars: 20
         }
       ],
-      preferredLanguages: ["TypeScript"],
-      preferredCategories: ["creative-media"],
-      preferredShapes: ["content-creation"],
+      preferredLanguages: [],
+      preferredCategories: [],
+      preferredShapes: [],
       minStars: 20,
       notes: "How this plan should search and rank."
     },
@@ -260,8 +260,8 @@ function observationPlanPrompt(payload = {}, language = "zh") {
   };
   const base =
     language === "en"
-      ? "Create an observation plan for StarVault Imprint, a GitHub project monitoring platform that learns user preferences. The plan should discover repositories worth learning from and tracking in the user's domain. Be practical, product-shaped, and avoid vague AI-agent-only searches. Return strict JSON only."
-      : "请为星仓印记生成一套观察方案。星仓印记是一个会根据用户行为自学习的 GitHub 项目观察平台。方案要围绕用户关注领域，发现值得学习、理解与持续跟踪的开源项目。请务实、偏应用形态，不要只生成抽象 Agent/RAG/MCP 搜索。只返回严格 JSON。";
+      ? "Create an observation plan for StarVault Imprint, a GitHub project monitoring platform that learns user preferences. Discover repositories that are strongly relevant to the user's exact domain without relying on a fixed domain dictionary. Return strict JSON only."
+      : "请为星仓印记生成一套观察方案。方案必须围绕用户本次输入的准确领域生成，不依赖任何固定领域词典，并发现值得学习、理解与持续跟踪的 GitHub 项目。只返回严格 JSON。";
   return `${base}
 
 JSON schema example:
@@ -272,7 +272,7 @@ ${JSON.stringify(schema, null, 2)}
 - 用户自定义方案默认优先使用 baseMode: "only"，除非用户明确要求宽泛发现或默认发现。不要把无关默认 profiles 混入一个聚焦领域方案。
 - baseMode focused 表示仅当需求本身较宽时，才把自定义 profiles 与最强默认产品 profiles 混合。
 - baseMode blend 表示仅当用户要求跨领域发现时，才混合自定义 profiles 与全部默认 profiles。
-- baseMode only 表示只使用自定义 profiles；CAD、金融、视频、设计、开发者工具、AI 产品等具体领域默认使用 only。
+- baseMode only 表示只使用本方案生成的 profiles；用户输入明确领域时默认使用 only。
 - 输出结构必须与用户请求中的默认观察方案保持同形。strategy 用作检索逻辑；searchLogic 可以重复 strategy。
 - 使用 researchContext 作为发现证据：写查询前，只提取与领域相关的产品形态、文件格式、技术术语、相邻工具和真实噪音词。
 - 必须先根据 researchContext.metacognition/domainModel 做元认知领域建模：识别概念、定义、文件格式、标准、协议、知名软件、库、用户、工作流、产品形态和排除边界，然后再生成检索 JSON。
@@ -281,30 +281,28 @@ ${JSON.stringify(schema, null, 2)}
 - keywords 必须按方法生成，不得依赖固定字典。元认知顺序是：先判断核心词到底是什么；列出官方名称和确认别名；映射其所属生态；寻找文件格式、协议、SDK/API、插件或扩展框架、型号/产品族、技术概念和具体 GitHub 工作流形态；最后判断哪些相邻词过宽或无关。researchContext 稀疏或噪音大时，应依赖领域知识和核心词，不要复制无关仓库主题。
 - 生成的 keywords 必须足以让用户在扫描前理解方案。成熟且 GitHub 活跃度高的领域，除非需求极窄且 researchContext 证明生态稀疏，否则只返回 3-6 个 keywords 或 3-6 条 customQueries 是无效的。
 - 对命名产品、软件、硬件、平台和缩写，keywords 必须保持核心锚定：包含精确核心词、官方别名、变体/产品族、生态词、开发者接口、格式/协议和 GitHub 用户会搜索的实践工作流。不要把丰富生态压缩成产品名加一个变体。
-- 下面只是方法示例，不是固定字典：CAD -> CAD, computer aided design, 2D drafting, 3D CAD, parametric CAD, DWG, DXF, STEP, STL, IFC, BREP, FreeCAD, OpenCascade, CadQuery, BIM, CAM, CAE。Photoshop -> photoshop, Adobe Photoshop, PSD, PSB, UXP, CEP, Photoshop plugin, Photoshop extension, Photoshop script, Photoshop action, Photoshop brush, Photoshop preset, image editing workflow。CRM -> CRM, customer relationship management, sales pipeline, lead management, contact management, deal tracking, helpdesk, ticketing, customer portal, marketing automation, self-hosted CRM, SaaS CRM。剪映 -> 剪映, CapCut, Jianying, video editor, video editing, timeline editor, NLE, template, subtitle, automation, MP4, MOV, SRT, VTT。
+- 不提供或套用领域示例词典。所有关键词都必须能追溯到用户输入、researchContext 的可靠证据，或模型对该核心概念的稳定领域知识。
 - strategy.keywords 与 customQueries 必须互相一致。每个主要 customQuery 组都应在 strategy.keywords 中有对应关键词或短语；每个 keyword 也必须是核心关键词、确认别名，或至少被一条 customQuery 使用的强相邻概念。
 - 错误 keyword 形态包括：只用需求加 "<name> app/tool/workflow"；无关仓库主题；需求不是开发时却加入编程语言；泛化的 "OSS"、"tracker"、"open source"、"application"、"software"；无法绑定核心关键词的宽泛父级领域词。
 - 相关性契约：每条 customQuery 必须至少包含一个来自 payload.name 或 payload.detailedNeed 的核心锚点，或一个领域模型明确证明属于该需求的相邻词。不能通过测试的查询必须删除。
 - 覆盖方法：把领域词表转成少量高信号查询组，包括精确产品/软件词、官方 SDK/API/插件词、文件格式或协议、具体工作流、强相关生态库。不要把每个同义词都拆成一条查询。宽泛成熟领域通常需要覆盖主要 GitHub 仓库形态，不能只有一个精确名称搜索加 app/tool/workflow 变体。
 - 活跃度校准方法：存在 researchContext.githubActivity 时，优先使用 probes[].totalCount 和 activityLevel。精确核心锚点活跃度高时，不要把方案压缩成 API/sample 几条查询；应生成 15-25 条锚定 profiles 覆盖产品形态，并在每条查询里保留精确锚点。活跃度中等时生成约 10-18 条锚定 profiles。活跃度低或稀疏时，先放宽 stars/recency 并使用精确别名，但永远不要移除核心锚点。
-- 高活跃命名软件，例如 Photoshop，应覆盖 plugin、extension、script、automation、template、SDK/API、integrations、file formats、presets/assets 和实践工作流。Photoshop 可用形态包括 photoshop plugin、photoshop extension、photoshop script、photoshop action、photoshop brush、photoshop preset、photoshop template、photoshop psd、photoshop uxp、photoshop cep。不要把 photoshop 替换成只有 image editor、design tool 或 generic dashboard。
-- 中文命名产品和平台必须当成命名软件处理，不能当成普通中文关键词。先根据 researchContext 与领域知识推断官方名称、英文别名、生态词、开发者接口、文件/协议格式和相邻工具，再基于这些发现生成锚定查询。不要依赖任何固定产品字典。每条查询必须保留原中文产品名或元认知步骤确认的别名。
+- 命名软件、硬件、平台或产品应覆盖经证据确认的插件/扩展、SDK/API、格式/协议、自动化、集成和真实工作流，但不能退化成宽泛父级类别。
+- 中文命名产品和平台必须先确认官方英文名、常见别名和开发者生态；每条查询保留原名称或已确认别名，不依赖预置产品字典。
 - GitHub 活跃度是松紧度旋钮，不是填充理由。拥有数千仓库的热门核心词需要更宽的锚定覆盖和更精准的排除；稀疏核心词需要更少 profiles 和更宽松 stars/recency。
-- 对 CRM、ERP、CMS、BI、POS 等宽泛业务系统缩写，只要它是用户方案名，就视为有效核心锚点。按上述方法推导业务形态，然后覆盖 self-hosted app、dashboard、pipeline/workflow objects、entity management、portals、support/ticketing、automation、starter templates、API/integration、admin workflows。除非用户明确要求某个项目，否则不要使用单一厂商/项目名、SEO 文章名、GEO 答案片段或商业产品品牌作为 profile。
-- 对 AI 硬件、AI accelerator、edge inference、AI chip 这类宽泛技术领域，不能把 AI、GPU、hardware 这类泛词单独作为查询，也不能写成 "GPU AI OR CUDA OR ROCm" 这种大杂烩。应先拆出硬件/加速器、推理运行时、编译器、SDK、边缘设备和部署工作流等仓库形态，再生成 12-25 条单主题 profiles。例如 CUDA deep learning、ROCm machine learning、TensorRT inference、OpenVINO inference、Apache TVM compiler、ONNX Runtime accelerator、TFLite delegate、CoreML Neural Engine、Edge TPU inference、Jetson inference、NPU SDK、FPGA Vitis AI、TinyML microcontroller、INT8 inference、GPU delegate。每条 query 都要绑定 AI/ML/inference/deep learning/neural/edge 语义，避免搜出普通驱动、系统 overlay、文章仓库或无关硬件项目。
-- 出现命名产品/软件时，每条 customQuery 都必须保留该精确名称或确认别名。不要替换成父级类别。例如剪映代表 CapCut/Jianying 视频剪辑生态，应使用剪映、CapCut、Jianying、templates、subtitle、automation 和 video editor workflows。不要因为其他行业不是用户领域，就把无关行业随意加入 excludeTerms。
-- CAD、AI、graph、video、audio、design、automation、dashboard、SDK、plugin、viewer、converter 等泛化父级领域词不能单独作为有效查询词。只有与核心锚点或明确证明强相关的相邻词配对时才可使用。
-- 命名生态应沿用成功的 UGNX 模式：精确核心名称优先，其次是与核心名称绑定的 API/plugin/workflow 形态，最后才是最接近的相邻领域词。例如 CAD 只有在查询仍然带有 NX/UGNX/Siemens NX/NXOpen/UGOpen/Unigraphics 意图时，才适合用于 UGNX。
+- 缩写、宽泛类别、命名产品、格式、协议和工作流都必须使用同一套方法：先确定准确含义，再建立边界，最后生成查询，不得根据名称套用固定领域模板。
+- 宽泛父级词不能单独成为有效查询。只有与核心锚点或研究证据确认的相邻概念绑定时才能使用。
+- 命名生态按“精确名称或确认别名 → 开发者接口/格式/扩展体系 → 强相关工作流 → 最近的相邻生态”排序，越往后越需要证据。
 - 返回 JSON 前必须自检每条 customQuery：它是否可能搜出无关领域、教程列表、个人主页、awesome-list 或泛化 demo？如果会，就优先删除或收紧。只有在元认知或研究证据证明存在具体歧义或反复假阳性时，才添加排除词。
-- 不要把 payload.name 或 payload.detailedNeed 中明确的产品、框架、软件、缩写替换成宽泛父级领域。比如 UGNX plugins 的前几条 customQueries 必须先包含 UGNX/Siemens NX/NXOpen 风格插件或扩展搜索，再考虑更宽的 CAD/BIM 搜索。
-- 如果用户询问 CAD，应覆盖 DWG/DXF/STEP/STL/IGES/IFC 等格式，FreeCAD/OpenCascade/CadQuery/LibreCAD/OpenSCAD/IfcOpenShell 等软件/库，以及 viewer/editor/converter/parametric modeling/BIM/CAM/CAE 等工作流。其他领域也要达到同等深度，不能只扩展关键词表面词。
+- 不要把 payload.name 或 payload.detailedNeed 中明确的产品、框架、软件、缩写替换成宽泛父级领域。
+- 深度标准对所有领域一致：至少检查官方名称与别名、格式/协议、SDK/API、扩展体系、相关库、用户工作流和可形成的仓库产品形态；不存在的维度留空，不要硬编。
 - customQueries 是核心检索逻辑，会被直接当作 GitHub 仓库搜索 profiles 执行。
 - customQueries 必须是完整有效的 GitHub 仓库搜索语句，不是短关键词。每条 query 都应包含 in:name,description,readme、archived:false、mirror:false 和有用的反噪音限制。stars:> 与 pushed:>= 只有在适合该领域且不会隐藏长尾仓库时才使用。
 - customQueries 不要使用 "(A OR B)" 这类括号布尔 OR 组。GitHub 仓库搜索 profile 应该是一条稳定可执行查询。重要别名应在 ${queryLimit} 条上限内拆成多条 customQueries，或为该 profile 选择最强别名。
 - 严禁在 customQueries 中使用未加括号的 OR 串联，例如 "A OR B OR C"。如果确实有多个别名或相邻技术面，必须拆成多条 customQueries；每条 query 只表达一个主题，并保留足够的核心锚点。
-- 对 UGNX、Siemens NX、NXOpen、CAD 插件、SDK、converter、viewer、file-format tooling 这类命名、小众或 legacy 生态，不要强加 star 阈值或过短 pushed 窗口。优先使用精确核心查询，再一次只加一个聚焦表面词，例如 "UGNX"、"UGNX plugin"、"NXOpen"、"Siemens NX plugin"。
-- 不要把过多泛化表面词塞进同一条 query。"UGNX plugin extension sdk automation" 过严，因为 GitHub Search 会把词累加匹配。应拆成更小的高信号 profiles。
-- pushed 时间窗口按领域节奏选择：快速变化的 app/AI/web 产品可约 90 天；plugin、parser、converter、viewer、SDK 和 library 通常约 180 天；CAD/BIM/geometry kernels/file-format 生态通常约 365 天，避免过滤掉慢更新但有价值的项目。
+- 命名、小众或历史较久的生态不要强加 star 阈值或过短 pushed 窗口。优先使用精确核心查询，一次只增加一个有证据的聚焦概念。
+- 不要把过多表面词塞进同一条 query。GitHub Search 会累加匹配条件，过长查询会把有效结果压成零；需要多维覆盖时拆成更小的高信号 profiles。
+- pushed 时间窗口根据 researchContext.githubActivity 和领域更新节奏决定；证据不足时宁可放宽，不要机械套用固定领域天数。
 - keywords 必须是紧凑的规范锚点列表，不是大型关键词堆。excludeTerms 可以为空。只加入具体歧义、低价值仓库类型或元认知/研究证据发现的反复假阳性模式。不要列任意无关领域作为排除词。keywords 和 excludeTerms 用于解释并支持 customQueries，不能替代 customQueries。
 - keywords 字段必须包含真实发现的词：官方名称、确认别名、生态概念、SDK/API、格式/协议、工具形态、相邻库和排除歧义相关词。只返回需求词加 "<name> app"、"<name> tool"、"<name> workflow" 这类泛化变体是无效的。
 - 不要把 payload.name 改成营销标题。name 必须等于用户输入的方案名。人类可读描述可以解释范围，但方案身份必须保留用户输入。
@@ -895,6 +893,13 @@ function unusableObservationPlanError(raw = "") {
   return error;
 }
 
+function observationPlanQualityError(issues = [], raw = "") {
+  const error = new Error(`AI observation plan did not pass the quality gate: ${issues.slice(0, 4).join("; ")}`);
+  error.qualityIssues = issues.slice();
+  error.rawPreview = String(raw || "").slice(0, 3000);
+  return error;
+}
+
 function observationPlanRepairPrompt(payload = {}, raw = "", language = "zh") {
   const base =
     language === "en"
@@ -938,8 +943,8 @@ Rules:
 - The core keyword is "${String(payload.coreKeyword || payload.name || "").replaceAll('"', "")}".
 - Before writing JSON, internally use this method: identify the one primary core anchor; classify it as product/category/acronym/format/protocol/framework/ecosystem/workflow; build a compact glossary from official names, aliases, translations, standards, formats, APIs/SDKs, plugin systems, product families, adjacent libraries, user workflows, and concrete GitHub repository surfaces; remove SEO/GEO/vendor-result noise and unrelated parent-domain terms; then create customQueries from that glossary.
 - keywords must be generated from that method and must not be generic variants like "<name> app/tool/workflow" only. For a mature domain, 3-6 keywords or 3-6 customQueries is invalid unless the brief is extremely narrow and research evidence proves the ecosystem is sparse.
-- For broad business acronyms such as CRM, ERP, CMS, BI, or POS, keep the acronym as the core anchor and derive the real business surfaces by method: self-hosted app, dashboard, pipeline/workflow objects, entity management, portals, support/ticketing, automation, starter templates, API/integration, and admin workflows. Do not use a single vendor/project name, SEO article name, GEO answer snippet, or commercial product brand as a profile unless the user explicitly asked for that exact project.
-- For AI hardware, AI accelerator, edge inference, or AI chip plans, do not use generic AI/GPU/hardware terms alone and do not write broad OR chains such as "GPU AI OR CUDA OR ROCm". Split the domain into concrete profiles such as CUDA deep learning, ROCm machine learning, TensorRT inference, OpenVINO inference, Apache TVM compiler, ONNX Runtime accelerator, TFLite delegate, CoreML Neural Engine, Edge TPU inference, Jetson inference, NPU SDK, FPGA Vitis AI, TinyML microcontroller, INT8 inference, and GPU delegate. Each query must stay tied to AI/ML/inference/deep learning/neural/edge context so ordinary drivers, overlays, article repositories, and unrelated hardware projects are excluded.
+- Apply one domain-independent method to acronyms, named products, broad categories, formats, protocols, frameworks, ecosystems, and workflows. Confirm the exact meaning and boundary before expanding it.
+- Derive aliases, formats, APIs/SDKs, extension systems, adjacent libraries, users, workflows, and repository surfaces from the payload and research evidence. Do not insert a memorized domain pack.
 - excludeTerms may be an empty array. Only include true ambiguity, low-value repository types, or repeated false-positive patterns supported by the brief/research evidence.
 - customQueries must be executable GitHub repository search queries and must include in:name,description,readme archived:false mirror:false.
 - Do not use parenthesized OR groups like "(A OR B)" in customQueries. Split key aliases into separate customQueries or choose the strongest alias.
@@ -1084,6 +1089,9 @@ async function generateObservationPlanWithProvider({ provider, payload, language
   }
   if (!hasUsableObservationPlanDraft(parsed)) {
     throw unusableObservationPlanError(raw);
+  }
+  if (qualityIssues.length) {
+    throw observationPlanQualityError(qualityIssues, raw);
   }
   return {
     raw,
@@ -1232,6 +1240,10 @@ module.exports = {
   analyzeWithProvider,
   generateObservationPlanWithProvider,
   listProviderModels,
+  minimumObservationDraftCustomQueries,
+  normalizeObservationPlanDraft,
+  observationPlanDraftQualityIssues,
+  observationPlanPrompt,
   testProviderConnection,
   tuneMemoryWithProvider
 };

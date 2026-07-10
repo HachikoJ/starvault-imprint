@@ -1,6 +1,6 @@
 # 星仓印记验收清单
 
-更新日期：2026-06-22  
+更新日期：2026-07-10
 使用方式：每次完成一个功能迭代后，按本清单做最小必要验收。
 
 状态口径：
@@ -11,15 +11,20 @@
 - `Fail`：当前状态明确不满足验收要求。
 - `N/A`：当前阶段不适用。
 
+本轮门禁基线：Git 初始提交 `bedb953`；Node 测试与语法检查由 `npm run ci` 执行；中英文 4 视口视觉矩阵由 `npm run visual:check` 执行；CI 使用 `npm run perf:storage:fixture` 运行不含用户数据的 6K 合成性能门禁，本机再用 `npm run perf:storage` 复验真实规模。真实 GitHub 和 AI Provider 仍按 `Verify` 管理，不把本地密钥放入 CI。
+
 ## 1. 基础验证
 
 | ID | 验收项 | 检查方式 | 状态 |
 |---|---|---|---|
 | A-001 | 项目可启动，首页可访问 | `npm run dev` 后打开 `http://localhost:4173` | Pass - 本地服务入口和静态首页存在，仍建议每次发布前启动验收。 |
 | A-002 | 语法检查通过 | `npm run check` | Pass - 本轮已运行通过。 |
-| A-003 | `.env`、本地数据和密钥文件不会被提交 | 检查 `.gitignore` 和 `git status --short` | Fail - `.gitignore` 已覆盖敏感文件，但当前项目文件整体未跟踪，缺少 Git 基线。 |
+| A-003 | `.env`、本地数据和密钥文件不会被提交 | 检查 `.gitignore`、`git status --short` 和 Git 历史 | Pass - 已有 Git 基线；`.env`、`data/`、`output/` 等保持忽略，本轮提交前继续执行密钥扫描。 |
 | A-004 | API 响应不直接返回未请求展示的密钥明文 | 调用 `/api/settings`，未带 `reveal` 时 Key 为空且有 preview | Pass - `settingsResponse()` 默认隐藏 GitHub/Tavily/Exa/AI Key。 |
-| A-005 | 对外文档没有过时的功利化传播口径 | 使用旧口径词表扫描 README、PRD、Taxonomy、Risk 和 License 文档 | Verify - `secondDevelopment`、`二开`、`产品壳` 等已清理；仍需二次审阅早期“爆款/高潜”类措辞。 |
+| A-005 | 对外文档没有过时的功利化传播口径 | 使用旧口径词表扫描 README、PRD、Taxonomy、Risk 和 License 文档 | Pass - 对外主文档统一使用学习、理解、跟踪、实践启发和机会研判口径。 |
+| A-006 | Node 主存储不再依赖整包 JSON | 运行 SQLite 测试并检查 `data/starvault.db` 表结构 | Pass - SQLite WAL 按项目、方案、扫描和归属关系增量持久化；旧 JSON 只读迁移。 |
+| A-007 | Web IndexedDB 不再保存完整项目池与榜单整包 | 运行 IndexedDB/HTTP 集成测试 | Pass - IndexedDB v4 分对象仓库，Node 同步使用核心、项目分页和榜单分页。 |
+| A-008 | 扫描、AI 分析、方案生成刷新后可恢复且不跨方案写入 | 运行 `tests/durable-tasks.test.js` 和浏览器本地任务测试 | Pass - 任务持久化、重启重新排队、最多重试 3 次，并绑定创建时方案。 |
 
 ## 2. 设置与集成
 
@@ -45,7 +50,7 @@
 | SC-006 | 扫描完成后项目池自动刷新，展示最新入库结果 | 扫描前后比较项目池数量和最近扫描时间 | Pass - 前端扫描完成后调用 `loadAll({ resetProjectPool: true })`。 |
 | SC-007 | 趋势缓存随扫描更新，不在翻页或刷新页面时重新请求 GitHub | 翻页时观察网络请求和趋势状态 | Pass - 趋势只在扫描主链路更新，项目列表读取缓存。 |
 | SC-008 | 扫描记录保存命中数、入库数、趋势更新数、错误列表 | 查看数据文件或 `/api/summary` | Pass - scan record 保存 received、insertedOrUpdated、trendUpdated、trendLimit、errors。 |
-| SC-009 | 无 GitHub Token 时仍可小规模使用，但趋势缓存显示清楚的缺失态 | 移除 Token 后扫描 | Verify - 扫描可跳过趋势缓存，缺失态需浏览器确认。 |
+| SC-009 | 扫描开始前必须验证 GitHub Token；无效或缺失时立即停止 | 移除或替换为无效 Token 后扫描 | Pass - 扫描先验证 Token，失败后停止并引导至设置，不执行候选检索。 |
 
 ## 4. 项目池
 
@@ -154,22 +159,22 @@
 | ID | 验收项 | 检查方式 | 状态 |
 |---|---|---|---|
 | I-001 | 中文界面无不必要中英混搭 | 手动检查主要 Tab | Verify - 需人工抽查。 |
-| I-002 | 英文界面标题、副标题、统计卡、详情标签、学习中枢指标不截断 | 切换英文并检查 | Verify - 需视觉回归和人工抽查。 |
+| I-002 | 英文界面标题、副标题、统计卡、详情标签、学习中枢指标不发生非预期截断 | 切换英文并检查 | Pass - 自动矩阵已排除有意 ellipsis，并对其余文本裁切零容忍。 |
 | I-003 | 顶部 Logo、Tab、配置状态、语言、导出、扫描在同一行且高度一致 | 检查顶部栏 | Verify - 视觉验收项。 |
-| I-004 | 只有图标的按钮都有 Tooltip，且 Tooltip 在下方不遮挡相邻按钮 | 悬停所有图标按钮 | Verify - Tooltip 系统和视觉脚本已覆盖，需运行矩阵。 |
+| I-004 | 只有图标的按钮都有 Tooltip，且 Tooltip 在下方不遮挡相邻按钮 | 悬停所有图标按钮 | Pass - Tooltip 自动检查覆盖出界和目标遮挡。 |
 | I-005 | 顶部已有文字的 Tab 不重复显示 Tooltip | 悬停顶部 Tab | Verify - 需浏览器确认。 |
-| I-006 | 页面主体没有明显错位、遮挡、容器溢出 | 项目池、榜单、结构看板、学习中枢、设置页逐项检查 | Verify - 需视觉回归。 |
-| I-007 | 窄屏下标签、按钮和统计卡仍完整可读 | 使用浏览器模拟窄宽度 | Verify - 需视觉回归。 |
+| I-006 | 页面主体没有明显错位、遮挡、容器溢出 | 项目池、榜单、结构看板、学习中枢、设置页逐项检查 | Pass - 本轮 48 组页面/语言/视口截图通过自动布局检查。 |
+| I-007 | 窄屏下标签、按钮和统计卡仍完整可读 | 使用浏览器模拟窄宽度 | Pass - 390px 项目池、榜单操作行和标题状态已专项修复并复测。 |
 
 ## 12. 系统视觉回归
 
 | ID | 验收项 | 检查方式 | 状态 |
 |---|---|---|---|
 | V-001 | 视觉回归矩阵覆盖中文、英文和 4 个固定视口 | 查看 [VISUAL_REGRESSION.md](VISUAL_REGRESSION.md) | Pass - 文档和脚本矩阵已覆盖中英文、4 视口、主要页面。 |
-| V-002 | 项目池、榜单、学习中枢、结构看板、我的仓库、设置页都有截图 | 运行 `npm run visual:check` 后检查 `output/visual-regression/screenshots/` | Todo - 当前未发现最新 `output/visual-regression/` 结果目录。 |
-| V-003 | 自动检查能捕捉横向溢出、文字裁切、同级遮挡、Tooltip 出界和控制台错误 | 运行 `npm run visual:check` 并查看 `report.json` | Verify - 脚本已实现检查能力，但本轮未留存最新报告。 |
-| V-004 | 英文状态下品牌副标题、项目池统计、详情标签、学习中枢指标和设置表单不溢出 | 查看英文截图和自动报告 | Todo - 需要最新视觉回归报告和人工抽查。 |
-| V-005 | 每次较大 UI 改动后必须保留一轮视觉回归结果 | 检查本次迭代记录和截图目录 | Todo - 当前没有可引用的最新视觉回归输出。 |
+| V-002 | 项目池、榜单、学习中枢、结构看板、我的仓库、设置页都有截图 | 运行 `npm run visual:check` 后检查 `output/visual-regression/screenshots/` | Pass - 中文/英文、desktop/laptop/tablet/mobile、6 个主视图均生成截图。 |
+| V-003 | 自动检查能捕捉横向溢出、文字裁切、同级遮挡、Tooltip 出界和控制台错误 | 运行 `npm run visual:check` 并查看 `report.json` | Pass - 自动报告覆盖上述类别；有意 ellipsis 和 line-clamp 不作为失败。 |
+| V-004 | 英文状态下品牌副标题、项目池统计、详情标签、学习中枢指标和设置表单不溢出 | 查看英文截图和自动报告 | Pass - 本轮报告无未解释英文裁切。 |
+| V-005 | 每次较大 UI 改动后必须保留一轮视觉回归结果 | GitHub Actions artifact 或本地输出 | Pass - CI 独立安装 Chromium、执行矩阵并保留 7 天 artifact。 |
 
 ## 13. 我的仓库
 
@@ -193,18 +198,23 @@
 - AI 分析结果覆盖仓库事实或忽略用户需求。
 - 学习记忆不可查看、不可编辑或清除行为后偏好无法解释。
 - 项目没有 Git 版本基线，导致变更无法追踪和回滚。
+- 默认方案出现只属于其他方案的项目，或任务结果写入错误方案。
+- Web 同步退回完整项目池/榜单 JSON，或 SQLite 写入退回每次重写整库文件。
+- 长任务只显示刷新警告而没有持久化任务记录和恢复路径。
+- 非本机 Node 服务在没有认证网关、TLS 和边缘防护时直接公开。
+- `npm run ci` 或 `npm run visual:check` 未通过。
 
 ## 15. 建议验证顺序
 
-1. 运行 `npm run check`。
-2. 建立 Git 基线或至少确认本轮文档变更 diff。
-3. 运行 `npm run visual:check`，检查自动报告和截图。
-4. 启动 `npm run dev`。
-5. 打开首页，检查顶部布局和配置状态。
-6. 配置 GitHub、Tavily、Exa、AI Key，分别测试显示、隐藏、清除和保存。
-7. 手动扫描一次，记录扫描耗时、ETA、趋势缓存和项目池刷新结果。
-8. 项目池执行搜索、标签、排序、分页、导出。
-9. 打开项目详情，执行收藏、Star、Fork、笔记、AI 分析。
-10. 查看榜单、结构看板、学习中枢和我的仓库。
-11. 切换英文，再重复检查顶部、项目池、详情和学习中枢的文字显示。
-12. 运行文案残留扫描，确认传播口径一致。
+1. 运行 `npm run ci`。
+2. 运行 `npm run visual:check`，检查自动报告和关键截图。
+3. 在接近真实规模的数据上运行 `npm run perf:storage`。
+4. 检查 `git status --short`、ignored 文件和密钥模式扫描。
+5. 启动 `npm run dev`，检查顶部布局和配置状态。
+6. 用有效和无效 GitHub Token 分别验证保存、测试、扫描阻断和完整扫描。
+7. 用真实 AI Key 验证模型拉取、连接测试、项目分析和方案生成。
+8. 使用陌生领域 cases 文件运行 `npm run audit:plans:live -- --cases-file <file>`。
+9. 项目池执行搜索、标签、排序、分页、收藏、隐藏和导出。
+10. 打开详情执行 Star、Unstar、Fork、研判、AI 分析与更多数据检查。
+11. 查看榜单、结构看板、学习中枢和我的仓库，并切换英文复核。
+12. 公网部署时单独验收 TLS、认证网关、CDN/WAF、Secret Manager、审计和恢复演练。

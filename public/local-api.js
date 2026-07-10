@@ -20,6 +20,55 @@
     "学习中枢要根据我的收藏、Star/Fork、研判、AI 分析、不合适/隐藏这些明确行为调整项目池和榜单，普通点开看看不要给太高权重。",
     "默认观察就当作通用起步方案，先保持只读；如果我要看 CAD、PS、CRM、AI 硬件这类具体领域，再单独新建观察方案。"
   ];
+  const MEMORY_EVENT_WEIGHTS = {
+    select_project: 0.03,
+    open_github: 0.12,
+    copy_url: 0.16,
+    ai_analyze: 1,
+    triage_note: 1.6,
+    leaderboard_positive: 1.4,
+    favorite: 2.6,
+    leaderboard_strong_positive: 2.8,
+    star: 3.2,
+    fork: 4.2,
+    unfavorite: -1.6,
+    unstar: -2.1,
+    leaderboard_negative: -2.6,
+    dismiss_project: -0.35
+  };
+  const localTaskPromises = new Map();
+  const DEFAULT_BROWSER_QUERY_GROUPS = [
+    ["自托管应用", "self hosted app stars:>100 pushed:>=2024-01-01"],
+    ["开源替代", "open source alternative stars:>100 pushed:>=2024-01-01"],
+    ["本地优先", "local first app stars:>50 pushed:>=2024-01-01"],
+    ["个人效率", "personal productivity app stars:>50 pushed:>=2024-01-01"],
+    ["桌面应用", "desktop app stars:>100 pushed:>=2024-01-01"],
+    ["浏览器扩展", "browser extension productivity stars:>50 pushed:>=2024-01-01"],
+    ["开发者工具", "developer tool stars:>100 pushed:>=2024-01-01"],
+    ["命令行工具", "cli tool stars:>100 pushed:>=2024-01-01"],
+    ["API 客户端", "api client tool stars:>50 pushed:>=2024-01-01"],
+    ["测试工具", "testing tool developer stars:>50 pushed:>=2024-01-01"],
+    ["工作流自动化", "workflow automation stars:>100 pushed:>=2024-01-01"],
+    ["集成平台", "integration platform self hosted stars:>50 pushed:>=2024-01-01"],
+    ["管理后台", "admin dashboard self hosted stars:>100 pushed:>=2024-01-01"],
+    ["SaaS 模板", "saas starter full stack stars:>100 pushed:>=2024-01-01"],
+    ["客户管理", "open source crm self hosted stars:>50 pushed:>=2024-01-01"],
+    ["客服工单", "helpdesk ticketing self hosted stars:>50 pushed:>=2024-01-01"],
+    ["内容管理", "headless cms self hosted stars:>100 pushed:>=2024-01-01"],
+    ["数据看板", "data dashboard analytics stars:>100 pushed:>=2024-01-01"],
+    ["数据管道", "etl data pipeline stars:>100 pushed:>=2024-01-01"],
+    ["知识库", "knowledge base self hosted stars:>100 pushed:>=2024-01-01"],
+    ["文档搜索", "document search app stars:>50 pushed:>=2024-01-01"],
+    ["RAG 产品", "rag knowledge base app stars:>100 pushed:>=2024-01-01"],
+    ["AI 聊天产品", "ai chat app self hosted stars:>100 pushed:>=2024-01-01"],
+    ["AI 工作台", "ai workspace app stars:>50 pushed:>=2024-01-01"],
+    ["Agent 产品", "ai agent platform app stars:>100 pushed:>=2024-01-01"],
+    ["设计工具", "design editor open source stars:>100 pushed:>=2024-01-01"],
+    ["视频工具", "video editor open source stars:>100 pushed:>=2024-01-01"],
+    ["音频工具", "audio editor open source stars:>100 pushed:>=2024-01-01"],
+    ["白板图表", "whiteboard diagram editor stars:>100 pushed:>=2024-01-01"],
+    ["演示工具", "presentation editor generator stars:>50 pushed:>=2024-01-01"]
+  ];
 
   const storage = () => window.StarVaultIndexedDB || null;
   const nowIso = () => new Date().toISOString();
@@ -33,6 +82,24 @@
     }
   };
 
+  function defaultBrowserSearchLogic() {
+    const customQueries = DEFAULT_BROWSER_QUERY_GROUPS.map(([label, core], index) => ({
+      key: `browser-default-${index + 1}`,
+      label,
+      labelZh: label,
+      labelEn: label,
+      query: `${core} in:name,description,readme archived:false mirror:false`,
+      stars: 0
+    }));
+    return {
+      baseMode: "only",
+      keywords: [],
+      excludeTerms: ["awesome list", "paper list", "tutorial", "course", "toy example"],
+      customQueries,
+      minStars: 0
+    };
+  }
+
   function localModeForced() {
     try {
       return window.localStorage.getItem(STORAGE_MODE_KEY) === "indexeddb";
@@ -41,9 +108,9 @@
     }
   }
 
-  async function getSnapshot() {
+  async function getSnapshot(options = {}) {
     const db = storage();
-    return db?.getSnapshot ? db.getSnapshot() : null;
+    return db?.getSnapshot ? db.getSnapshot(options) : null;
   }
 
   async function saveSnapshot(snapshot) {
@@ -53,7 +120,7 @@
     snapshot.exportedAt = nowIso();
     snapshot.store = snapshot.store || {};
     snapshot.store.updatedAt = nowIso();
-    return db.putSnapshot(snapshot);
+    return db.putSnapshot(snapshot, { preserveProjects: true });
   }
 
   async function getSecrets() {
@@ -80,8 +147,8 @@
       active: true,
       createdAt,
       updatedAt: createdAt,
-      strategy: { baseMode: "only", keywords: [], excludeTerms: [], customQueries: [], minStars: 0 },
-      searchLogic: { baseMode: "only", keywords: [], excludeTerms: [], customQueries: [], minStars: 0 },
+      strategy: defaultBrowserSearchLogic(),
+      searchLogic: defaultBrowserSearchLogic(),
       summary: {},
       memory: defaultMemory(),
       userData: defaultUserData()
@@ -103,6 +170,7 @@
         updatedAt: createdAt,
         projects: {},
         scans: [],
+        tasks: {},
         leaderboards: { daily: {} },
         memory: defaultPlan.memory,
         observationPlans: { default: defaultPlan }
@@ -131,15 +199,21 @@
     plan.id = "default";
     plan.builtIn = true;
     plan.requirements = defaultObservationRequirements(timestamp);
+    const logic = plan.searchLogic || plan.strategy || {};
+    if (!Array.isArray(logic.customQueries) || logic.customQueries.length === 0) {
+      plan.searchLogic = defaultBrowserSearchLogic();
+      plan.strategy = plan.searchLogic;
+    }
     plan.updatedAt = plan.updatedAt || timestamp;
     return plan;
   }
 
   async function requireSnapshot() {
-    const snapshot = (await getSnapshot()) || emptySnapshot();
+    const snapshot = (await getSnapshot({ includeProjects: false })) || emptySnapshot();
     snapshot.store = snapshot.store || {};
     snapshot.store.projects = snapshot.store.projects || {};
     snapshot.store.scans = Array.isArray(snapshot.store.scans) ? snapshot.store.scans : [];
+    snapshot.store.tasks = snapshot.store.tasks && typeof snapshot.store.tasks === "object" ? snapshot.store.tasks : {};
     snapshot.store.leaderboards = snapshot.store.leaderboards || { daily: {} };
     snapshot.store.observationPlans = snapshot.store.observationPlans || {};
     ensureDefaultObservationPlan(snapshot);
@@ -148,7 +222,7 @@
     const active = activePlan(snapshot);
     snapshot.store.memory = active.memory || snapshot.store.memory || defaultMemory();
     snapshot.counts = {
-      projects: Object.keys(snapshot.store.projects || {}).length,
+      projects: Number(snapshot.counts?.projects || 0),
       scans: snapshot.store.scans.length,
       observationPlans: Object.keys(snapshot.store.observationPlans || {}).length
     };
@@ -183,6 +257,7 @@
       events: [],
       preferences: { categories: {}, useCases: {}, languages: {}, licenses: {}, riskLevels: {} },
       negativePreferences: { categories: {}, useCases: {}, languages: {}, licenses: {}, riskLevels: {}, repositories: {} },
+      discoveryProfiles: {},
       manualPreferences: { categories: {}, useCases: {}, languages: {}, licenses: {}, riskLevels: {} },
       manualNegativePreferences: { categories: {}, useCases: {}, languages: {}, licenses: {}, riskLevels: {}, repositories: {} },
       antiBubble: { explorationRatio: 0.25, diversityFloor: 0.35, noveltyRatio: 0.2 },
@@ -198,16 +273,24 @@
     };
   }
 
-  function activePlan(snapshot) {
+  function planById(snapshot, requestedId = "") {
     const plans = snapshot.store?.observationPlans || {};
-    const id = snapshot.activeObservationPlanId || snapshot.settings?.activeObservationPlanId || "default";
+    const id = requestedId || snapshot.activeObservationPlanId || snapshot.settings?.activeObservationPlanId || "default";
     return plans[id] || plans.default || Object.values(plans)[0] || emptySnapshot().store.observationPlans.default;
   }
 
-  function activeUserData(snapshot) {
-    const plan = activePlan(snapshot);
+  function activePlan(snapshot) {
+    return planById(snapshot);
+  }
+
+  function userDataForPlan(snapshot, planId = "") {
+    const plan = planById(snapshot, planId);
     plan.userData = { ...defaultUserData(), ...(plan.userData || {}) };
     return plan.userData;
+  }
+
+  function activeUserData(snapshot) {
+    return userDataForPlan(snapshot);
   }
 
   function publicPlan(plan, activeId, includeMemory = false) {
@@ -229,27 +312,31 @@
     return view;
   }
 
-  function withUserState(project, snapshot) {
+  function withUserState(project, snapshot, planId = "") {
     const key = projectKey(project.fullName);
-    const userData = activeUserData(snapshot);
+    const userData = userDataForPlan(snapshot, planId);
     const note = userData.notes?.[key] || {};
     return {
       ...project,
       watched: Boolean(userData.watchlist?.[key]),
-      note: note.text || project.note || "",
-      triageStatus: note.status || project.triageStatus || "",
-      noteUpdatedAt: note.updatedAt || project.noteUpdatedAt || "",
-      analysis: userData.analysis?.[key] || project.analysis || null,
+      note: note.text || "",
+      triageStatus: note.status || "",
+      noteUpdatedAt: note.updatedAt || "",
+      analysis: userData.analysis?.[key] || null,
       dismissed: Boolean(userData.dismissedProjects?.[key]),
-      githubAction: userData.githubActions?.[key] || project.githubAction || null
+      githubAction: userData.githubActions?.[key] || null
     };
   }
 
   function projectMatchesPlan(project, snapshot) {
     const plan = activePlan(snapshot);
-    if (!plan || plan.id === "default") return true;
     const matches = project.observationPlanMatches || project.observationMatches || [];
-    if (Array.isArray(matches) && matches.some((item) => item === plan.id || item?.id === plan.id || item?.planId === plan.id)) return true;
+    const matchIds = Array.isArray(matches)
+      ? matches.map((item) => String(typeof item === "string" ? item : item?.planId || item?.id || "")).filter(Boolean)
+      : Object.keys(matches || {});
+    if (!plan || plan.id === "default") return matchIds.length === 0 || matchIds.includes("default");
+    if (matchIds.includes(plan.id)) return true;
+    if (matchIds.length) return false;
     const haystack = [project.fullName, project.name, project.description, project.language, ...(project.topics || [])].join(" ").toLowerCase();
     const logic = plan.searchLogic || plan.strategy || {};
     const keywords = Array.isArray(logic.keywords) ? logic.keywords : [];
@@ -303,8 +390,31 @@
     return parts.some((part) => haystack.includes(part));
   }
 
-  function filterProjects(snapshot, params = {}) {
-    let items = Object.values(snapshot.store.projects || {})
+  async function projectsForActivePlan(snapshot) {
+    const db = storage();
+    if (db?.getProjectsByPlan) return db.getProjectsByPlan(snapshot.activeObservationPlanId || "default");
+    return Object.values(snapshot.store.projects || {});
+  }
+
+  async function projectsForKeys(snapshot, keys = []) {
+    const db = storage();
+    if (db?.getProjects) return db.getProjects(keys);
+    return (keys || []).map((key) => snapshot.store.projects?.[projectKey(key)]).filter(Boolean);
+  }
+
+  async function projectForKey(snapshot, key = "") {
+    const db = storage();
+    if (db?.getProject) return db.getProject(projectKey(key));
+    return snapshot.store.projects?.[projectKey(key)] || null;
+  }
+
+  async function hydratedProject(snapshot, key = "", planId = "") {
+    const project = await projectForKey(snapshot, key);
+    return project?.fullName ? withUserState(project, snapshot, planId) : null;
+  }
+
+  function filterProjects(snapshot, params = {}, sourceProjects = null) {
+    let items = (sourceProjects || Object.values(snapshot.store.projects || {}))
       .map((project) => withUserState(project, snapshot))
       .filter((project) => projectMatchesPlan(project, snapshot));
 
@@ -398,8 +508,9 @@
   }
 
   function updateCounts(snapshot) {
+    const loadedProjectCount = Object.keys(snapshot.store.projects || {}).length;
     snapshot.counts = {
-      projects: Object.keys(snapshot.store.projects || {}).length,
+      projects: loadedProjectCount || Number(snapshot.counts?.projects || 0),
       scans: snapshot.store.scans?.length || 0,
       observationPlans: Object.keys(snapshot.store.observationPlans || {}).length
     };
@@ -429,8 +540,8 @@
     };
   }
 
-  function summary(snapshot, params = {}) {
-    const items = filterProjects(snapshot, { ...params, limit: "all" });
+  function summary(snapshot, params = {}, sourceProjects = null) {
+    const items = filterProjects(snapshot, { ...params, limit: "all" }, sourceProjects);
     const counts = {};
     const languages = {};
     const licenses = {};
@@ -446,7 +557,7 @@
     const entries = (source, limit) => Object.entries(source).sort((a, b) => b[1] - a[1]).slice(0, limit).map(([key, count]) => ({ key, count, share: items.length ? count / items.length : 0 }));
     const top = items.slice(0, 120).map(compactProject);
     return {
-      totalProjects: Object.keys(snapshot.store.projects || {}).length,
+      totalProjects: Number(snapshot.counts?.projects || items.length),
       poolTotal: items.length,
       poolLimit: items.length,
       poolSort: params.sort || snapshot.settings?.defaultSort || "opportunity",
@@ -479,9 +590,9 @@
     };
   }
 
-  function buildLeaderboard(snapshot, params = {}) {
+  function buildLeaderboard(snapshot, params = {}, sourceProjects = null) {
     const limit = Math.max(5, Math.min(Number(params.limit || 20), 30));
-    const items = filterProjects(snapshot, { sort: "opportunity", limit: "all" })
+    const items = filterProjects(snapshot, { sort: "opportunity", limit: "all" }, sourceProjects)
       .slice(0, limit)
       .map((project, index) => ({
         ...project,
@@ -525,7 +636,7 @@
     return json;
   }
 
-  function githubRepoToProject(repo, planId) {
+  function githubRepoToProject(repo, planId, profile = {}) {
     const pushedDays = Math.max(0, Math.floor((Date.now() - new Date(repo.pushed_at || repo.updated_at || Date.now()).getTime()) / 86400000));
     const starScore = Math.min(45, Math.log10(Math.max(1, Number(repo.stargazers_count || 0))) * 16);
     const momentum = Math.max(8, Math.min(100, 100 - pushedDays));
@@ -565,45 +676,86 @@
       firstSeenAt: nowIso(),
       lastSeenAt: nowIso(),
       updatedInMonitorAt: nowIso(),
-      observationPlanMatches: [planId]
+      profileKey: profile.key || "",
+      profileLabel: profile.label || "",
+      observationPlanMatches: {
+        [planId]: {
+          planId,
+          firstSeenAt: nowIso(),
+          lastSeenAt: nowIso(),
+          profileKey: profile.key || "",
+          profileLabel: profile.label || ""
+        }
+      }
     };
   }
 
-  function scanQueries(plan) {
+  function scanProfiles(plan) {
     const logic = plan.searchLogic || plan.strategy || {};
-    const queries = [];
-    for (const item of logic.customQueries || []) {
+    const profiles = [];
+    for (const [index, item] of (logic.customQueries || []).entries()) {
       const query = item.query || item.q;
-      if (query) queries.push(query);
+      if (!query) continue;
+      profiles.push({
+        key: String(item.key || `local-${plan.id}-${index + 1}`),
+        label: String(item.labelZh || item.label || item.labelEn || query),
+        query: String(query).trim(),
+        index
+      });
     }
-    for (const keyword of logic.keywords || []) {
-      if (keyword && queries.length < 30) queries.push(`${keyword} in:name,description,readme archived:false`);
+    if (!profiles.length) {
+      for (const [index, keyword] of (logic.keywords || []).entries()) {
+        if (!keyword || profiles.length >= 30) continue;
+        profiles.push({
+          key: `local-${plan.id}-keyword-${index + 1}`,
+          label: String(keyword),
+          query: `${keyword} in:name,description,readme archived:false mirror:false`,
+          index
+        });
+      }
     }
-    return [...new Set(queries.map((item) => String(item).trim()).filter(Boolean))].slice(0, 30);
+    const memory = plan.memory || defaultMemory();
+    const seen = new Set();
+    return profiles
+      .filter((profile) => {
+        const query = lower(profile.query);
+        if (!query || seen.has(query)) return false;
+        seen.add(query);
+        return true;
+      })
+      .slice(0, 30)
+      .map((profile) => {
+        const learnedSignal = Number(memory.discoveryProfiles?.[profile.key] || 0);
+        return {
+          ...profile,
+          learnedSignal,
+          perPage: Math.max(20, Math.min(60, 30 + Math.round(Math.max(-5, Math.min(15, learnedSignal)) * 2)))
+        };
+      })
+      .sort((a, b) => b.learnedSignal - a.learnedSignal || a.index - b.index);
   }
 
-  async function runBrowserScan(snapshot) {
-    const plan = activePlan(snapshot);
-    const queries = scanQueries(plan);
-    if (!queries.length) throw new Error("当前观察方案没有可执行的检索逻辑。");
+  async function runBrowserScan(snapshot, requestedPlanId = "") {
+    const planId = String(requestedPlanId || snapshot.activeObservationPlanId || "default");
+    const plan = snapshot.store.observationPlans?.[planId];
+    if (!plan) throw new Error("扫描任务对应的观察方案已不存在。");
+    const profiles = scanProfiles(plan);
+    if (!profiles.length) throw new Error("当前观察方案没有可执行的检索逻辑。");
     const seen = new Map();
     const errors = [];
-    for (const query of queries) {
+    for (const profile of profiles) {
       try {
-        const params = new URLSearchParams({ q: query, sort: "stars", order: "desc", per_page: "30", page: "1" });
+        const params = new URLSearchParams({ q: profile.query, sort: "stars", order: "desc", per_page: String(profile.perPage), page: "1" });
         const result = await githubFetch(`/search/repositories?${params.toString()}`);
         for (const repo of result.items || []) {
-          if (!seen.has(repo.full_name)) seen.set(repo.full_name, githubRepoToProject(repo, plan.id));
+          if (!seen.has(repo.full_name)) seen.set(repo.full_name, githubRepoToProject(repo, plan.id, profile));
         }
       } catch (error) {
         errors.push(error.message);
       }
     }
     if (!seen.size && errors.length) throw new Error(errors[0]);
-    for (const project of seen.values()) {
-      const key = projectKey(project.fullName);
-      snapshot.store.projects[key] = { ...(snapshot.store.projects[key] || {}), ...project, firstSeenAt: snapshot.store.projects[key]?.firstSeenAt || project.firstSeenAt, lastSeenAt: nowIso() };
-    }
+    await storage().replaceProjectsForPlan(plan.id, Array.from(seen.values()));
     const scan = {
       id: `browser-scan-${Date.now()}`,
       at: nowIso(),
@@ -613,11 +765,14 @@
       observationPlanName: plan.name,
       received: seen.size,
       insertedOrUpdated: seen.size,
+      profiles: profiles.map((profile) => profile.key),
       errors
     };
     snapshot.store.scans = [scan, ...(snapshot.store.scans || [])].slice(0, 120);
-    snapshot.summary = summary(snapshot);
-    snapshot.leaderboard = buildLeaderboard(snapshot, { limit: 20 });
+    const planProjects = await projectsForActivePlan(snapshot);
+    snapshot.counts = { ...(snapshot.counts || {}), projects: await storage().countProjects() };
+    snapshot.summary = summary(snapshot, {}, planProjects);
+    snapshot.leaderboard = buildLeaderboard(snapshot, { limit: 20 }, planProjects);
     updateCounts(snapshot);
     await saveSnapshot(snapshot);
     return scan;
@@ -636,7 +791,21 @@
   }
 
   function chatCompletionsUrl(provider) {
-    const base = String(provider.baseUrl || DEFAULT_PROVIDER.baseUrl).replace(/\/+$/, "");
+    const rawBase = String(provider.baseUrl || DEFAULT_PROVIDER.baseUrl).replace(/\/+$/, "");
+    let parsed;
+    try {
+      parsed = new URL(rawBase);
+    } catch {
+      throw new Error("模型接口地址无效");
+    }
+    const targetHost = parsed.hostname.toLowerCase();
+    const pageHost = window.location.hostname.toLowerCase();
+    const targetIsLocal = ["localhost", "127.0.0.1", "::1"].includes(targetHost) || /^(?:10\.|192\.168\.|172\.(?:1[6-9]|2\d|3[01])\.)/.test(targetHost);
+    const pageIsLocal = ["localhost", "127.0.0.1", "::1"].includes(pageHost);
+    if (parsed.protocol !== "https:" && !(pageIsLocal && targetIsLocal)) throw new Error("模型接口地址必须使用 HTTPS");
+    if (parsed.username || parsed.password) throw new Error("模型接口地址不能包含账号或密码");
+    if (targetIsLocal && !pageIsLocal) throw new Error("公网页面不能连接本机或私有网络模型地址");
+    const base = parsed.toString().replace(/\/+$/, "");
     return /\/chat\/completions$/i.test(base) ? base : `${base}/v1/chat/completions`;
   }
 
@@ -714,9 +883,10 @@
     };
   }
 
-  async function analyzeProjectWithModel(snapshot, body = {}) {
+  async function analyzeProjectWithModel(snapshot, body = {}, sourceProject = null) {
+    const planId = String(body.observationPlanId || snapshot.activeObservationPlanId || "default");
     const key = projectKey(body.fullName);
-    const project = withUserState(snapshot.store.projects[key], snapshot);
+    const project = sourceProject?.fullName ? withUserState(sourceProject, snapshot, planId) : await hydratedProject(snapshot, key, planId);
     if (!project?.fullName) throw new Error("Project not found");
     const context = {
       method: String(body.method || "balanced").slice(0, 40),
@@ -750,9 +920,10 @@
     analysis.provider = provider.name || provider.id || "browser-direct";
     analysis.model = provider.model || "";
     analysis.raw = raw;
-    activeUserData(snapshot).analysis[key] = analysis;
+    userDataForPlan(snapshot, planId).analysis[key] = analysis;
+    appendLocalMemoryEvent(snapshot, project, "ai_analyze", { planId, source: analysis.provider || "llm" });
     await saveSnapshot(snapshot);
-    return { provider: analysis.provider, model: analysis.model, analysis, project: withUserState(snapshot.store.projects[key], snapshot) };
+    return { provider: analysis.provider, model: analysis.model, analysis, project: await hydratedProject(snapshot, key, planId) };
   }
 
   function normalizeBrowserPlan(plan = {}, fallback = {}) {
@@ -794,35 +965,186 @@
     };
   }
 
+  function browserPlanGenerationPrompt(name, idea, repair = null) {
+    const schema = {
+      name,
+      nameEn: name,
+      description: "中文方案说明",
+      descriptionEn: "English description",
+      requirements: [{ text: idea }],
+      searchLogic: {
+        baseMode: "only",
+        keywords: ["强相关领域词"],
+        excludeTerms: [],
+        customQueries: [
+          {
+            label: "中文短标签",
+            labelZh: "中文短标签",
+            labelEn: "English label",
+            query: "GitHub repository query in:name,description,readme archived:false mirror:false",
+            stars: 0
+          }
+        ],
+        preferredLanguages: [],
+        preferredCategories: [],
+        preferredShapes: [],
+        minStars: 0,
+        notes: "生成依据"
+      }
+    };
+    return [
+      "你是星仓印记的 GitHub 观察方案生成器。只返回一个严格 JSON 对象，不要 Markdown。",
+      "只根据本次方案名称和详细需求工作，不读取、猜测或混入其他方案。方案名必须原样保留。",
+      "使用同一套不依赖固定领域词典的方法：先确定唯一核心锚点及准确含义，再识别官方名称、确认别名、格式/协议、API/SDK、插件或扩展体系、产品族、相邻库、用户工作流和实际 GitHub 仓库形态；删除无法绑定核心锚点的宽泛父级词、SEO/GEO 噪音和无关厂商词。不存在的维度留空，不要硬编。",
+      "先生成紧凑且强相关的 keywords，再由这些词生成 customQueries。不能只返回“名称 + app/tool/workflow”这类表面变体。",
+      "每条 customQuery 都会直接执行，必须包含 in:name,description,readme archived:false mirror:false，不使用 OR 串；重要别名拆成独立查询。",
+      "excludeTerms 通常可以为空，只在存在明确歧义、低价值仓库类型或反复假阳性时添加。不要罗列任意无关词。",
+      "customQueries 最多 30 条，不足 30 条不要硬凑。成熟领域应覆盖主要仓库形态，小众领域放宽 Star 和更新时间限制，但始终保留核心锚点。",
+      "searchLogic 与 strategy 必须同形；若只返回一个，系统会自动复制。",
+      repair ? `上次结果没有通过质量门禁：${repair.issues.join("；")}。请修复，不要降低相关性。上次输出：${repair.raw.slice(0, 2400)}` : "",
+      `JSON 结构：${JSON.stringify(schema)}`,
+      `方案名称：${name}`,
+      `详细需求：${idea}`
+    ]
+      .filter(Boolean)
+      .join("\n");
+  }
+
+  function browserPlanQualityIssues(plan = {}, expectedName = "") {
+    const logic = plan.searchLogic || plan.strategy || {};
+    const keywords = Array.isArray(logic.keywords) ? logic.keywords.map((item) => String(item || "").trim()).filter(Boolean) : [];
+    const queries = Array.isArray(logic.customQueries) ? logic.customQueries.filter((item) => String(item?.query || item?.q || "").trim()) : [];
+    const issues = [];
+    if (String(plan.name || "").trim() !== String(expectedName || "").trim()) issues.push("方案名没有原样保留");
+    if (keywords.length < 8) issues.push(`keywords 过少：${keywords.length}/8`);
+    if (queries.length < 6) issues.push(`customQueries 过少：${queries.length}/6`);
+    const weak = queries.filter((item) => {
+      const query = String(item.query || item.q || "");
+      const linked = keywords.some((keyword) => lower(`${item.label || ""} ${item.labelZh || ""} ${query}`).includes(lower(keyword)));
+      return (
+        !linked ||
+        /\bOR\b/i.test(query) ||
+        !/in:name,description,readme/i.test(query) ||
+        !/archived:false/i.test(query) ||
+        !/mirror:false/i.test(query)
+      );
+    });
+    if (weak.length) issues.push(`${weak.length} 条 customQueries 缺少领域锚点或 GitHub 限定符`);
+    return issues;
+  }
+
   async function generatePlanWithModel(snapshot, body = {}) {
     const name = String(body.name || "").trim();
     const idea = [body.idea, body.detailedNeed].map((item) => String(item || "").trim()).filter(Boolean).join("\n");
     if (!name || !idea) throw new Error("方案名称和详细需求不能为空");
-    const { json, raw } = await callModelJson(snapshot, [
-      {
-        role: "system",
-        content:
-          "你是星仓印记的 GitHub 检索方案生成器。只返回 JSON。必须基于用户方案名称和详细需求生成强相关 GitHub 检索逻辑，不要混入无关领域。customQueries 不超过 30 条，不足 30 条不要硬凑。字段必须包含 name,nameEn,description,descriptionEn,requirements,searchLogic。searchLogic 包含 keywords,excludeTerms,customQueries,minStars。customQueries 每项包含 label,labelZh,labelEn,query,stars。"
-      },
-      {
-        role: "user",
-        content: JSON.stringify({
-          name,
-          detailedNeed: idea,
-          rules: [
-            "先识别最核心关键词、同义词、产品名、格式、框架、生态工具和常见英文表达",
-            "关键词必须强相关，不能把上一个方案或无关领域混入",
-            "排除词只用于明确歧义，不要罗列无关世界词",
-            "query 必须是 GitHub Search 可执行语法"
-          ]
-        })
-      }
-    ]);
-    const plan = normalizeBrowserPlan(json, { name, idea });
-    if (!plan.searchLogic.customQueries.length && !plan.searchLogic.keywords.length) {
-      throw new Error("AI 生成方案未返回可执行 GitHub 检索逻辑，请补充需求后重试");
+    const first = await callModelJson(snapshot, [{ role: "user", content: browserPlanGenerationPrompt(name, idea) }]);
+    let raw = first.raw;
+    let plan = normalizeBrowserPlan(first.json, { name, idea });
+    let issues = browserPlanQualityIssues(plan, name);
+    if (issues.length) {
+      const repaired = await callModelJson(snapshot, [
+        { role: "user", content: browserPlanGenerationPrompt(name, idea, { issues, raw }) }
+      ]);
+      raw = repaired.raw;
+      plan = normalizeBrowserPlan(repaired.json, { name, idea });
+      issues = browserPlanQualityIssues(plan, name);
     }
+    if (issues.length) throw new Error(`AI 生成方案未通过质量门禁：${issues.slice(0, 3).join("；")}`);
     return { ok: true, source: "ai-browser", raw, plan };
+  }
+
+  function publicLocalTask(task = {}) {
+    return {
+      id: task.id,
+      type: task.type,
+      key: task.key || "",
+      status: task.status,
+      attempts: Number(task.attempts || 0),
+      result: task.status === "completed" ? task.result : null,
+      error: task.status === "failed" ? task.error || "Task failed" : "",
+      createdAt: task.createdAt || "",
+      startedAt: task.startedAt || "",
+      finishedAt: task.finishedAt || "",
+      updatedAt: task.updatedAt || ""
+    };
+  }
+
+  async function executeLocalTask(snapshot, task) {
+    if (task.type === "scan") {
+      return { status: "completed", scan: await runBrowserScan(snapshot, task.input?.observationPlanId) };
+    }
+    if (task.type === "analysis") return analyzeProjectWithModel(snapshot, task.input, await projectForKey(snapshot, task.input.fullName));
+    if (task.type === "plan-generation") return generatePlanWithModel(snapshot, task.input);
+    throw new Error(`Unsupported task type: ${task.type}`);
+  }
+
+  function startLocalTask(snapshot, task) {
+    if (!task?.id || localTaskPromises.has(task.id)) return;
+    if (Number(task.attempts || 0) >= 3) {
+      task.status = "failed";
+      task.error = "Task was interrupted too many times";
+      task.finishedAt = nowIso();
+      task.updatedAt = task.finishedAt;
+      saveSnapshot(snapshot).catch(() => {});
+      return;
+    }
+    const startedAt = nowIso();
+    task.status = "running";
+    task.attempts = Number(task.attempts || 0) + 1;
+    task.startedAt = startedAt;
+    task.updatedAt = startedAt;
+    task.error = "";
+    const promise = saveSnapshot(snapshot)
+      .then(() => executeLocalTask(snapshot, task))
+      .then(async (result) => {
+        task.status = "completed";
+        task.result = result;
+        task.finishedAt = nowIso();
+        task.updatedAt = task.finishedAt;
+        await saveSnapshot(snapshot);
+      })
+      .catch(async (error) => {
+        task.status = "failed";
+        task.result = null;
+        task.error = error?.message || "Task failed";
+        task.finishedAt = nowIso();
+        task.updatedAt = task.finishedAt;
+        await saveSnapshot(snapshot).catch(() => {});
+      })
+      .finally(() => localTaskPromises.delete(task.id));
+    localTaskPromises.set(task.id, promise);
+  }
+
+  async function enqueueLocalTask(snapshot, type, key, input = {}) {
+    const existing = Object.values(snapshot.store.tasks || {}).find(
+      (task) => task.type === type && task.key === key && ["queued", "running"].includes(task.status)
+    );
+    if (existing) {
+      startLocalTask(snapshot, existing);
+      return existing;
+    }
+    const createdAt = nowIso();
+    const task = {
+      id: `local-task-${Date.now()}-${Math.random().toString(36).slice(2, 9)}`,
+      type,
+      key,
+      status: "queued",
+      attempts: 0,
+      input: clone(input, {}),
+      result: null,
+      error: "",
+      createdAt,
+      updatedAt: createdAt,
+      startedAt: "",
+      finishedAt: ""
+    };
+    snapshot.store.tasks = snapshot.store.tasks || {};
+    snapshot.store.tasks[task.id] = task;
+    const ordered = Object.values(snapshot.store.tasks).sort((a, b) => String(b.updatedAt || "").localeCompare(String(a.updatedAt || "")));
+    snapshot.store.tasks = Object.fromEntries(ordered.slice(0, 60).map((item) => [item.id, item]));
+    await saveSnapshot(snapshot);
+    startLocalTask(snapshot, task);
+    return task;
   }
 
   function portableData(snapshot) {
@@ -902,6 +1224,168 @@
     return memory;
   }
 
+  function memoryForPlan(snapshot, planId = "") {
+    const plan = planById(snapshot, planId);
+    const defaults = defaultMemory();
+    const saved = plan.memory || {};
+    const mergeBuckets = (base, value) =>
+      Object.fromEntries(Object.keys(base).map((key) => [key, { ...(base[key] || {}), ...(value?.[key] || {}) }]));
+    plan.memory = {
+      ...defaults,
+      ...saved,
+      preferences: mergeBuckets(defaults.preferences, saved.preferences),
+      negativePreferences: mergeBuckets(defaults.negativePreferences, saved.negativePreferences),
+      discoveryProfiles: { ...defaults.discoveryProfiles, ...(saved.discoveryProfiles || {}) },
+      stats: {
+        ...defaults.stats,
+        ...(saved.stats || {}),
+        eventCounts: { ...defaults.stats.eventCounts, ...(saved.stats?.eventCounts || {}) }
+      },
+      context: { ...defaults.context, ...(saved.context || {}) }
+    };
+    return plan.memory;
+  }
+
+  function syncPlanMemory(snapshot, planId, memory) {
+    const plan = planById(snapshot, planId);
+    plan.memory = memory;
+    plan.updatedAt = nowIso();
+    if (plan.id === (snapshot.activeObservationPlanId || "default")) snapshot.store.memory = memory;
+    return memory;
+  }
+
+  function localMemoryEventType(value = "") {
+    return String(value || "select_project").trim().replaceAll("-", "_");
+  }
+
+  function localEventWeight(eventType, override) {
+    if (override !== undefined && Number.isFinite(Number(override))) return Number(override);
+    return MEMORY_EVENT_WEIGHTS[eventType] ?? 0.5;
+  }
+
+  function projectProfile(project = {}, planId = "") {
+    const matches = project.observationPlanMatches || project.observationMatches || {};
+    let match = null;
+    if (Array.isArray(matches)) {
+      match = matches.find((item) => typeof item === "object" && String(item?.planId || item?.id || "") === planId) || null;
+    } else {
+      match = matches?.[planId] || null;
+    }
+    return {
+      key: String(match?.profileKey || project.profileKey || ""),
+      label: String(match?.profileLabel || project.profileLabel || "")
+    };
+  }
+
+  function localMemoryKeys(project = {}) {
+    return {
+      category: String(project.category?.key || project.category?.label || "").trim(),
+      useCase: String(project.useCase?.key || project.useCase?.label || "").trim(),
+      language: String(project.language || "").trim(),
+      license: String(project.licensePolicy?.bucket || project.license?.spdx_id || "").trim(),
+      risk: riskLevel(project)
+    };
+  }
+
+  function adjustLocalBucket(bucket, key, delta, min = 0, max = 40) {
+    if (!key || !Number.isFinite(Number(delta)) || Number(delta) === 0) return;
+    const next = Math.max(min, Math.min(max, Number(bucket[key] || 0) + Number(delta)));
+    if (Math.abs(next) < 0.005) delete bucket[key];
+    else bucket[key] = Number(next.toFixed(3));
+  }
+
+  function adjustLocalMemorySignal(memory, project, planId, weight, eventType, direction = 1) {
+    const keys = localMemoryKeys(project);
+    const preferences = memory.preferences;
+    const negative = memory.negativePreferences;
+    const signed = Number(weight || 0) * direction;
+    const absolute = Math.abs(Number(weight || 0)) * direction;
+    if (weight >= 0) {
+      adjustLocalBucket(preferences.categories, keys.category, signed);
+      adjustLocalBucket(preferences.useCases, keys.useCase, signed);
+      adjustLocalBucket(preferences.languages, keys.language, signed * 0.45);
+      adjustLocalBucket(preferences.licenses, keys.license, signed * 0.35);
+      adjustLocalBucket(preferences.riskLevels, keys.risk, signed * 0.25);
+      adjustLocalBucket(negative.categories, keys.category, -signed * 0.45, 0, 30);
+      adjustLocalBucket(negative.useCases, keys.useCase, -signed * 0.45, 0, 30);
+    } else {
+      adjustLocalBucket(preferences.categories, keys.category, signed);
+      adjustLocalBucket(preferences.useCases, keys.useCase, signed);
+      adjustLocalBucket(preferences.languages, keys.language, signed * 0.25);
+      adjustLocalBucket(negative.categories, keys.category, absolute * 0.75, 0, 30);
+      adjustLocalBucket(negative.useCases, keys.useCase, absolute * 0.85, 0, 30);
+      adjustLocalBucket(negative.languages, keys.language, absolute * 0.25, 0, 30);
+      if (eventType === "leaderboard_negative") {
+        adjustLocalBucket(negative.repositories, project.fullName, absolute, 0, 20);
+      }
+    }
+    const profile = projectProfile(project, planId);
+    if (profile.key) adjustLocalBucket(memory.discoveryProfiles, profile.key, signed, -40, 40);
+    return { keys, profile };
+  }
+
+  function appendLocalMemoryEvent(snapshot, project, eventType, options = {}) {
+    if (!project?.fullName) return null;
+    const planId = String(options.planId || snapshot.activeObservationPlanId || "default");
+    const type = localMemoryEventType(eventType);
+    const memory = memoryForPlan(snapshot, planId);
+    const weight = localEventWeight(type, options.weight);
+    const { keys, profile } = adjustLocalMemorySignal(memory, project, planId, weight, type, 1);
+    const at = nowIso();
+    const entry = {
+      at,
+      type,
+      reason: options.reason || type,
+      weight: Number(weight.toFixed(2)),
+      fullName: project.fullName,
+      category: keys.category,
+      useCase: keys.useCase,
+      language: keys.language,
+      license: keys.license,
+      risk: keys.risk,
+      profileKey: profile.key,
+      profileLabel: profile.label,
+      source: options.source || "indexeddb"
+    };
+    memory.events = [entry, ...(memory.events || [])].slice(0, Number(memory.context?.rawEventLimit || 300));
+    memory.shortTerm = [entry, ...(memory.shortTerm || [])].slice(0, Number(memory.context?.shortTermLimit || 80));
+    memory.stats.eventCounts[type] = Number(memory.stats.eventCounts[type] || 0) + 1;
+    memory.stats.lastEventAt = at;
+    syncPlanMemory(snapshot, planId, memory);
+    return entry;
+  }
+
+  function removeLatestLocalMemoryEvent(snapshot, project, eventType, options = {}) {
+    if (!project?.fullName) return false;
+    const planId = String(options.planId || snapshot.activeObservationPlanId || "default");
+    const type = localMemoryEventType(eventType);
+    const memory = memoryForPlan(snapshot, planId);
+    const matches = (entry) => projectKey(entry.fullName) === projectKey(project.fullName) && localMemoryEventType(entry.type || entry.reason) === type;
+    const event = (memory.events || []).find(matches);
+    if (!event) return false;
+    adjustLocalMemorySignal(memory, project, planId, Number(event.weight || localEventWeight(type)), type, -1);
+    const removeFirst = (items = []) => {
+      let removed = false;
+      return items.filter((item) => {
+        if (!removed && matches(item)) {
+          removed = true;
+          return false;
+        }
+        return true;
+      });
+    };
+    memory.events = removeFirst(memory.events);
+    memory.shortTerm = removeFirst(memory.shortTerm);
+    memory.stats.eventCounts[type] = Math.max(0, Number(memory.stats.eventCounts[type] || 0) - 1);
+    syncPlanMemory(snapshot, planId, memory);
+    return true;
+  }
+
+  async function recordLocalMemoryEvent(snapshot, fullName, eventType, options = {}) {
+    const project = await projectForKey(snapshot, fullName);
+    return appendLocalMemoryEvent(snapshot, project, eventType, options);
+  }
+
   async function handle(path, options = {}) {
     const url = new URL(path, window.location.origin);
     const params = Object.fromEntries(url.searchParams.entries());
@@ -911,6 +1395,22 @@
     const secrets = await getSecrets();
     const userData = activeUserData(snapshot);
     const activeId = snapshot.activeObservationPlanId || "default";
+
+    if (method === "GET" && url.pathname === "/api/tasks") {
+      const tasks = Object.values(snapshot.store.tasks || {})
+        .filter((task) => !params.type || task.type === params.type)
+        .sort((a, b) => String(b.updatedAt || "").localeCompare(String(a.updatedAt || "")))
+        .slice(0, Math.max(1, Math.min(60, Number(params.limit || 30))));
+      tasks.filter((task) => task.status === "queued" || task.status === "running").forEach((task) => startLocalTask(snapshot, task));
+      return { tasks: tasks.map(publicLocalTask) };
+    }
+    if (method === "GET" && url.pathname.startsWith("/api/tasks/")) {
+      const id = decodeURIComponent(url.pathname.slice("/api/tasks/".length));
+      const task = snapshot.store.tasks?.[id];
+      if (!task) throw new Error("Task not found");
+      if (task.status === "queued" || task.status === "running") startLocalTask(snapshot, task);
+      return { task: publicLocalTask(task) };
+    }
 
     if (method === "GET" && url.pathname === "/api/config") {
       return { port: "", host: location.host, githubConfigured: Boolean(secrets.githubToken), tavilyConfigured: Boolean(secrets.tavilyKey), exaConfigured: Boolean(secrets.exaKey), scanHour: 8, scanMaxRepos: 800, githubSearchPages: 2, githubTrendLimit: 80, githubTrendingMaxRepos: 60, githubTrendingPerPeriod: 25 };
@@ -971,21 +1471,31 @@
       await saveSnapshot(snapshot);
       return { activeObservationPlanId: snapshot.activeObservationPlanId, plans: Object.values(snapshot.store.observationPlans).map((item) => publicPlan(item, snapshot.activeObservationPlanId, false)) };
     }
-    if (method === "GET" && url.pathname === "/api/projects") return paginate(filterProjects(snapshot, params), params, 10);
+    if (method === "GET" && url.pathname === "/api/projects") {
+      const projects = await projectsForActivePlan(snapshot);
+      return paginate(filterProjects(snapshot, params, projects), params, 10);
+    }
     if (method === "GET" && url.pathname === "/api/project") {
-      const project = withUserState(snapshot.store.projects[projectKey(url.searchParams.get("fullName"))], snapshot);
+      const project = await hydratedProject(snapshot, url.searchParams.get("fullName"));
       if (!project?.fullName) throw new Error("Project not found");
       return project;
     }
     if (method === "GET" && url.pathname === "/api/projects/position") {
       const fullName = url.searchParams.get("fullName");
-      const items = filterProjects(snapshot, { ...params, limit: "all" });
+      const projects = await projectsForActivePlan(snapshot);
+      const items = filterProjects(snapshot, { ...params, limit: "all" }, projects);
       const index = items.findIndex((project) => projectKey(project.fullName) === projectKey(fullName));
       const pageSize = Math.max(1, Number(params.pageSize || params.limit || 10));
       return { found: index >= 0, index, page: index >= 0 ? Math.floor(index / pageSize) + 1 : null, pageSize, total: items.length };
     }
-    if (method === "GET" && url.pathname === "/api/summary") return summary(snapshot, params);
-    if (method === "GET" && url.pathname === "/api/leaderboard") return snapshot.leaderboard || buildLeaderboard(snapshot, params);
+    if (method === "GET" && url.pathname === "/api/summary") {
+      const projects = await projectsForActivePlan(snapshot);
+      return summary(snapshot, params, projects);
+    }
+    if (method === "GET" && url.pathname === "/api/leaderboard") {
+      const projects = await projectsForActivePlan(snapshot);
+      return buildLeaderboard(snapshot, params, projects);
+    }
     if (method === "GET" && url.pathname === "/api/leaderboard-archives") return { dates: Object.keys(snapshot.store.leaderboards?.daily || {}).sort().reverse() };
     if (method === "GET" && url.pathname === "/api/memory") return activePlan(snapshot).memory || snapshot.store.memory || defaultMemory();
     if (method === "POST" && url.pathname === "/api/memory-preference") {
@@ -997,22 +1507,34 @@
     }
     if (method === "GET" && url.pathname === "/api/github/actions") return { actions: userData.githubActions || {} };
     if (method === "GET" && url.pathname === "/api/dismissed-projects") {
-      const items = Object.keys(userData.dismissedProjects || {}).map((key) => withUserState(snapshot.store.projects[key], snapshot)).filter((item) => item?.fullName);
+      const projects = await projectsForKeys(snapshot, Object.keys(userData.dismissedProjects || {}));
+      const items = projects.map((project) => withUserState(project, snapshot)).filter((item) => item?.fullName);
       return { items };
     }
     if (method === "POST" && url.pathname === "/api/watchlist") {
       const key = projectKey(body.fullName);
+      const wasWatched = Boolean(userData.watchlist[key]);
       if (body.watched) userData.watchlist[key] = { fullName: body.fullName, at: nowIso() };
       else delete userData.watchlist[key];
+      if (wasWatched !== Boolean(body.watched)) {
+        await recordLocalMemoryEvent(snapshot, body.fullName, body.watched ? "favorite" : "unfavorite", { planId: activeId });
+      }
       await saveSnapshot(snapshot);
-      return { project: withUserState(snapshot.store.projects[key], snapshot), memory: activePlan(snapshot).memory || defaultMemory() };
+      return { project: await hydratedProject(snapshot, key), memory: activePlan(snapshot).memory || defaultMemory() };
     }
     if (method === "POST" && url.pathname === "/api/project-dismissal") {
       const key = projectKey(body.fullName);
-      if (body.dismissed !== false) userData.dismissedProjects[key] = { fullName: body.fullName, at: nowIso() };
-      else delete userData.dismissedProjects[key];
+      const project = await projectForKey(snapshot, key);
+      const wasDismissed = Boolean(userData.dismissedProjects[key]);
+      if (body.dismissed !== false) {
+        userData.dismissedProjects[key] = { fullName: body.fullName, at: nowIso() };
+        if (!wasDismissed) appendLocalMemoryEvent(snapshot, project, "dismiss_project", { planId: activeId, source: "project_pool" });
+      } else {
+        delete userData.dismissedProjects[key];
+        if (wasDismissed) removeLatestLocalMemoryEvent(snapshot, project, "dismiss_project", { planId: activeId });
+      }
       await saveSnapshot(snapshot);
-      return { project: withUserState(snapshot.store.projects[key], snapshot), memory: activePlan(snapshot).memory || defaultMemory() };
+      return { project: await hydratedProject(snapshot, key), memory: activePlan(snapshot).memory || defaultMemory() };
     }
     if (method === "POST" && url.pathname === "/api/dismissed-project-feedback") {
       const key = projectKey(body.fullName);
@@ -1022,33 +1544,42 @@
         updatedAt: nowIso()
       };
       await saveSnapshot(snapshot);
+      const dismissedProjects = await projectsForKeys(snapshot, Object.keys(userData.dismissedProjects || {}));
       return {
-        project: withUserState(snapshot.store.projects[key], snapshot),
-        items: Object.keys(userData.dismissedProjects || {}).map((itemKey) => withUserState(snapshot.store.projects[itemKey], snapshot)).filter((item) => item?.fullName)
+        project: await hydratedProject(snapshot, key),
+        items: dismissedProjects.map((project) => withUserState(project, snapshot)).filter((item) => item?.fullName)
       };
     }
     if (method === "POST" && url.pathname === "/api/note") {
       const key = projectKey(body.fullName);
-      userData.notes[key] = { text: String(body.text || "").slice(0, 4000), status: String(body.status || ""), updatedAt: nowIso() };
+      const previous = userData.notes[key] || null;
+      const next = { text: String(body.text || "").slice(0, 4000), status: String(body.status || ""), updatedAt: nowIso() };
+      if (!next.text && !next.status) {
+        delete userData.notes[key];
+        if (previous) removeLatestLocalMemoryEvent(snapshot, await projectForKey(snapshot, key), "triage_note", { planId: activeId });
+      } else {
+        userData.notes[key] = next;
+        if (!previous || previous.text !== next.text || previous.status !== next.status) {
+          await recordLocalMemoryEvent(snapshot, body.fullName, "triage_note", { planId: activeId });
+        }
+      }
       await saveSnapshot(snapshot);
-      return withUserState(snapshot.store.projects[key], snapshot);
+      return hydratedProject(snapshot, key);
     }
     if (method === "POST" && url.pathname === "/api/memory-event") {
-      const memory = activePlan(snapshot).memory || defaultMemory();
-      const entry = { fullName: body.fullName, type: body.type || "select_project", at: nowIso(), source: body.source || "indexeddb" };
-      memory.events = [entry, ...(memory.events || [])].slice(0, Number(memory.context?.rawEventLimit || 300));
-      memory.shortTerm = [entry, ...(memory.shortTerm || [])].slice(0, Number(memory.context?.shortTermLimit || 80));
-      activePlan(snapshot).memory = memory;
-      snapshot.store.memory = memory;
+      await recordLocalMemoryEvent(snapshot, body.fullName, body.type || "select_project", {
+        planId: activeId,
+        source: body.source || "indexeddb",
+        weight: body.weight
+      });
+      const memory = memoryForPlan(snapshot, activeId);
       await saveSnapshot(snapshot);
       return { memory };
     }
     if (method === "POST" && url.pathname === "/api/leaderboard-feedback") {
-      const memory = activePlan(snapshot).memory || defaultMemory();
-      const entry = { fullName: body.fullName, type: `leaderboard-${body.feedback || "positive"}`, at: nowIso(), source: "indexeddb" };
-      memory.events = [entry, ...(memory.events || [])].slice(0, Number(memory.context?.rawEventLimit || 300));
-      activePlan(snapshot).memory = memory;
-      snapshot.store.memory = memory;
+      const type = `leaderboard_${String(body.feedback || "positive").replaceAll("-", "_")}`;
+      await recordLocalMemoryEvent(snapshot, body.fullName, type, { planId: activeId, source: "leaderboard" });
+      const memory = memoryForPlan(snapshot, activeId);
       await saveSnapshot(snapshot);
       return { memory };
     }
@@ -1110,31 +1641,54 @@
       const [owner, repo] = String(body.fullName || "").split("/");
       const starred = url.pathname.endsWith("/star");
       await githubFetch(`/user/starred/${owner}/${repo}`, { method: starred ? "PUT" : "DELETE" });
+      const wasStarred = Boolean(userData.githubActions[key]?.starred);
       userData.githubActions[key] = { ...(userData.githubActions[key] || {}), starred, updatedAt: nowIso() };
+      if (wasStarred !== starred) {
+        await recordLocalMemoryEvent(snapshot, body.fullName, starred ? "star" : "unstar", { planId: activeId, source: "github" });
+      }
       await saveSnapshot(snapshot);
-      return { action: userData.githubActions[key], project: withUserState(snapshot.store.projects[key], snapshot), memory: activePlan(snapshot).memory || defaultMemory() };
+      return { action: userData.githubActions[key], project: await hydratedProject(snapshot, key), memory: activePlan(snapshot).memory || defaultMemory() };
     }
     if (method === "POST" && url.pathname === "/api/github/fork") {
       const key = projectKey(body.fullName);
       const [owner, repo] = String(body.fullName || "").split("/");
       const fork = await githubFetch(`/repos/${owner}/${repo}/forks`, { method: "POST" });
+      const wasForked = Boolean(userData.githubActions[key]?.forked);
       userData.githubActions[key] = { ...(userData.githubActions[key] || {}), forked: true, forkUrl: fork.html_url || "", updatedAt: nowIso() };
+      if (!wasForked) await recordLocalMemoryEvent(snapshot, body.fullName, "fork", { planId: activeId, source: "github" });
       await saveSnapshot(snapshot);
-      return { action: userData.githubActions[key], project: withUserState(snapshot.store.projects[key], snapshot), memory: activePlan(snapshot).memory || defaultMemory() };
+      return { action: userData.githubActions[key], project: await hydratedProject(snapshot, key), memory: activePlan(snapshot).memory || defaultMemory() };
     }
     if (method === "POST" && url.pathname === "/api/scan") {
-      const scan = await runBrowserScan(snapshot);
-      return { status: "completed", scan };
+      const task = await enqueueLocalTask(snapshot, "scan", "scan", {
+        mode: body.mode || "manual",
+        observationPlanId: activeId
+      });
+      return { status: "started", task: publicLocalTask(task) };
     }
     if (method === "POST" && url.pathname === "/api/analyze") {
-      return analyzeProjectWithModel(snapshot, body);
+      const task = await enqueueLocalTask(snapshot, "analysis", `analysis:${projectKey(body.fullName)}`, {
+        fullName: String(body.fullName || "").slice(0, 240),
+        method: String(body.method || "balanced").slice(0, 40),
+        userNeed: String(body.userNeed || "").slice(0, 1000),
+        observationPlanId: activeId
+      });
+      return { status: "started", task: publicLocalTask(task) };
     }
     if (method === "POST" && url.pathname === "/api/observation-plans/generate") {
-      return generatePlanWithModel(snapshot, body);
+      const name = String(body.name || "").trim();
+      const task = await enqueueLocalTask(snapshot, "plan-generation", `plan:${lower(name)}`, {
+        name: name.slice(0, 80),
+        idea: String(body.idea || "").slice(0, 6000),
+        detailedNeed: String(body.detailedNeed || "").slice(0, 6000)
+      });
+      return { status: "started", task: publicLocalTask(task) };
     }
     if (method === "GET" && url.pathname === "/api/scan/status") {
       const lastScan = snapshot.store.scans?.[0] || null;
-      return { status: lastScan ? "completed" : "idle", stage: lastScan ? "completed" : "idle", label: lastScan ? "完成" : "空闲", percent: lastScan ? 100 : 0, running: false, updatedAt: lastScan?.at || null };
+      const task = Object.values(snapshot.store.tasks || {}).filter((item) => item.type === "scan").sort((a, b) => String(b.updatedAt || "").localeCompare(String(a.updatedAt || "")))[0] || null;
+      const running = Boolean(task && ["queued", "running"].includes(task.status));
+      return { status: running ? "running" : lastScan ? "completed" : "idle", stage: running ? "github" : lastScan ? "completed" : "idle", label: running ? "扫描中" : lastScan ? "完成" : "空闲", percent: running ? 20 : lastScan ? 100 : 0, running, task: task ? publicLocalTask(task) : null, updatedAt: task?.updatedAt || lastScan?.at || null };
     }
     if (method === "GET" && url.pathname === "/api/portable-data/export") return portableData(snapshot);
     if (method === "POST" && url.pathname === "/api/portable-data/import") return importPortableData(snapshot, body);
