@@ -53,7 +53,7 @@ function defaultProviders() {
       baseUrl: "https://api.deepseek.com",
       model: "deepseek-v4-flash",
       apiKey: "",
-      enabled: false,
+      enabled: true,
       models: []
     }
   ];

@@ -530,3 +530,17 @@ test("save settings uses button-local loading and completion feedback", () => {
   assert.match(completer, /state\.settingsSaveStatus = ""/);
   assert.match(completer, /setTimeout/);
 });
+
+test("explicit settings save requires a key for an enabled AI provider", () => {
+  const validator = functionBody("enabledProviderMissingKey");
+  const saver = functionBody("saveSettings");
+
+  assert.match(appSource, /providerKeyRequired:\s*"\{provider\} 已启用，请先输入 API Key 再保存。"/);
+  assert.match(validator, /provider\.enabled === false/);
+  assert.match(validator, /provider\.apiKeySet/);
+  assert.match(validator, /provider\.clearApiKey/);
+  assert.match(saver, /if \(!options\.silent && state\.settingsSaveStatus === "saving"\) return/);
+  assert.match(saver, /const missingProvider = enabledProviderMissingKey\(next\)/);
+  assert.match(saver, /showSettingsInlineStatus\(\s*"failed",\s*t\("providerKeyRequired"\)/s);
+  assert.match(saver, /data-provider-field="apiKey"/);
+});

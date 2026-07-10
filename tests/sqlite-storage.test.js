@@ -24,6 +24,15 @@ function repository(fullName) {
   };
 }
 
+test("fresh settings enable the default AI provider without inventing a key", () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "starvault-sqlite-defaults-"));
+  const storage = createStorage(path.join(dir, "starvault.db"));
+  const provider = storage.getSettings(false).llmProviders.find((item) => item.id === "deepseek");
+
+  assert.equal(provider.enabled, true);
+  assert.equal(provider.apiKeySet, false);
+});
+
 test("SQLite storage imports JSON once and persists incremental project state", () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "starvault-sqlite-"));
   const jsonPath = path.join(dir, "store.json");

@@ -186,6 +186,7 @@ const I18N = {
     saveSettings: "保存设置",
     savingSettings: "保存中",
     settingsSaved: "保存完成",
+    providerKeyRequired: "{provider} 已启用，请先输入 API Key 再保存。",
     language: "语言",
     keyManagement: "密钥管理",
     keyManagementHint: "每个 key 独立显示、保存和清除",
@@ -854,6 +855,7 @@ const I18N = {
     saveSettings: "Save settings",
     savingSettings: "Saving",
     settingsSaved: "Saved",
+    providerKeyRequired: "{provider} is enabled. Enter an API Key before saving.",
     language: "Language",
     keyManagement: "Key management",
     keyManagementHint: "Each key can be shown, saved, or cleared independently",
@@ -10502,9 +10504,32 @@ function collectSettings() {
   };
 }
 
+function enabledProviderMissingKey(settings = {}) {
+  return (settings.llmProviders || []).find((provider) => {
+    if (provider.enabled === false) return false;
+    if (String(provider.apiKey || "").trim()) return false;
+    return provider.clearApiKey || !provider.apiKeySet;
+  });
+}
+
 async function saveSettings(options = {}) {
+  if (!options.silent && state.settingsSaveStatus === "saving") return;
+  const next = collectSettings();
   if (!options.silent) {
-    if (state.settingsSaveStatus === "saving") return;
+    const missingProvider = enabledProviderMissingKey(next);
+    if (missingProvider) {
+      state.settingsSaveStatus = "";
+      updateSaveSettingsButton();
+      showSettingsInlineStatus(
+        "failed",
+        t("providerKeyRequired").replace("{provider}", missingProvider.name || "AI")
+      );
+      const providerItem = Array.from(document.querySelectorAll(".provider-item")).find(
+        (item) => item.dataset.providerId === missingProvider.id
+      );
+      providerItem?.querySelector('[data-provider-field="apiKey"]')?.focus();
+      return null;
+    }
     if (state.settingsSaveTimer) {
       clearTimeout(state.settingsSaveTimer);
       state.settingsSaveTimer = null;
@@ -10513,7 +10538,6 @@ async function saveSettings(options = {}) {
     updateSaveSettingsButton();
   }
   try {
-    const next = collectSettings();
     const result = await api("/api/settings", {
       method: "POST",
       body: JSON.stringify(next)
