@@ -1,0 +1,32 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" role="img" aria-labelledby="title desc">
+  <title id="title">星仓印记</title>
+  <desc id="desc">白底黑色仓库轮廓，中间是同心嵌套的四角星。</desc>
+
+  <rect x="48" y="48" width="416" height="416" rx="92" fill="#ffffff" />
+
+  <path
+    d="M96 214L256 116L376 190"
+    fill="none"
+    stroke="#0b0d0c"
+    stroke-width="28"
+    stroke-linecap="round"
+    stroke-linejoin="round"
+  />
+  <path
+    d="M96 214v118c0 44 32 76 76 76h168c44 0 76-32 76-76v-82"
+    fill="none"
+    stroke="#0b0d0c"
+    stroke-width="28"
+    stroke-linecap="round"
+    stroke-linejoin="round"
+  />
+
+  <path
+    d="M256 148l36 76 76 36-76 36-36 76-36-76-76-36 76-36 36-76z"
+    fill="#0b0d0c"
+  />
+  <path
+    d="M256 212l16 32 32 16-32 16-16 32-16-32-32-16 32-16 16-32z"
+    fill="#ffffff"
+  />
+</svg>

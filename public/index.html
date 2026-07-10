@@ -1,0 +1,580 @@
+<!doctype html>
+<html lang="zh">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="robots" content="noindex,nofollow,noarchive,nosnippet,noimageindex" />
+    <title>星仓印记</title>
+    <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body>
+    <div class="app-shell">
+      <aside class="sidebar" aria-label="Workspace navigation">
+        <a class="brand-block" href="#projects" data-action="go-home" data-i18n-aria-label="homeLinkLabel" aria-label="返回首页">
+          <div class="brand-mark" aria-hidden="true">
+            <img src="/brand-mark.svg" alt="" />
+          </div>
+          <div>
+            <h1 data-i18n="brand">星仓印记</h1>
+            <p class="brand-tagline" data-i18n="brandSub">从海量 GitHub 项目中发现值得学习、理解与持续跟踪的开源灵感。</p>
+          </div>
+        </a>
+
+        <nav class="nav-list">
+          <button class="active" type="button" data-view-target="projects" data-i18n="navProjects">项目池</button>
+          <button type="button" data-view-target="leaderboard" data-i18n="navLeaderboard">榜单</button>
+          <button type="button" data-view-target="learning" data-i18n="navLearning">学习中枢</button>
+          <button type="button" data-view-target="brief" data-i18n="navBrief">结构看板</button>
+          <button type="button" data-view-target="github" data-i18n="navGithubRepos">我的仓库</button>
+          <button type="button" data-view-target="settings" data-i18n="navSettings">设置</button>
+        </nav>
+
+        <div class="topbar-actions">
+          <div class="connection-strip" aria-label="Connection status">
+            <button class="connection-dot" type="button" data-action="open-settings" data-config-source="github">
+              <span>GitHub</span>
+              <strong id="github-state">-</strong>
+            </button>
+            <button class="connection-dot" type="button" data-action="open-settings" data-config-source="tavily">
+              <span>Tavily</span>
+              <strong id="tavily-state">-</strong>
+            </button>
+            <button class="connection-dot" type="button" data-action="open-settings" data-config-source="exa">
+              <span>Exa</span>
+              <strong id="exa-state">-</strong>
+            </button>
+            <button class="connection-dot" type="button" data-action="open-settings" data-config-source="deepseek">
+              <span>AI</span>
+              <strong id="model-state">-</strong>
+            </button>
+          </div>
+          <div class="language-switch" aria-label="Language">
+            <button type="button" class="active" data-language="zh">中</button>
+            <button type="button" data-language="en">EN</button>
+          </div>
+          <button class="ghost-button compact-action" id="guide-tour-button" type="button" data-action="start-guide-tour" data-i18n="guideTourButton">引导</button>
+          <details class="export-menu" id="export-menu">
+            <summary class="ghost-button compact-action" data-i18n="exportShort" data-i18n-title="exportHint">导出</summary>
+            <div class="export-menu-panel" role="menu" aria-label="Export">
+              <button type="button" data-export-format="json" data-i18n="exportJson" role="menuitem">导出 JSON</button>
+              <button type="button" data-export-format="csv" data-i18n="exportCsv" role="menuitem">导出 CSV</button>
+            </div>
+          </details>
+          <button class="primary-button compact-action" id="scan-button" type="button" data-i18n="runScanShort" data-i18n-title="runScanHint">扫描</button>
+        </div>
+      </aside>
+
+      <main class="workspace">
+        <section class="view-panel active" id="view-projects">
+          <section class="filter-board" id="projects">
+            <button class="clear-all-filters" id="clear-all-filters" type="button" data-filter-clear-all disabled>
+              <span data-i18n="clearAllFilters">清除所有筛选</span>
+            </button>
+
+            <label class="toggle-row favorite-filter-toggle">
+              <input id="watch-filter" type="checkbox" />
+              <span data-i18n="watchOnly">仅看收藏</span>
+            </label>
+
+            <div class="filter-intent-panel">
+              <div class="search-block">
+                <label data-i18n="search">搜索</label>
+                <input id="search-input" type="search" data-i18n-placeholder="searchPlaceholder" placeholder="仓库、主题、语言" />
+              </div>
+
+              <div class="filter-group preset-group">
+                <header>
+                  <span data-i18n="filterIntent">筛选意图</span>
+                  <button type="button" data-filter-preset="reset" data-i18n="reset">重置</button>
+                </header>
+                <div class="preset-row" id="preset-chips"></div>
+              </div>
+            </div>
+
+            <details class="advanced-filters" open>
+              <summary>
+                <span data-i18n="advancedFilters">精细筛选</span>
+                <small data-i18n="advancedFiltersHint">展开后按能力、对象、形态、语言、许可和排序筛选</small>
+              </summary>
+              <div class="advanced-filter-grid">
+                <div class="filter-group semantic-filter">
+                  <header>
+                    <span class="filter-title-with-count">
+                      <span data-i18n="semanticProblem">解决什么</span>
+                      <small class="filter-count-badge" id="problem-filter-count"></small>
+                    </span>
+                    <button type="button" data-filter-reset="semanticProblem" data-i18n="reset">重置</button>
+                  </header>
+                  <div class="chip-row" id="problem-chips"></div>
+                </div>
+
+                <div class="filter-group semantic-filter">
+                  <header>
+                    <span class="filter-title-with-count">
+                      <span data-i18n="semanticAudience">给谁用</span>
+                      <small class="filter-count-badge" id="audience-filter-count"></small>
+                    </span>
+                    <button type="button" data-filter-reset="semanticAudience" data-i18n="reset">重置</button>
+                  </header>
+                  <div class="chip-row" id="audience-chips"></div>
+                </div>
+
+                <div class="filter-group semantic-filter">
+                  <header>
+                    <span class="filter-title-with-count">
+                      <span data-i18n="semanticShape">可做成</span>
+                      <small class="filter-count-badge" id="shape-filter-count"></small>
+                    </span>
+                    <button type="button" data-filter-reset="semanticShape" data-i18n="reset">重置</button>
+                  </header>
+                  <div class="chip-row" id="shape-chips"></div>
+                </div>
+
+                <div class="filter-group compact language-filter">
+                  <header>
+                    <span data-i18n="language">语言</span>
+                    <button type="button" data-filter-reset="language" data-i18n="reset">重置</button>
+                  </header>
+                  <div class="chip-row" id="language-chips"></div>
+                </div>
+
+                <div class="filter-group license-filter">
+                  <header>
+                    <span data-i18n="license">许可</span>
+                    <button type="button" data-filter-reset="license" data-i18n="reset">重置</button>
+                  </header>
+                  <div class="chip-row" id="license-chips"></div>
+                </div>
+
+                <div class="filter-group compact record-filter">
+                  <header>
+                    <span data-i18n="recordFilter">记录状态</span>
+                    <button type="button" data-filter-reset-group="records" data-i18n="reset">重置</button>
+                  </header>
+                  <div class="record-filter-body">
+                    <div class="record-filter-row">
+                      <span class="record-filter-label" data-i18n="triageFilter">研判</span>
+                      <div class="chip-row record-chip-row" id="triage-chips"></div>
+                    </div>
+                    <div class="record-filter-row">
+                      <span class="record-filter-label" data-i18n="aiShort">AI</span>
+                      <div class="chip-row record-chip-row" id="ai-analysis-chips"></div>
+                    </div>
+                  </div>
+                </div>
+
+                <div class="filter-group compact sort-filter">
+                  <header>
+                    <span data-i18n="sort">排序</span>
+                    <button type="button" data-filter-reset="sort" data-i18n="reset">重置</button>
+                  </header>
+                  <div class="chip-row" id="sort-chips"></div>
+                </div>
+              </div>
+            </details>
+          </section>
+
+          <section class="content-grid">
+            <div class="project-table-panel">
+              <div class="section-heading">
+                <div>
+                  <h3 id="project-count">命中 0 · 预览 0</h3>
+                </div>
+                <div class="project-heading-tools">
+                  <section class="metrics-strip project-pool-metrics" aria-label="Project pool metrics">
+                    <div id="scan-status" class="status-pill is-idle">
+                      <span class="scan-status-content">
+                        <span class="scan-main scan-main-idle">
+                          <span class="scan-idle-dot" aria-hidden="true"></span>
+                          <span class="scan-stage">空闲</span>
+                        </span>
+                      </span>
+                    </div>
+                    <article class="metric-tile">
+                      <span data-i18n="totalProjects">项目总数</span>
+                      <strong id="metric-total">0</strong>
+                    </article>
+                    <article class="metric-tile">
+                      <span data-i18n="watchlist">收藏</span>
+                      <strong id="metric-watch">0</strong>
+                    </article>
+                    <article class="metric-tile accent">
+                      <span data-i18n="lastScan">最近扫描</span>
+                      <strong id="metric-scan">-</strong>
+                    </article>
+                  </section>
+                </div>
+              </div>
+              <div class="repo-list" id="project-rows" aria-label="Ranked projects"></div>
+            </div>
+
+            <aside class="detail-panel" id="detail-panel" aria-label="Project details">
+              <div class="empty-detail">
+                <p class="eyebrow" data-i18n="selection">当前选择</p>
+                <h3 data-i18n="chooseProject">选择一个项目</h3>
+              </div>
+            </aside>
+          </section>
+        </section>
+
+        <section class="view-panel" id="view-leaderboard">
+          <section class="leaderboard-layout">
+            <div class="leaderboard-panel">
+              <div class="section-heading leaderboard-heading">
+                <div class="leaderboard-heading-main">
+                  <h3 data-i18n="leaderboardDesk">榜单 · 每日精选 20</h3>
+                  <div class="leaderboard-control-row">
+                    <label class="leaderboard-archive-control">
+                      <span data-i18n="dailyArchive">日榜存档</span>
+                      <select id="leaderboard-archive"></select>
+                    </label>
+                    <div class="leaderboard-meta" id="leaderboard-meta"></div>
+                  </div>
+                  <div class="leaderboard-logic-inline">
+                    <span data-i18n="rankingLogic">榜单逻辑</span>
+                    <div id="leaderboard-logic"></div>
+                  </div>
+                </div>
+                <div class="segmented-control" id="leaderboard-tabs" aria-label="Leaderboard period"></div>
+              </div>
+
+              <div id="leaderboard-list" class="leaderboard-list"></div>
+            </div>
+          </section>
+        </section>
+
+        <section class="view-panel" id="view-learning">
+          <section class="learning-shell">
+            <div class="learning-main">
+              <section class="learning-overview-panel">
+                <div class="section-heading learning-heading">
+                  <div>
+                    <h3 class="has-tooltip" data-i18n="learningDesk" data-i18n-title="learningTitle">学习中枢</h3>
+                  </div>
+                </div>
+
+                <div id="learning-loop" class="learning-loop"></div>
+
+              </section>
+
+              <section class="learning-panel learning-preference-panel">
+                <div class="learning-panel-head">
+                  <div>
+                    <strong class="has-tooltip" data-i18n="preferenceProfile" data-i18n-title="preferenceProfileHint">偏好画像</strong>
+                  </div>
+                  <button
+                    id="preference-profile-toggle"
+                    class="preference-profile-toggle"
+                    type="button"
+                    data-action="expand-preference-panel"
+                    data-i18n-aria-label="expandPreferenceProfile"
+                    aria-label="展开偏好画像"
+                    aria-expanded="false"
+                    hidden
+                  >
+                    <span data-i18n="expandPreferenceProfileShort">展开</span>
+                  </button>
+                </div>
+                <div class="learning-grid">
+                  <section class="learning-subpanel">
+                    <p class="eyebrow has-tooltip" data-i18n="positiveMemory" data-i18n-title="positivePreferenceHint">长期偏好</p>
+                    <div id="learning-positive"></div>
+                  </section>
+                  <section class="learning-subpanel">
+                    <p class="eyebrow has-tooltip" data-i18n="negativeMemory" data-i18n-title="negativePreferenceHint">负向偏好</p>
+                    <div id="learning-negative"></div>
+                  </section>
+                </div>
+              </section>
+
+              <section class="learning-panel learning-dismissed-panel" id="learning-dismissed-projects">
+                <div
+                  class="learning-panel-head learning-panel-toggle"
+                  data-dismissed-panel-toggle
+                  data-action="toggle-dismissed-samples"
+                  role="button"
+                  tabindex="0"
+                  aria-expanded="false"
+                >
+                  <div>
+                    <strong class="dismissed-title-line">
+                      <span data-i18n="dismissedLearningTitle">隐藏项目样本</span>
+                      <small id="dismissed-count-badge" class="dismissed-count-badge">0</small>
+                    </strong>
+                    <span data-i18n="dismissedLearningHint">回看隐藏项目；手动修正原因会帮助系统下次判断更准。</span>
+                  </div>
+                  <span id="dismissed-toggle-icon" class="observation-plan-toggle-icon dismissed-toggle-icon" aria-hidden="true"></span>
+                </div>
+                <div id="learning-dismissed"></div>
+              </section>
+            </div>
+
+            <aside class="learning-side">
+              <section class="learning-panel learning-maintenance-panel">
+                <div class="learning-panel-head">
+                  <div>
+                    <strong class="has-tooltip" data-i18n="learningControls" data-i18n-title="learningControlsHint">学习策略</strong>
+                  </div>
+                </div>
+                <div class="learning-side-scroll">
+                  <div class="learning-side-section">
+                    <p class="eyebrow" data-i18n="memoryState">记忆状态</p>
+                    <div id="memory-panel"></div>
+                  </div>
+                  <div class="learning-side-section" id="learning-anti-bubble">
+                    <p class="eyebrow" data-i18n="antiBubblePolicy">反信息茧房</p>
+                    <div id="learning-policy"></div>
+                  </div>
+                  <div class="learning-side-section">
+                    <p class="eyebrow" data-i18n="contextCompression">上下文压缩</p>
+                    <div id="learning-context"></div>
+                  </div>
+                  <div class="learning-side-section" id="learning-recent-behavior">
+                    <p class="eyebrow" data-i18n="recentBehavior">近期行为</p>
+                    <div id="learning-events"></div>
+                  </div>
+                </div>
+              </section>
+            </aside>
+          </section>
+        </section>
+
+        <section class="view-panel" id="view-brief">
+          <section class="overview-dashboard">
+            <div class="brief-panel overview-head-panel">
+              <div class="section-heading">
+                <div>
+                  <h3 class="has-tooltip" data-i18n="overviewDashboard" data-i18n-title="overviewDashboardHint">项目池结构看板</h3>
+                </div>
+              </div>
+              <div id="brief-list" class="overview-scope-strip"></div>
+            </div>
+
+            <div class="overview-board-grid">
+              <section class="brief-panel overview-primary-panel">
+                <div class="overview-panel-head">
+                  <div>
+                    <h3 class="has-tooltip" data-i18n="projectDistribution" data-i18n-title="projectDistributionHint">方向结构</h3>
+                  </div>
+                </div>
+                <div id="category-bars" class="bar-list overview-bar-list"></div>
+              </section>
+
+              <section class="brief-panel overview-primary-panel">
+                <div class="overview-panel-head">
+                  <div>
+                    <h3 class="has-tooltip" data-i18n="languageDistribution" data-i18n-title="languageDistributionHint">语言分布</h3>
+                  </div>
+                </div>
+                <div id="language-bars" class="bar-list overview-bar-list"></div>
+              </section>
+
+              <section class="brief-panel overview-signal-panel overview-compact-panel">
+                <div class="overview-panel-head slim">
+                  <div>
+                    <h3 class="has-tooltip" data-i18n="licenseReadinessPanel" data-i18n-title="licenseReadinessHint">许可准备度</h3>
+                  </div>
+                </div>
+                <div id="license-bars" class="bar-list overview-bar-list"></div>
+              </section>
+
+              <section class="brief-panel overview-topic-panel">
+                <div class="overview-panel-head">
+                  <div>
+                    <h3 class="has-tooltip" data-i18n="topicMap" data-i18n-title="topicMapHint">功能标签地图</h3>
+                  </div>
+                </div>
+                <div id="topic-cloud" class="topic-cloud"></div>
+              </section>
+            </div>
+          </section>
+        </section>
+
+        <section class="view-panel" id="view-github">
+          <section class="github-workspace">
+            <section class="settings-panel">
+              <div class="section-heading">
+                <div>
+                  <h3 class="has-tooltip" data-i18n="githubOps" data-i18n-title="githubOpsHint">账号与仓库操作</h3>
+                </div>
+                <div class="heading-actions">
+                  <span class="github-test-action">
+                    <span id="github-test-status-shell" class="github-test-status-shell" aria-live="polite" hidden>
+                      <span id="github-test-status" class="observation-plan-inline-status"></span>
+                    </span>
+                    <button class="ghost-button" id="test-github-button" type="button" data-action="test-github" data-i18n="testGithub">测试连接</button>
+                  </span>
+                  <button class="primary-button" id="refresh-github-repos-button" type="button" data-action="load-github-repos" data-i18n="refreshGithubRepos">刷新我的仓库</button>
+                </div>
+              </div>
+              <div class="github-body">
+                <div id="github-account" class="github-account"></div>
+                <div id="github-repos" class="github-repo-list"></div>
+              </div>
+            </section>
+          </section>
+        </section>
+
+        <section class="view-panel" id="view-settings">
+          <div class="settings-grid">
+            <section class="settings-panel">
+              <div class="section-heading">
+                <div>
+                  <h3 class="has-tooltip" data-i18n="dataSources" data-i18n-title="dataSourcesHint">连接配置</h3>
+                </div>
+                <div class="heading-actions">
+                  <span id="settings-save-status-shell" class="settings-save-status-shell" aria-live="polite" hidden>
+                    <span id="settings-save-status" class="observation-plan-inline-status"></span>
+                  </span>
+                  <button class="primary-button" id="save-settings-button" type="button" data-i18n="saveSettings">保存设置</button>
+                </div>
+              </div>
+
+              <div class="settings-body">
+                <div class="settings-section observation-plan-section">
+                  <div class="settings-section-title">
+                    <strong data-i18n="observationPlans">观察方案</strong>
+                    <span data-i18n="observationPlansHint">按领域切换扫描策略与学习记忆</span>
+                  </div>
+                  <div class="observation-plan-grid">
+                    <div class="observation-plan-side">
+                      <section class="observation-plan-module observation-plan-select-module">
+                        <div class="observation-plan-module-head">
+                          <strong data-i18n="observationPlanSelectModule">方案选择</strong>
+                          <span data-i18n="observationPlanSelectModuleHint">选择后切换，切换会重新扫描</span>
+                        </div>
+                        <div class="observation-plan-select-row">
+                          <div class="observation-plan-field">
+                            <span data-i18n="activeObservationPlan">当前方案</span>
+                            <select id="observation-plan-select" class="sr-only" tabindex="-1" aria-hidden="true"></select>
+                            <div id="observation-plan-picker" class="observation-plan-picker"></div>
+                          </div>
+                          <button class="ghost-button" id="switch-observation-plan-button" type="button" data-action="switch-observation-plan" data-i18n="switchObservationPlan">切换方案</button>
+                        </div>
+                        <small id="observation-plan-status" class="field-hint observation-plan-status"></small>
+                      </section>
+                      <section class="observation-plan-module observation-plan-transfer-module">
+                        <div class="observation-plan-module-head">
+                          <strong data-i18n="observationPlanTransferModule">导入导出配置</strong>
+                          <span data-i18n="observationPlanTransferModuleHint">备份或恢复配置与学习数据</span>
+                        </div>
+                        <div class="observation-plan-transfer-actions">
+                          <button class="ghost-button" type="button" data-action="export-portable-data" data-i18n="exportPortableData">导出配置</button>
+                          <button class="ghost-button" type="button" data-action="import-portable-data" data-i18n="importPortableData">导入配置</button>
+                        </div>
+                      </section>
+                    </div>
+                    <section class="observation-plan-module observation-plan-generate-module">
+                      <div class="observation-plan-module-head">
+                        <strong data-i18n="observationPlanGenerateModule">方案生成</strong>
+                        <span data-i18n="observationPlanGenerateModuleHint">填写需求后生成可编辑草案</span>
+                      </div>
+                      <div class="observation-plan-generate-grid">
+                        <label class="observation-plan-name-field">
+                          <span data-i18n="observationPlanName">方案名称</span>
+                          <input id="observation-plan-name" type="text" data-i18n-placeholder="observationPlanNamePlaceholder" placeholder="如：内容创作工具观察" />
+                        </label>
+                        <label class="observation-plan-idea">
+                          <span data-i18n="observationPlanIdea">详细需求</span>
+                          <textarea id="observation-plan-idea" rows="2" data-i18n-placeholder="observationPlanIdeaPlaceholder" placeholder="输入你想长期关注的领域、工具形态或想法"></textarea>
+                        </label>
+                        <div id="observation-plan-requirements" class="observation-plan-requirements"></div>
+                        <button class="ghost-button" type="button" data-action="generate-observation-plan" data-i18n="generateObservationPlan">生成方案</button>
+                      </div>
+                    </section>
+                    <div class="observation-plan-logic">
+                      <div id="observation-plan-toolbar" class="observation-plan-toolbar"></div>
+                      <div id="observation-plan-view" class="observation-plan-view"></div>
+                      <textarea id="observation-plan-logic" rows="5" spellcheck="false" data-i18n-placeholder="observationPlanLogicPlaceholder" placeholder="生成草案后可编辑方案名称、检索条目、辅助词和排除项"></textarea>
+                    </div>
+                  </div>
+                </div>
+
+                <div class="settings-section key-settings-section">
+                  <div class="settings-section-title">
+                    <strong data-i18n="keyManagement">密钥管理</strong>
+                    <span data-i18n="keyManagementHint">每个 key 独立显示、保存和清除</span>
+                  </div>
+                  <div class="key-grid">
+                    <label class="secret-label key-card">
+                      <span class="field-title-row">
+                        <span data-i18n="githubToken">GitHub Token</span>
+                        <span id="github-token-issue" class="token-issue-badge" data-i18n="tokenExpired" hidden>Token 已过期</span>
+                        <a class="key-source-link" href="https://github.com/settings/tokens?type=classic" target="_blank" rel="noopener noreferrer" data-i18n="getKey" data-i18n-title="classicTokens">获取 Key</a>
+                      </span>
+                      <div class="secret-field">
+                        <input id="github-token" type="password" data-i18n-placeholder="githubTokenPlaceholder" placeholder="用于扫描、Star、Fork 和读取我的仓库" />
+                        <button class="ghost-button secret-toggle" type="button" data-action="toggle-secret" data-secret-kind="github" data-i18n="showKey">显示</button>
+                        <button class="ghost-button danger-button secret-clear" id="clear-github-token" type="button" data-action="clear-secret" data-secret-kind="github" data-i18n="clearGithubToken">清除 GitHub Token</button>
+                      </div>
+                      <small id="github-key-state" class="field-hint"></small>
+                    </label>
+                    <label class="secret-label key-card">
+                      <span class="field-title-row">
+                        <span data-i18n="tavilyKey">Tavily Key</span>
+                        <span id="tavily-key-issue" class="token-issue-badge" hidden>Key 无效</span>
+                        <a class="key-source-link" href="https://app.tavily.com/home" target="_blank" rel="noopener noreferrer" data-i18n="getKey" data-i18n-title="getKey">获取 Key</a>
+                      </span>
+                      <div class="secret-field">
+                        <input id="tavily-key" type="password" data-i18n-placeholder="tavilyKeyPlaceholder" placeholder="用于外部网页信号补充" />
+                        <button class="ghost-button secret-toggle" type="button" data-action="toggle-secret" data-secret-kind="tavily" data-i18n="showKey">显示</button>
+                        <button class="ghost-button danger-button secret-clear" id="clear-tavily-key" type="button" data-action="clear-secret" data-secret-kind="tavily" data-i18n="clearTavilyKey">清除 Tavily Key</button>
+                      </div>
+                      <small id="tavily-key-state" class="field-hint"></small>
+                    </label>
+                    <label class="secret-label key-card">
+                      <span class="field-title-row">
+                        <span data-i18n="exaKey">Exa Key</span>
+                        <span id="exa-key-issue" class="token-issue-badge" hidden>Key 无效</span>
+                        <a class="key-source-link" href="https://dashboard.exa.ai/api-keys" target="_blank" rel="noopener noreferrer" data-i18n="getKey" data-i18n-title="getKey">获取 Key</a>
+                      </span>
+                      <div class="secret-field">
+                        <input id="exa-key" type="password" data-i18n-placeholder="exaKeyPlaceholder" placeholder="用于语义网页检索补充" />
+                        <button class="ghost-button secret-toggle" type="button" data-action="toggle-secret" data-secret-kind="exa" data-i18n="showKey">显示</button>
+                        <button class="ghost-button danger-button secret-clear" id="clear-exa-key" type="button" data-action="clear-secret" data-secret-kind="exa" data-i18n="clearExaKey">清除 Exa Key</button>
+                      </div>
+                      <small id="exa-key-state" class="field-hint"></small>
+                    </label>
+                  </div>
+                </div>
+
+                <div class="settings-section model-key-section">
+                  <div class="settings-section-title">
+                    <strong data-i18n="modelProviders">大模型配置</strong>
+                    <span data-i18n="deepSeekOnly">当前默认只开放 DeepSeek，其他模型会在后续扩展。</span>
+                  </div>
+                  <div id="provider-list" class="provider-list"></div>
+                </div>
+              </div>
+            </section>
+          </div>
+        </section>
+      </main>
+    </div>
+
+    <div class="guide-tour" id="guide-tour" hidden aria-hidden="true">
+      <div class="guide-tour-mask" data-guide-tour-mask="top" aria-hidden="true"></div>
+      <div class="guide-tour-mask" data-guide-tour-mask="right" aria-hidden="true"></div>
+      <div class="guide-tour-mask" data-guide-tour-mask="bottom" aria-hidden="true"></div>
+      <div class="guide-tour-mask" data-guide-tour-mask="left" aria-hidden="true"></div>
+      <div class="guide-tour-spotlight" id="guide-tour-spotlight" aria-hidden="true"></div>
+      <section class="guide-tour-card" id="guide-tour-card" role="dialog" aria-modal="false" aria-labelledby="guide-tour-title">
+        <div class="guide-tour-head">
+          <span class="guide-tour-kicker" id="guide-tour-kicker">01 / 07</span>
+          <button class="guide-tour-close" type="button" data-action="guide-tour-skip" aria-label="关闭引导">×</button>
+        </div>
+        <h2 id="guide-tour-title">初始化引导</h2>
+        <p id="guide-tour-body">按照提示完成关键配置与第一次扫描。</p>
+        <div class="guide-tour-dots" id="guide-tour-dots" aria-hidden="true"></div>
+        <div class="guide-tour-actions">
+          <button class="ghost-button" type="button" data-action="guide-tour-prev" id="guide-tour-prev">上一步</button>
+          <button class="ghost-button" type="button" data-action="guide-tour-skip" id="guide-tour-skip">稍后再说</button>
+          <button class="primary-button" type="button" data-action="guide-tour-next" id="guide-tour-next">下一步</button>
+        </div>
+      </section>
+    </div>
+
+    <script src="/bootstrap.js" defer></script>
+  </body>
+</html>

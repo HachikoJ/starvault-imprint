@@ -1,0 +1,17 @@
+{
+  "name": "starvault-imprint",
+  "version": "0.1.0",
+  "private": true,
+  "description": "StarVault Imprint opportunity intelligence for discovering GitHub projects worth learning from and tracking over time.",
+  "type": "commonjs",
+  "scripts": {
+    "dev": "node src/server.js",
+    "start": "node src/server.js",
+    "scan": "node scripts/run-scan.js",
+    "check": "node --check src/server.js && node --check src/lib/config.js && node --check src/lib/domain-relevance.js && node --check src/lib/github.js && node --check src/lib/scoring.js && node --check src/lib/storage.js && node --check src/lib/tavily.js && node --check src/lib/exa.js && node --check src/lib/scheduler.js && node --check src/lib/llm.js && node --check public/bootstrap.js && node --check public/app.js && node --check scripts/run-scan.js && node --check scripts/visual-regression-check.js && node --check scripts/observation-plan-quality-audit.js",
+    "visual:check": "node scripts/visual-regression-check.js"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}
