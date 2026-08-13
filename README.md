@@ -15,6 +15,20 @@
   <a href="VISUAL_REGRESSION.md"><img alt="Visual checks" src="https://img.shields.io/badge/visual-regression-7c3aed"></a>
 </p>
 
+<p align="center">
+  <strong>中文</strong> · <a href="README_EN.md">English</a>
+</p>
+
+<p align="center">
+  <a href="#项目简介">项目简介</a> ·
+  <a href="#核心能力">核心能力</a> ·
+  <a href="#产品截图">产品截图</a> ·
+  <a href="#快速开始">快速开始</a> ·
+  <a href="#安全与隐私">安全与隐私</a> ·
+  <a href="#源码授权与商业合作">授权合作</a> ·
+  <a href="#联系作者">联系作者</a>
+</p>
+
 ## 项目简介
 
 星仓印记用于从海量 GitHub 项目中发现值得学习、理解、持续跟踪和启发实践的开源项目。它不是简单的 Trending 列表，也不只按 Star 数排序，而是把每个仓库转化为可研判的机会单元：这个项目解决什么问题、给谁用、能形成什么实践形态、热度和质量是否匹配、许可边界是否清楚、是否符合你的长期偏好。
@@ -325,13 +339,42 @@ npm run perf:storage
 - `lark-auth-qrcode.png`
 - 任何真实 API Key、Token、账号二维码、私有截图或本地扫描快照
 
-## 许可与使用限制
+## 源码授权与商业合作
 
 本项目源码采用 [StarVault Imprint Source-Available Non-Commercial License](LICENSE)。
 
-允许个人学习、研究、评估和非商业修改。禁止任何未经授权的商业使用、SaaS 托管、付费交付、白标包装、商业集成、复制抄袭、移除署名或冒名发布。任何抄袭盗用或未经授权的商业行为将被追责。
+当前项目在私有仓库维护，尚未以 MIT、Apache-2.0 或 GPL 等开放源代码许可证公开发布。许可证仅允许个人学习、研究、评估和非商业修改，不授予商业使用权。
+
+未经作者书面授权，禁止任何商业使用、SaaS 托管、付费交付、白标包装、商业集成、复制抄袭、移除署名或冒名发布。任何抄袭盗用或未经授权的商业行为将被追责。
 
 注意：这里的“非商业源码许可”约束的是星仓印记本项目代码，不代表被监控 GitHub 仓库的许可状态。第三方仓库仍需按其自身许可证和条款使用。
+
+需要商业授权、私有部署、联合开发、品牌合作或其他未明确授予的使用权，请先联系作者取得书面许可。
+
+## 联系作者
+
+交流产品思路、反馈问题或咨询授权合作，请通过以下方式联系：
+
+- GitHub：[HachikoJ](https://github.com/HachikoJ)
+- 微信：`hostrow`，添加时请备注“星仓印记”
+- 邮箱：`946106011@qq.com`
+
+<table>
+  <tr>
+    <td align="center">
+      <strong>微信联系</strong><br>
+      <img src="docs/assets/wechat-contact.png" alt="星仓印记微信联系二维码" width="220">
+    </td>
+    <td align="center">
+      <strong>微信赞赏</strong><br>
+      <img src="docs/assets/donate-wechat.png" alt="微信赞赏码" width="220">
+    </td>
+    <td align="center">
+      <strong>支付宝赞赏</strong><br>
+      <img src="docs/assets/donate-alipay.png" alt="支付宝赞赏码" width="220">
+    </td>
+  </tr>
+</table>
 
 ## Roadmap
 
