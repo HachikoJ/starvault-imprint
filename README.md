@@ -274,16 +274,6 @@ npm run release:check
 
 也可以在设置页面中配置 GitHub、Tavily、Exa 和 AI Key。Node 模式写入本机 `data/starvault.db`，Web 静态模式写入当前浏览器 IndexedDB；旧 JSON 只作为迁移来源和人工备份，请勿提交任何本地数据。
 
-## Star 趋势
-
-<a href="https://star-history.com/#HachikoJ/starvault-imprint&Date">
-  <picture>
-    <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/svg?repos=HachikoJ/starvault-imprint&type=Date&theme=dark" />
-    <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/svg?repos=HachikoJ/starvault-imprint&type=Date" />
-    <img alt="Star History Chart" src="https://api.star-history.com/svg?repos=HachikoJ/starvault-imprint&type=Date" />
-  </picture>
-</a>
-
 ## 文档
 
 - [PRD](PRD.md)
