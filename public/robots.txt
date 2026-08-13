@@ -1,0 +1,5 @@
+User-agent: *
+Disallow: /
+Noindex: /
+
+# StarVault Imprint is an app surface, not a crawl target.

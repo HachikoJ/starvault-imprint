@@ -1,0 +1,42 @@
+# Local secrets
+.env
+.env.*
+!.env.example
+
+# Local runtime data: tokens, scans, notes, AI analysis, memory, user behavior
+data/
+!data/.gitkeep
+*.corrupt-*
+
+# Dependencies and package-manager output
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# Local browser/test artifacts
+.playwright-cli/
+output/
+canvas/
+
+# Local assistant / account artifacts
+.agents/
+lark-auth-qrcode.png
+skills-lock.json
+
+# Personal contact and payment assets stay local until explicitly approved.
+docs/assets/wechat-contact.png
+docs/assets/donate-wechat.png
+docs/assets/donate-alipay.png
+
+# Local one-off work scripts unrelated to StarVault Imprint
+scripts/build_jilin_cost_dashboard.py
+scripts/make_preschool_evidence_wall.py
+
+# OS and editor noise
+.DS_Store
+**/.DS_Store
+*.log
+.vscode/
+.idea/
