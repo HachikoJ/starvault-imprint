@@ -48,15 +48,15 @@ Explicit actions drive learning: favorites, hides, Star/Fork actions, judgment n
 
 ### Project Pool
 
-![Project pool](docs/assets/screenshot-projects.png)
+![Project pool](docs/assets/screenshot-projects-en.png)
 
 ### Leaderboard
 
-![Leaderboard](docs/assets/screenshot-leaderboard.png)
+![Leaderboard](docs/assets/screenshot-leaderboard-en.png)
 
 ### Learning Hub
 
-![Learning hub](docs/assets/screenshot-learning.png)
+![Learning hub](docs/assets/screenshot-learning-en.png)
 
 ## Architecture
 
