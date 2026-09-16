@@ -4297,8 +4297,8 @@ const STATIC_ICON_TARGETS = [
   ['[data-view-target="brief"]', "chart"],
   ['[data-view-target="github"]', "github"],
   ['[data-view-target="settings"]', "settings"],
-  [".site-footer-official-site", "external", "siteFooterOfficialSite"],
-  [".site-footer-repository", "github", "siteFooterRepository"],
+  [".site-footer-official-site", "external", "siteFooterOfficialSite", { iconOnly: true }],
+  [".site-footer-repository", "github", "siteFooterRepository", { iconOnly: true }],
   ["#guide-tour-button", "shield"],
   ["#scan-button", "scan"],
   ["#export-menu > summary", "download"],
@@ -4330,12 +4330,12 @@ function setIconButtonContent(node, iconName, label, options = {}) {
 }
 
 function decorateStaticIcons() {
-  STATIC_ICON_TARGETS.forEach(([selector, iconName, explicitLabelKey]) => {
+  STATIC_ICON_TARGETS.forEach(([selector, iconName, explicitLabelKey, options]) => {
     const node = document.querySelector(selector);
     if (!node) return;
     const labelKey = explicitLabelKey || node.dataset.i18n;
     const label = labelKey ? t(labelKey) : node.textContent.trim();
-    setIconButtonContent(node, iconName, label);
+    setIconButtonContent(node, iconName, label, options);
   });
   if (elements.backToTop) {
     elements.backToTop.innerHTML = iconOnly("arrowUp", t("backToTop"));

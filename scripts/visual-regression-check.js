@@ -312,6 +312,77 @@ async function collectLayoutIssues(page, context) {
         });
       }
 
+      const footerLinks = Array.from(document.querySelectorAll(".site-footer-link")).filter(isVisible);
+      const footerIconRects = [];
+      for (const link of footerLinks) {
+        const linkRect = link.getBoundingClientRect();
+        const visibleTextParts = Array.from(
+          link.querySelectorAll("span:not(.ui-icon-only):not(.sr-only)")
+        ).filter(isVisible);
+        if (visibleTextParts.length > 0) {
+          issues.push({
+            type: "footer-link-visible-text",
+            message: "Footer icon link contains visible text",
+            label: labelFor(link),
+            text: visibleTextParts.map((part) => part.textContent.trim()).filter(Boolean).join(" / "),
+            rect: rectData(linkRect),
+            activeViewId
+          });
+        }
+
+        const icon = link.querySelector(".ui-icon");
+        if (!icon || !isVisible(icon)) {
+          issues.push({
+            type: "footer-link-missing-icon",
+            message: "Footer link does not render its icon",
+            label: labelFor(link),
+            rect: rectData(linkRect),
+            activeViewId
+          });
+          continue;
+        }
+
+        const iconRect = icon.getBoundingClientRect();
+        const overflow = Math.max(
+          linkRect.left - iconRect.left,
+          iconRect.right - linkRect.right,
+          linkRect.top - iconRect.top,
+          iconRect.bottom - linkRect.bottom
+        );
+        if (overflow > 1) {
+          issues.push({
+            type: "footer-link-icon-overflow",
+            message: `Footer icon exceeds its link by ${Math.round(overflow)}px`,
+            label: labelFor(link),
+            icon: rectData(iconRect),
+            link: rectData(linkRect),
+            activeViewId
+          });
+        }
+        footerIconRects.push({ link, icon, rect: iconRect });
+      }
+
+      for (let i = 0; i < footerIconRects.length; i += 1) {
+        for (let j = i + 1; j < footerIconRects.length; j += 1) {
+          const first = footerIconRects[i];
+          const second = footerIconRects[j];
+          const overlapArea =
+            Math.max(0, Math.min(first.rect.right, second.rect.right) - Math.max(first.rect.left, second.rect.left)) *
+            Math.max(0, Math.min(first.rect.bottom, second.rect.bottom) - Math.max(first.rect.top, second.rect.top));
+          if (overlapArea > 4) {
+            issues.push({
+              type: "footer-icon-overlap",
+              message: "Footer icons overlap",
+              label: `${labelFor(first.link)} / ${labelFor(second.link)}`,
+              overlapArea: Math.round(overlapArea),
+              first: rectData(first.rect),
+              second: rectData(second.rect),
+              activeViewId
+            });
+          }
+        }
+      }
+
       const horizontalTargets = [
         ".app-shell",
         ".sidebar",

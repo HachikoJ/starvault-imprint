@@ -24230,6 +24230,7 @@ body {
   border: 0;
   border-radius: 8px;
   color: inherit;
+  overflow: hidden;
   opacity: 0.68;
   transition:
     color var(--fast),
