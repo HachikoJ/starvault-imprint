@@ -2,6 +2,7 @@
 .env
 .env.*
 !.env.example
+deploy/filing.local
 
 # Local runtime data: tokens, scans, notes, AI analysis, memory, user behavior
 data/

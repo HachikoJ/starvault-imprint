@@ -24201,7 +24201,7 @@ body {
   }
 }
 
-/* Site footer: official site, repository trail and ICP filing stay reachable from every view. */
+/* Site footer: official site and repository links stay reachable from every view. */
 .site-footer {
   display: flex;
   align-items: center;

@@ -21,6 +21,19 @@ SSH_KEY=~/.ssh/starvault_deploy deploy/deploy-static.sh
 脚本会检查静态产物、上传新版本、原子切换软链接、同步
 `deploy/nginx/starvault.deline.top.conf`，最后执行 `nginx -t` 并重新加载。
 
+## 属地合规信息
+
+备案号这类只和部署所在地有关的文本不进入仓库。发布前把备案号写成单行文本放进
+未跟踪文件 `deploy/filing.local`，或用环境变量覆盖：
+
+```bash
+ICP_NUMBER="粤ICP备XXXXXXXX号-X" deploy/deploy-static.sh
+```
+
+脚本在本地暂存目录里把该文本注入页脚的
+`<!-- deployment:extra-footer-link -->` 位置，服务器收到的产物带备案信息，仓库源码和
+GitHub Pages 镜像都不包含。未提供时脚本会打印提示并照常发布。
+
 ## 回滚
 
 ```bash

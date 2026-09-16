@@ -115,6 +115,7 @@ async function readSiteFooter(page) {
     return {
       found: true,
       text: footer.innerText,
+      hasDeploymentLinkSlot: footer.innerHTML.includes("<!-- deployment:extra-footer-link -->"),
       height: Math.round(box.height),
       inViewport: box.height > 0 && box.top >= -1 && box.bottom <= window.innerHeight + 1,
       links: Array.from(footer.querySelectorAll("a")).map((link) => ({
@@ -136,8 +137,14 @@ function assertSiteFooter(assert, label, footer) {
     hrefs.includes("https://github.com/HachikoJ/starvault-imprint"),
     `${label} footer missed the GitHub repository link: ${hrefs.join(", ")}`
   );
-  assert(hrefs.includes("https://beian.miit.gov.cn/"), `${label} footer missed the ICP link: ${hrefs.join(", ")}`);
-  assert(footer.text.includes("粤ICP备2025449309号-2"), `${label} footer missed the ICP number: ${footer.text}`);
+  assert(
+    !/ICP|备案|beian/i.test(footer.text) && !hrefs.some((href) => /beian\.miit\.gov\.cn/.test(href)),
+    `${label} footer shipped filing info, which is injected per deployment target instead: ${footer.text}`
+  );
+  assert(
+    footer.hasDeploymentLinkSlot,
+    `${label} footer lost the deployment link slot used to inject target-specific links`
+  );
   assert(
     links.every((link) => link.target === "_blank" && /noopener/.test(link.rel || "")),
     `${label} footer external links were not hardened: ${JSON.stringify(links)}`
