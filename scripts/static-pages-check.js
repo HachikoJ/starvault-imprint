@@ -107,6 +107,42 @@ async function inspect(page) {
   }));
 }
 
+async function exerciseBackToTop(page) {
+  const setup = await page.evaluate(async () => {
+    const button = document.querySelector("#back-to-top");
+    const row = document.querySelector("#project-rows .project-row-scroll") || document.querySelector("#project-rows");
+    const panel = document.querySelector(".view-panel.active");
+    const target = [row, panel, document.scrollingElement].find((node) => node && node.scrollHeight - node.clientHeight > 600) || row;
+    if (!button || !target) return { found: false };
+    target.scrollTop = Math.min(900, target.scrollHeight - target.clientHeight);
+    await new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+    return {
+      found: true,
+      target: target === row ? "project-list" : target === panel ? "view-panel" : "page",
+      scrollTop: target.scrollTop,
+      visibleAfterScroll: !button.hidden
+    };
+  });
+  if (!setup.found) return setup;
+
+  const button = page.locator("#back-to-top");
+  await button.focus();
+  const focused = await page.evaluate(() => document.activeElement?.id === "back-to-top");
+  const label = await button.getAttribute("aria-label");
+  await page.keyboard.press("Enter");
+  await page.waitForTimeout(1200);
+  const settled = await page.evaluate(() => {
+    const row = document.querySelector("#project-rows .project-row-scroll") || document.querySelector("#project-rows");
+    const panel = document.querySelector(".view-panel.active");
+    const tops = [row, panel].filter(Boolean).map((node) => Math.max(0, node.scrollTop || 0));
+    return {
+      maxScrollTop: Math.max(0, ...tops, window.scrollY || 0),
+      hidden: document.querySelector("#back-to-top")?.hidden ?? null
+    };
+  });
+  return { ...setup, focused, label, ...settled };
+}
+
 async function main() {
   const { server, requests, port } = await startStaticServer();
   fs.mkdirSync(OUTPUT_DIR, { recursive: true });
@@ -146,6 +182,14 @@ async function main() {
     assert(desktop.consoleErrors.length === 0, `desktop console errors: ${desktop.consoleErrors.join(" | ")}`);
     assert(desktop.failedRequests.length === 0, `desktop failed requests: ${desktop.failedRequests.join(" | ")}`);
     assert(desktop.httpErrors.length === 0, `desktop HTTP errors: ${desktop.httpErrors.join(" | ")}`);
+    const desktopBackToTop = await exerciseBackToTop(desktop.page);
+    evidence.backToTop = { desktop: desktopBackToTop };
+    assert(desktopBackToTop.found, "desktop back-to-top button was not rendered");
+    assert(desktopBackToTop.visibleAfterScroll, "desktop back-to-top button stayed hidden after scrolling");
+    assert(desktopBackToTop.focused, "desktop back-to-top button was not keyboard focusable");
+    assert(desktopBackToTop.label === "返回顶部", `desktop back-to-top label was ${desktopBackToTop.label}`);
+    assert(desktopBackToTop.maxScrollTop <= 8, `desktop back-to-top left scroll offset ${desktopBackToTop.maxScrollTop}`);
+    assert(desktopBackToTop.hidden === true, "desktop back-to-top button stayed visible at the top");
     await desktop.page.screenshot({ path: path.join(OUTPUT_DIR, "desktop.png"), fullPage: true });
 
     // Reload must not re-seed or duplicate scans and archive entries.
@@ -172,6 +216,11 @@ async function main() {
     assert(mobile.consoleErrors.length === 0, `mobile console errors: ${mobile.consoleErrors.join(" | ")}`);
     assert(mobile.failedRequests.length === 0, `mobile failed requests: ${mobile.failedRequests.join(" | ")}`);
     assert(mobile.httpErrors.length === 0, `mobile HTTP errors: ${mobile.httpErrors.join(" | ")}`);
+    const mobileBackToTop = await exerciseBackToTop(mobile.page);
+    evidence.backToTop.mobile = mobileBackToTop;
+    assert(mobileBackToTop.found, "mobile back-to-top button was not rendered");
+    assert(mobileBackToTop.visibleAfterScroll, "mobile back-to-top button stayed hidden after scrolling");
+    assert(mobileBackToTop.maxScrollTop <= 8, `mobile back-to-top left scroll offset ${mobileBackToTop.maxScrollTop}`);
     await mobile.page.screenshot({ path: path.join(OUTPUT_DIR, "mobile.png"), fullPage: true });
     await mobile.context.close();
 

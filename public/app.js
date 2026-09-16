@@ -10,6 +10,7 @@ const I18N = {
     navGithubRepos: "我的仓库",
     navSettings: "设置",
     guideTourButton: "引导",
+    backToTop: "返回顶部",
     guideTourClose: "关闭引导",
     guideTourPrev: "上一步",
     guideTourNext: "下一步",
@@ -716,6 +717,7 @@ const I18N = {
     navGithubRepos: "Repos",
     navSettings: "Settings",
     guideTourButton: "Guide",
+    backToTop: "Back to top",
     guideTourClose: "Close guide",
     guideTourPrev: "Back",
     guideTourNext: "Next",
@@ -2853,6 +2855,7 @@ const elements = {
   localBackupStatus: document.querySelector("#local-backup-status"),
   observationPlanConfirmDialog: document.querySelector("#observation-plan-confirm-dialog"),
   taskNotifications: document.querySelector("#task-notifications"),
+  backToTop: document.querySelector("#back-to-top"),
   switchObservationPlanButton: document.querySelector("#switch-observation-plan-button"),
   observationPlanStatus: document.querySelector("#observation-plan-status")
 };
@@ -4324,6 +4327,9 @@ function decorateStaticIcons() {
     const label = labelKey ? t(labelKey) : node.textContent.trim();
     setIconButtonContent(node, iconName, label);
   });
+  if (elements.backToTop) {
+    elements.backToTop.innerHTML = iconOnly("arrowUp", t("backToTop"));
+  }
 }
 
 function compactText(value, limit = 72) {
@@ -5912,6 +5918,36 @@ async function refreshProviderStatusUi() {
 
 function projectListScrollElement() {
   return elements.projectRows?.querySelector(".project-row-scroll") || elements.projectRows;
+}
+
+const BACK_TO_TOP_THRESHOLD = 320;
+
+function backToTopScrollTargets() {
+  const targets = [document.scrollingElement, document.documentElement, document.body];
+  const activePanel = document.querySelector(".view-panel.active");
+  if (activePanel && activePanel.id !== "view-projects") targets.push(activePanel);
+  targets.push(projectListScrollElement());
+  return Array.from(new Set(targets.filter(Boolean)));
+}
+
+function updateBackToTopVisibility() {
+  if (!elements.backToTop) return;
+  const scrolled = backToTopScrollTargets().some((target) => (target.scrollTop || 0) > BACK_TO_TOP_THRESHOLD);
+  elements.backToTop.hidden = !scrolled;
+}
+
+function scrollBackToTop() {
+  const reducedMotion = window.matchMedia?.("(prefers-reduced-motion: reduce)")?.matches;
+  const behavior = reducedMotion ? "auto" : "smooth";
+  backToTopScrollTargets().forEach((target) => {
+    if (typeof target.scrollTo === "function") {
+      target.scrollTo({ top: 0, left: 0, behavior });
+      return;
+    }
+    target.scrollTop = 0;
+  });
+  window.scrollTo?.({ top: 0, left: 0, behavior });
+  updateBackToTopVisibility();
 }
 
 function renderLocalActionSurfaces(options = {}) {
@@ -10018,6 +10054,7 @@ function resetProjectListPosition() {
 function renderProjectPoolPage() {
   if (isPlanTransitionActive()) {
     renderProjectPoolTransitionState();
+    updateBackToTopVisibility();
     return;
   }
   renderProjects({
@@ -10025,6 +10062,7 @@ function renderProjectPoolPage() {
     total: state.projectPool.total,
     limit: state.projectPool.pageSize
   });
+  updateBackToTopVisibility();
 }
 
 function setProjectPage(page, options = {}) {
@@ -12187,6 +12225,7 @@ function switchView(view, options = {}) {
   if (view === "projects" && options.manual) {
     applyPendingRestoredProjectSelection().catch((error) => toast(error.message));
   }
+  updateBackToTopVisibility();
   scheduleGuideTourPosition(80);
 }
 
@@ -12348,6 +12387,8 @@ function wireEvents() {
   window.addEventListener("beforeunload", handleLongTaskBeforeUnload);
   window.addEventListener("resize", () => scheduleGuideTourPosition(60));
   window.addEventListener("scroll", () => scheduleGuideTourPosition(60), true);
+  window.addEventListener("resize", updateBackToTopVisibility);
+  window.addEventListener("scroll", updateBackToTopVisibility, true);
   document.addEventListener("pointerdown", blockGuideTourBackgroundInteraction, true);
   document.addEventListener("click", blockGuideTourBackgroundInteraction, true);
   document.addEventListener("wheel", blockGuideTourBackgroundInteraction, { passive: false, capture: true });
@@ -12455,6 +12496,11 @@ function wireEvents() {
   });
 
   document.addEventListener("click", (event) => {
+    if (event.target.closest("[data-action='back-to-top']")) {
+      scrollBackToTop();
+      return;
+    }
+
     const homeLink = event.target.closest("[data-action='go-home']");
     if (homeLink) {
       event.preventDefault();

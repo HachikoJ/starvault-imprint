@@ -23643,6 +23643,48 @@ body {
 }
 
 /* Durable task notices: plan generation can outlive the tab that started it. */
+.back-to-top {
+  position: fixed;
+  right: 22px;
+  bottom: 22px;
+  z-index: 31;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 44px;
+  height: 44px;
+  padding: 0;
+  border: 1px solid var(--line-strong);
+  border-radius: 50%;
+  background: rgba(255, 255, 255, 0.96);
+  color: var(--ink);
+  box-shadow: var(--shadow-float);
+  cursor: pointer;
+}
+
+.back-to-top[hidden] {
+  display: none !important;
+}
+
+.back-to-top .ui-icon {
+  width: 18px;
+  height: 18px;
+}
+
+.back-to-top:hover {
+  border-color: var(--ink);
+  background: #f4f6f3;
+}
+
+.back-to-top:focus-visible {
+  outline: 2px solid var(--steel);
+  outline-offset: 2px;
+}
+
+.back-to-top:not([hidden]) + .task-notifications {
+  bottom: 78px;
+}
+
 .task-notifications {
   position: fixed;
   right: 22px;
@@ -23830,11 +23872,20 @@ body {
 }
 
 @media (max-width: 720px) {
+  .back-to-top {
+    right: 14px;
+    bottom: 14px;
+  }
+
   .task-notifications {
     left: 14px;
     right: 14px;
     bottom: 14px;
     width: auto;
+  }
+
+  .back-to-top:not([hidden]) + .task-notifications {
+    bottom: 70px;
   }
 
   .toast {
