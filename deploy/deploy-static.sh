@@ -53,6 +53,7 @@ ssh "${SSH_OPTS[@]}" "$HOST" "set -Eeuo pipefail
 rsync -az --delete --exclude '.DS_Store' \
   -e "$RSYNC_SSH" --rsync-path="$RSYNC_PATH" \
   "$PUBLIC_DIR/" "$HOST:$RELEASE_DIR/"
+ssh "${SSH_OPTS[@]}" "$HOST" "sudo -n chown -R root:root '$RELEASE_DIR'"
 
 ssh "${SSH_OPTS[@]}" "$HOST" "set -Eeuo pipefail
   if [[ ! -f '$RELEASE_DIR/index.html' ]]; then
@@ -79,5 +80,7 @@ ssh "${SSH_OPTS[@]}" "$HOST" "set -Eeuo pipefail
     [[ \"\$old\" == '$RELEASE_DIR' ]] || sudo -n rm -rf -- \"\$old\"
   done
 "
+
+curl -fsS --max-time 20 "https://$DOMAIN/" >/dev/null || fail "部署后 $DOMAIN 未正常响应"
 
 echo "部署完成：https://$DOMAIN/"
