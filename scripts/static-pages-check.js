@@ -141,6 +141,7 @@ function assertSiteFooter(assert, label, footer) {
     !/ICP|备案|beian/i.test(footer.text) && !hrefs.some((href) => /beian\.miit\.gov\.cn/.test(href)),
     `${label} footer shipped filing info, which is injected per deployment target instead: ${footer.text}`
   );
+  assert(!/©|StarVault Imprint/.test(footer.text), `${label} footer kept the verbose copyright line: ${footer.text}`);
   assert(
     footer.hasDeploymentLinkSlot,
     `${label} footer lost the deployment link slot used to inject target-specific links`
