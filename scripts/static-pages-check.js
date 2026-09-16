@@ -107,6 +107,43 @@ async function inspect(page) {
   }));
 }
 
+async function readSiteFooter(page) {
+  return page.evaluate(() => {
+    const footer = document.querySelector(".site-footer");
+    if (!footer) return { found: false };
+    const box = footer.getBoundingClientRect();
+    return {
+      found: true,
+      text: footer.innerText,
+      height: Math.round(box.height),
+      inViewport: box.height > 0 && box.top >= -1 && box.bottom <= window.innerHeight + 1,
+      links: Array.from(footer.querySelectorAll("a")).map((link) => ({
+        text: link.textContent.trim(),
+        href: link.href,
+        target: link.getAttribute("target"),
+        rel: link.getAttribute("rel")
+      }))
+    };
+  });
+}
+
+function assertSiteFooter(assert, label, footer) {
+  const links = footer.links || [];
+  const hrefs = links.map((link) => link.href);
+  assert(footer.found, `${label} site footer was not rendered`);
+  assert(hrefs.includes("https://www.deline.top/"), `${label} footer missed the official site link: ${hrefs.join(", ")}`);
+  assert(
+    hrefs.includes("https://github.com/HachikoJ/starvault-imprint"),
+    `${label} footer missed the GitHub repository link: ${hrefs.join(", ")}`
+  );
+  assert(hrefs.includes("https://beian.miit.gov.cn/"), `${label} footer missed the ICP link: ${hrefs.join(", ")}`);
+  assert(footer.text.includes("粤ICP备2025449309号-2"), `${label} footer missed the ICP number: ${footer.text}`);
+  assert(
+    links.every((link) => link.target === "_blank" && /noopener/.test(link.rel || "")),
+    `${label} footer external links were not hardened: ${JSON.stringify(links)}`
+  );
+}
+
 async function exerciseBackToTop(page) {
   const setup = await page.evaluate(async () => {
     const button = document.querySelector("#back-to-top");
@@ -163,6 +200,7 @@ async function main() {
     const leaderboard = await readApi(desktop.page, "/api/leaderboard");
     const summary = await readApi(desktop.page, "/api/summary");
     const layout = await inspect(desktop.page);
+    const desktopFooter = await readSiteFooter(desktop.page);
 
     evidence.desktop = {
       activePlan: plans.active?.id,
@@ -173,6 +211,7 @@ async function main() {
       scanCount: summary.scans?.length ?? summary.lastScan ? 1 : 0,
       overflowX: layout.overflowX
     };
+    evidence.siteFooter = { desktop: desktopFooter.links };
 
     assert(plans.active?.id === "demo-content", `desktop active plan was ${plans.active?.id}`);
     assert(projects.total === 25, `desktop project pool was ${projects.total}`);
@@ -182,6 +221,8 @@ async function main() {
     assert(desktop.consoleErrors.length === 0, `desktop console errors: ${desktop.consoleErrors.join(" | ")}`);
     assert(desktop.failedRequests.length === 0, `desktop failed requests: ${desktop.failedRequests.join(" | ")}`);
     assert(desktop.httpErrors.length === 0, `desktop HTTP errors: ${desktop.httpErrors.join(" | ")}`);
+    assertSiteFooter(assert, "desktop", desktopFooter);
+    assert(desktopFooter.inViewport, "desktop site footer was not visible without scrolling");
     const desktopBackToTop = await exerciseBackToTop(desktop.page);
     evidence.backToTop = { desktop: desktopBackToTop };
     assert(desktopBackToTop.found, "desktop back-to-top button was not rendered");
@@ -221,6 +262,17 @@ async function main() {
     assert(mobileBackToTop.found, "mobile back-to-top button was not rendered");
     assert(mobileBackToTop.visibleAfterScroll, "mobile back-to-top button stayed hidden after scrolling");
     assert(mobileBackToTop.maxScrollTop <= 8, `mobile back-to-top left scroll offset ${mobileBackToTop.maxScrollTop}`);
+    await mobile.page.evaluate(() => {
+      const height = Math.max(document.body.scrollHeight, document.documentElement.scrollHeight);
+      window.scrollTo(0, height);
+      const scrollable = document.querySelector(".view-panel.active");
+      if (scrollable) scrollable.scrollTop = scrollable.scrollHeight;
+    });
+    await mobile.page.waitForTimeout(200);
+    const mobileFooter = await readSiteFooter(mobile.page);
+    evidence.siteFooter.mobile = mobileFooter.links;
+    assertSiteFooter(assert, "mobile", mobileFooter);
+    assert(mobileFooter.inViewport, "mobile site footer was not visible after scrolling to the page end");
     await mobile.page.screenshot({ path: path.join(OUTPUT_DIR, "mobile.png"), fullPage: true });
     await mobile.context.close();
 

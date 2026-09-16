@@ -36,6 +36,8 @@
 
 - 在线地址：<https://starvault.deline.top/>
 - GitHub Pages 镜像：<https://hachikoj.github.io/starvault-imprint/>
+- 作者官网：<https://www.deline.top/>
+- 备案信息：粤ICP备2025449309号-2，可在[工信部备案系统](https://beian.miit.gov.cn/)查询。
 - 打开即可看到一份示例方案，用真实 GitHub 公开仓库元数据演示“方案生成 → 扫描检索 → 项目池 → 榜单”的完整链路，不需要任何 Key。
 - 在线版是静态部署（腾讯云 `starvault.deline.top` 与 GitHub Pages 镜像），**没有账号体系，也没有服务端数据隔离**：方案、项目池、收藏、笔记、AI 分析和你填写的 Key 都只保存在当前浏览器的 IndexedDB，不上传到任何星仓印记服务器，也不进入 Git。
 - 腾讯云主机的发布方式见 [deploy/README.md](deploy/README.md)：只上传 `public/` 静态产物到独立发布目录，通过软链接原子切换，不运行 Node 服务。

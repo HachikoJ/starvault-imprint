@@ -35,6 +35,8 @@
 
 - Live site: <https://starvault.deline.top/>
 - GitHub Pages mirror: <https://hachikoj.github.io/starvault-imprint/>
+- Author site: <https://www.deline.top/>
+- ICP filing: 粤ICP备2025449309号-2, verifiable at [beian.miit.gov.cn](https://beian.miit.gov.cn/).
 - The first visit loads a sample observation plan built from real public GitHub repository metadata, so the full "plan → scan → project pool → leaderboard" flow is visible without any API key.
 - The online build is a static GitHub Pages site with **no accounts and no server-side data isolation**. Plans, project pools, favorites, notes, AI analyses and any key you enter stay in your own browser IndexedDB; nothing is uploaded to a StarVault server and nothing is written to Git.
 - The sample data is seeded once into an empty workspace. As soon as you have your own projects, plans, favorites, notes, scans or credentials, refreshes never overwrite or re-seed them.
