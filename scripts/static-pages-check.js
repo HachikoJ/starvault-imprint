@@ -175,7 +175,21 @@ async function exerciseBackToTop(page) {
   const focused = await page.evaluate(() => document.activeElement?.id === "back-to-top");
   const label = await button.getAttribute("aria-label");
   await page.keyboard.press("Enter");
-  await page.waitForTimeout(1200);
+  try {
+    await page.waitForFunction(
+      () => {
+        const row = document.querySelector("#project-rows .project-row-scroll") || document.querySelector("#project-rows");
+        const panel = document.querySelector(".view-panel.active");
+        const tops = [row, panel].filter(Boolean).map((node) => Math.max(0, node.scrollTop || 0));
+        const settled = Math.max(0, ...tops, window.scrollY || 0) <= 8;
+        return settled && document.querySelector("#back-to-top")?.hidden === true;
+      },
+      null,
+      { timeout: 8000 }
+    );
+  } catch {
+    // Keep the final assertion below as the single failure source with state details.
+  }
   const settled = await page.evaluate(() => {
     const row = document.querySelector("#project-rows .project-row-scroll") || document.querySelector("#project-rows");
     const panel = document.querySelector(".view-panel.active");
