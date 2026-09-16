@@ -142,6 +142,23 @@
     return window.__STARVAULT_DEPLOYMENT__ === "static";
   }
 
+  const EXA_DIRECT_URL = "https://api.exa.ai/search";
+
+  function exaProxyUrl() {
+    return typeof window.__STARVAULT_EXA_PROXY__ === "string" ? window.__STARVAULT_EXA_PROXY__.trim() : "";
+  }
+
+  function exaSearchEndpoint() {
+    return exaProxyUrl() || EXA_DIRECT_URL;
+  }
+
+  function exaUnreachableMessage() {
+    const proxy = exaProxyUrl();
+    if (proxy) return `无法连接 Exa 代理 ${proxy}，请稍后重试。`;
+    if (isStaticDeployment()) return "当前静态页面未配置 Exa 代理，浏览器无法直连 Exa API。";
+    return "无法连接 Exa API，请检查网络后重试。";
+  }
+
   function activateLocalMode() {
     try {
       window.localStorage.setItem(STORAGE_MODE_KEY, "indexeddb");
@@ -1404,7 +1421,7 @@
         }).then((response) => keyValidationResult(true, response.ok, response.ok ? "" : "Tavily Key 无效")).catch(() => keyValidationResult(true, false, "Tavily Key 无效或浏览器无法直连"))
       : keyValidationResult(false, null);
     const exa = secrets.exaKey
-      ? await fetchWithTimeout("https://api.exa.ai/search", {
+      ? await fetchWithTimeout(exaSearchEndpoint(), {
           method: "POST",
           headers: { "Content-Type": "application/json", "x-api-key": secrets.exaKey },
           body: JSON.stringify({ query: "GitHub open source", type: "auto", numResults: 1 })
@@ -1414,13 +1431,7 @@
             const error = await exaErrorFromResponse(response);
             return keyValidationResult(true, false, error.message);
           })
-          .catch((error) =>
-            keyValidationResult(
-              true,
-              false,
-              error?.exaResponseFailure ? error.message : "无法连接 Exa API，请检查网络或浏览器限制后重试。"
-            )
-          )
+          .catch((error) => keyValidationResult(true, false, error?.exaResponseFailure ? error.message : exaUnreachableMessage()))
       : keyValidationResult(false, null);
     return { checkedAt: nowIso(), github, tavily, exa };
   }
@@ -2286,7 +2297,7 @@
 
   async function browserExaSearch(query, key, maxResults = 6) {
     if (!key) return [];
-    const response = await fetchWithTimeout("https://api.exa.ai/search", {
+    const response = await fetchWithTimeout(exaSearchEndpoint(), {
       method: "POST",
       headers: { "Content-Type": "application/json", "x-api-key": key },
       body: JSON.stringify({

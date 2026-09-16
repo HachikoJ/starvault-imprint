@@ -46,6 +46,7 @@ async function createBrowserRuntime(fetchImpl, options = {}) {
   // when they want the static demo seeding path.
   if (options.bootstrap) window.__STARVAULT_BOOTSTRAPPED__ = true;
   if (options.deployment) window.__STARVAULT_DEPLOYMENT__ = options.deployment;
+  if (options.exaProxy !== undefined) window.__STARVAULT_EXA_PROXY__ = options.exaProxy;
   if (options.baseURI) window.document = { baseURI: options.baseURI };
   const context = {
     window,
@@ -198,6 +199,59 @@ test("browser-local settings migrate legacy DeepSeek defaults", async () => {
   const provider = settings.llmProviders.find((item) => item.id === "deepseek");
   assert.equal(provider.model, "deepseek-flash");
   assert.deepEqual(provider.models, ["deepseek-flash", "deepseek-v4-pro"]);
+});
+
+test("static deployment sends Exa requests through the configured proxy", async () => {
+  const calls = [];
+  const runtime = await createBrowserRuntime(
+    async (url) => {
+      calls.push(String(url));
+      return response({ results: [] });
+    },
+    { deployment: "static", exaProxy: "/api/exa/search" }
+  );
+
+  const settings = await runtime.api.handle("/api/settings", {
+    method: "POST",
+    body: JSON.stringify({ exaKey: "test-exa-key", validateProvider: false })
+  });
+
+  assert.deepEqual(calls, ["/api/exa/search"]);
+  assert.equal(settings.keyValidation.exa.configured, true);
+  assert.equal(settings.keyValidation.exa.valid, true);
+  assert.equal(settings.keyValidation.exa.message, "");
+});
+
+test("proxied Exa errors keep their upstream meaning", async () => {
+  const runtime = await createBrowserRuntime(async () => response({ error: "Invalid API key", tag: "INVALID_API_KEY" }, 401), {
+    deployment: "static",
+    exaProxy: "/api/exa/search"
+  });
+
+  const settings = await runtime.api.handle("/api/settings", {
+    method: "POST",
+    body: JSON.stringify({ exaKey: "expired-key", validateProvider: false })
+  });
+
+  assert.equal(settings.keyValidation.exa.valid, false);
+  assert.match(settings.keyValidation.exa.message, /Exa Key 无效或已过期/);
+});
+
+test("static deployment without an Exa proxy does not blame the network", async () => {
+  const runtime = await createBrowserRuntime(
+    async () => {
+      throw new TypeError("Failed to fetch");
+    },
+    { deployment: "static" }
+  );
+
+  const settings = await runtime.api.handle("/api/settings", {
+    method: "POST",
+    body: JSON.stringify({ exaKey: "test-exa-key", validateProvider: false })
+  });
+
+  assert.equal(settings.keyValidation.exa.valid, false);
+  assert.match(settings.keyValidation.exa.message, /未配置 Exa 代理/);
 });
 
 async function waitForTask(api, id) {

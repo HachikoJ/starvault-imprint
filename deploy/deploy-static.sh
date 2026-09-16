@@ -8,6 +8,9 @@
 #
 # 属地合规信息（如备案号）不进入仓库：设置 ICP_NUMBER 或写入未跟踪文件
 # deploy/filing.local，发布时会注入到线上页脚的 deployment:extra-footer-link 位置。
+#
+# Exa 无法从静态页直连（其跨域白名单只放行自家控制台和 localhost），因此发布时
+# 往 public/runtime-config.js 注入同源代理地址，由 nginx 转发到 api.exa.ai。
 
 set -Eeuo pipefail
 
@@ -24,6 +27,7 @@ WEB_ROOT="${WEB_ROOT:-/var/www/starvault-imprint}"
 DEPLOY_ROOT="${DEPLOY_ROOT:-/var/www/starvault-imprint-deploy}"
 NGINX_TARGET="${NGINX_TARGET:-/etc/nginx/conf.d/starvault.deline.top.conf}"
 RELEASES_TO_KEEP="${RELEASES_TO_KEEP:-5}"
+EXA_PROXY_PATH="${EXA_PROXY_PATH:-/api/exa/search}"
 
 SSH_OPTS=(-i "$SSH_KEY" -o IdentitiesOnly=yes -o BatchMode=yes)
 RSYNC_SSH="ssh -i $SSH_KEY -o IdentitiesOnly=yes -o BatchMode=yes"
@@ -40,6 +44,7 @@ fail() {
 [[ -f "$NGINX_CONF" ]] || fail "缺少 nginx 配置 $NGINX_CONF"
 
 grep -q '"static"' "$PUBLIC_DIR/runtime-config.js" || fail "runtime-config.js 未指向 static 模式"
+[[ "$EXA_PROXY_PATH" == /* || "$EXA_PROXY_PATH" == https://* ]] || fail "EXA_PROXY_PATH 必须是同源路径或 https 地址：$EXA_PROXY_PATH"
 if find "$PUBLIC_DIR" -name '.DS_Store' -print -quit | grep -q .; then
   fail "public/ 中存在 .DS_Store，请先清理"
 fi
@@ -49,6 +54,8 @@ cleanup() { rm -rf "$STAGE_DIR"; }
 trap cleanup EXIT
 
 rsync -a --delete --exclude '.DS_Store' "$PUBLIC_DIR/" "$STAGE_DIR/"
+
+node "$REPO_ROOT/scripts/inject-runtime-config.js" "$STAGE_DIR/runtime-config.js" "$EXA_PROXY_PATH" || fail "Exa 代理注入失败"
 
 FILING_TEXT="${ICP_NUMBER:-}"
 if [[ -z "$FILING_TEXT" && -f "$FILING_FILE" ]]; then
@@ -97,11 +104,29 @@ ssh "${SSH_OPTS[@]}" "$HOST" "set -Eeuo pipefail
 
 rsync -az -e "$RSYNC_SSH" "$NGINX_CONF" "$HOST:/tmp/starvault.deline.top.conf"
 ssh "${SSH_OPTS[@]}" "$HOST" "set -Eeuo pipefail
+  nginx_changed=0
   if ! sudo -n cmp -s /tmp/starvault.deline.top.conf '$NGINX_TARGET'; then
+    if sudo -n test -f '$NGINX_TARGET'; then
+      sudo -n cp -a '$NGINX_TARGET' /tmp/starvault.deline.top.conf.prev
+    fi
     sudo -n install -m 644 -o root -g root /tmp/starvault.deline.top.conf '$NGINX_TARGET'
+    nginx_changed=1
   fi
   rm -f /tmp/starvault.deline.top.conf
-  sudo -n nginx -t
+  if ! sudo -n nginx -t; then
+    if [[ \"\$nginx_changed\" == 1 ]]; then
+      if sudo -n test -f /tmp/starvault.deline.top.conf.prev; then
+        sudo -n install -m 644 -o root -g root /tmp/starvault.deline.top.conf.prev '$NGINX_TARGET'
+      else
+        sudo -n rm -f '$NGINX_TARGET'
+      fi
+      echo 'nginx -t 失败，已回滚到上一份配置' >&2
+    else
+      echo 'nginx -t 失败，本次发布没有修改线上配置' >&2
+    fi
+    exit 1
+  fi
+  rm -f /tmp/starvault.deline.top.conf.prev
   sudo -n systemctl reload nginx
 "
 
@@ -116,5 +141,17 @@ curl -fsS --max-time 20 "https://$DOMAIN/" >/dev/null || fail "部署后 $DOMAIN
 if [[ -n "$FILING_TEXT" ]]; then
   curl -fsS --max-time 20 "https://$DOMAIN/" | grep -qF "$FILING_TEXT" || fail "线上页面未包含备案信息"
 fi
+curl -fsS --max-time 20 "https://$DOMAIN/runtime-config.js" | grep -qF "$EXA_PROXY_PATH" \
+  || fail "线上 runtime-config.js 未注入 Exa 代理 $EXA_PROXY_PATH"
+
+# 用无效 Key 探针确认代理链路：Exa 回真实 401 才算通，404/502/无响应都算失败。
+EXA_PROBE="$(curl -sS --max-time 20 -w '\n%{http_code}' -X POST "https://$DOMAIN/api/exa/search" \
+  -H 'Content-Type: application/json' \
+  -H 'x-api-key: starvault-deploy-probe' \
+  -d '{"query":"starvault deploy probe","type":"auto","numResults":1}' || true)"
+EXA_PROBE_STATUS="${EXA_PROBE##*$'\n'}"
+EXA_PROBE_BODY="${EXA_PROBE%$'\n'*}"
+[[ "$EXA_PROBE_STATUS" == "401" && "$EXA_PROBE_BODY" == *INVALID_API_KEY* ]] \
+  || fail "Exa 代理未生效（HTTP ${EXA_PROBE_STATUS:-无响应}）：${EXA_PROBE_BODY:0:200}"
 
 echo "部署完成：https://$DOMAIN/"

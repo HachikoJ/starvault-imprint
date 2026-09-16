@@ -27,6 +27,13 @@ jobs:
       - run: npm run ci
       - run: npx playwright install --with-deps chromium
       - run: npm run check:static
+      # 镜像站没有后端，Exa 请求转发到腾讯云主站的同源代理。
+      - name: Inject Exa proxy
+        env:
+          EXA_PROXY_PATH: https://starvault.deline.top/api/exa/search
+        run: |
+          node scripts/inject-runtime-config.js public/runtime-config.js "$EXA_PROXY_PATH"
+          grep -qF "$EXA_PROXY_PATH" public/runtime-config.js
       - uses: actions/configure-pages@v5
       - uses: actions/upload-pages-artifact@v3
         with:

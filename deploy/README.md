@@ -19,7 +19,25 @@ SSH_KEY=~/.ssh/starvault_deploy deploy/deploy-static.sh
 ```
 
 脚本会检查静态产物、上传新版本、原子切换软链接、同步
-`deploy/nginx/starvault.deline.top.conf`，最后执行 `nginx -t` 并重新加载。
+`deploy/nginx/starvault.deline.top.conf`，最后执行 `nginx -t` 并重新加载，
+再用无效 Key 探针确认 Exa 代理返回 Exa 的真实 401。
+
+## Exa 代理
+
+Exa 的浏览器跨域白名单只放行它自己的控制台和 `localhost`，纯静态页面直连
+`api.exa.ai` 必然被浏览器拦截。因此 nginx 只开放一个转发端点：
+
+```text
+POST /api/exa/search -> https://api.exa.ai/search
+```
+
+- 发布脚本把 `EXA_PROXY_PATH`（默认 `/api/exa/search`）注入线上的
+  `runtime-config.js`，前端只认这个地址；仓库里的默认值为空，只在本机直连时成立。
+- GitHub Pages 镜像没有后端，`pages.yml` 在发布前把代理指向主站
+  `https://starvault.deline.top/api/exa/search`；跨域来源仅回显自有站点的
+  `Origin`，其他来源拿不到 `Access-Control-Allow-Origin`。
+- Key 由访客浏览器放在 `x-api-key` 中透传，服务器不保存、不记录；端点按 IP 限流，
+  POST 之外的请求一律拒绝。
 
 ## 属地合规信息
 

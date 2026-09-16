@@ -3263,7 +3263,7 @@ async function routeStatic(req, res, url) {
     return;
   }
   if (pathname === "/runtime-config.js") {
-    sendText(res, 200, 'window.__STARVAULT_DEPLOYMENT__ = "server";\n', {
+    sendText(res, 200, 'window.__STARVAULT_DEPLOYMENT__ = "server";\nwindow.__STARVAULT_EXA_PROXY__ = "";\n', {
       "Content-Type": "text/javascript; charset=utf-8",
       "Cache-Control": "no-cache"
     });
