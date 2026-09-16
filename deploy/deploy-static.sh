@@ -106,6 +106,7 @@ rsync -az -e "$RSYNC_SSH" "$NGINX_CONF" "$HOST:/tmp/starvault.deline.top.conf"
 ssh "${SSH_OPTS[@]}" "$HOST" "set -Eeuo pipefail
   nginx_changed=0
   if ! sudo -n cmp -s /tmp/starvault.deline.top.conf '$NGINX_TARGET'; then
+    sudo -n rm -f /tmp/starvault.deline.top.conf.prev
     if sudo -n test -f '$NGINX_TARGET'; then
       sudo -n cp -a '$NGINX_TARGET' /tmp/starvault.deline.top.conf.prev
     fi
@@ -126,7 +127,7 @@ ssh "${SSH_OPTS[@]}" "$HOST" "set -Eeuo pipefail
     fi
     exit 1
   fi
-  rm -f /tmp/starvault.deline.top.conf.prev
+  sudo -n rm -f /tmp/starvault.deline.top.conf.prev
   sudo -n systemctl reload nginx
 "
 
