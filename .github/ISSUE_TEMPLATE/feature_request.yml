@@ -1,0 +1,34 @@
+name: Feature request
+description: 提议与现有产品方向一致的新能力或改进。
+title: "[Feature] "
+labels:
+  - enhancement
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: 要解决的问题
+      description: 谁在什么场景下遇到什么问题？
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: 建议方案
+      description: 说明最小可行范围、用户流程和预期结果。
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: 替代方案与代价
+      description: 说明是否影响隐私、安全、存储、账号或部署边界。
+    validations:
+      required: false
+  - type: textarea
+    id: acceptance
+    attributes:
+      label: 可观察的验收条件
+      description: 什么结果可以证明功能真正完成？
+    validations:
+      required: true

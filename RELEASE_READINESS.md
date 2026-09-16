@@ -2,13 +2,13 @@
 
 更新日期：2026-09-16
 
-本文记录本轮 P0/P1 整改的证据、仍然存在的边界，以及“可以上传源码”和“可以直接公开部署”之间的区别。
+本文记录本轮 P0/P1 整改的证据、公开仓库与静态在线体验的发布结果，以及仍然存在的边界。
 
 ## 结论
 
-- 源码治理：具备 Git 基线、自动化测试、视觉回归、敏感文件忽略和可审查 diff，可以进入公开仓库前的最终密钥检查。
+- 源码治理：Git 基线、自动化测试、视觉回归、敏感文件忽略、密钥扫描和 GitHub Secret Scanning/Push Protection 已启用。
 - 本地产品：SQLite、IndexedDB、方案隔离、学习驱动发现和持久化任务已经达到个人本地使用基线。
-- Web 静态模式：适合无账号、本地数据留在浏览器的部署方式，可作为 GitHub Pages 在线体验直接发布 `public/`；示例数据使用真实 GitHub 公开元数据，不携带任何 Key。
+- Web 静态模式：已于 2026-09-16 发布到 GitHub Pages，地址为 <https://hachikoj.github.io/starvault-imprint/>；示例数据使用真实 GitHub 公开元数据，不携带任何 Key。
 - Node 公网服务：不能裸端口上线。只有置于 TLS、认证网关、CDN/WAF、审计和 Secret Manager 后才进入可评估范围。
 - 任意领域：当前建立了通用生成契约和多领域证据，不能宣称对所有可能输入都已证明正确。
 
@@ -23,9 +23,11 @@
 | 密钥位置 | 访客浏览器 IndexedDB，仅浏览器直连服务商 | 服务端存储，发布前必须迁到 Secret Manager |
 | 首屏数据 | 空工作区首次读取时装载 `demo-content` 示例方案与 25 个真实公开仓库 | 空库保持空项目池 |
 | 主要风险 | 前端源码公开、数据可被访客自行修改、示例元数据会随时间变旧 | 裸端口暴露、密钥托管、DDoS、审计与合规 |
-| 当前结论 | 可以发布 | 不满足最低公网要求前不可发布 |
+| 当前结论 | 已发布并通过线上桌面/移动验收 | 不满足最低公网要求前不可发布 |
 
 静态版的自动化证据：`tests/local-api.test.js` 覆盖快照 schema、25 个唯一公开仓库、无凭据字段、空库首次装载、已有数据跳过、并发只装载一次、Pages 子路径解析、静态部署直接路由 IndexedDB、缺失快照降级，以及对携带凭据字段快照的拒绝；`npm run check:static` 在 Chromium 中用 `/starvault-imprint/` 子路径跑桌面与移动端无后端验收、刷新去重、资源 200 和横向溢出检查；`tests/security-audit.test.js` 覆盖密钥扫描能发现仅存在于 Git 历史的 Token 与敏感路径；`.github/workflows/pages.yml` 在 `main` 推送后跑 `npm run ci`、`npm run check:static` 再发布 `public/`。
+
+线上发布证据：Actions run `35078067145` 的 build 与 deploy 均通过；真实地址返回 200，核心脚本、示例快照、OG 图和 favicon 均返回 200；全新桌面与移动 Chromium 上下文均装载 `demo-content`、25 个项目、20 条榜单和 1 条扫描，横向溢出、console、失败请求与 HTTP 错误均为 0。
 
 ## 本轮整改证据
 
@@ -82,7 +84,7 @@
 - GitHub 真实 Star/Fork、secondary rate limit、趋势缓存和账号仓库路径必须用专用测试账号完成最终验收。
 - 公开前端源码无法靠禁用 F12 或动态加载真正隐藏，保护手段是许可证、服务端边界、密钥不下发和侵权取证。
 - `public/demo-snapshot.json` 是构建时抓取的真实公开元数据，Star/Fork 和最近提交时间会随时间变旧；对外展示前应重新运行 `node scripts/build-demo-snapshot.js` 刷新快照。
-- 本机静态验收已覆盖 GitHub Pages 子路径，但最终线上域名、Pages 设置和部署产物仍以一次真实部署后的页面验收为准。
+- 公开仓库已启用 GitHub Secret Scanning 与 Push Protection；`npm run audit:secrets` 仍作为提交前门禁保留，但任何账号安全措施都不能替代轮换已经泄露的凭据。
 
 ## 发布前命令
 
@@ -100,4 +102,4 @@ git status --ignored --short
 - Git 历史中没有 `.env`、`data/`、`output/`、Token、Key、二维码或用户数据。
 - 使用无效 Token 时扫描立即停止；使用有效 Token 时完整扫描可完成。
 - 使用真实 AI Key 对新增领域 cases 做 live audit。
-- 公网部署方案满足 [SECURITY.md](SECURITY.md) 的最低要求。
+- 静态在线体验满足 [SECURITY.md](SECURITY.md) 的发布边界；Node 公网服务仍未开放。

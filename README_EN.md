@@ -10,8 +10,10 @@
 
 <p align="center">
   <a href="LICENSE"><img alt="License" src="https://img.shields.io/badge/license-source--available%20non--commercial-black"></a>
-  <a href="package.json"><img alt="Node" src="https://img.shields.io/badge/node-%3E%3D22.5-2f855a"></a>
+  <a href="package.json"><img alt="Node" src="https://img.shields.io/badge/node-%3E%3D22.8.0-2f855a"></a>
   <a href="PRD.md"><img alt="PRD" src="https://img.shields.io/badge/PRD-aligned-2563eb"></a>
+  <a href="https://hachikoj.github.io/starvault-imprint/"><img alt="Online demo" src="https://img.shields.io/badge/demo-live-0ea5e9"></a>
+  <a href="https://github.com/HachikoJ/starvault-imprint/stargazers"><img alt="GitHub stars" src="https://img.shields.io/github/stars/HachikoJ/starvault-imprint?style=social"></a>
 </p>
 
 <p align="center">
@@ -157,7 +159,16 @@ For commercial licensing, private deployment, joint development, branding, or ri
 ## Further Reading
 
 - [Chinese README](README.md)
+- [Contributing](CONTRIBUTING.md)
+- [Code of Conduct](CODE_OF_CONDUCT.md)
+- [Changelog](CHANGELOG.md)
 - [Product requirements](PRD.md)
 - [Acceptance checklist](ACCEPTANCE_CHECKLIST.md)
 - [Security policy](SECURITY.md)
 - [Desktop local storage design](docs/DESKTOP_STORAGE.md)
+
+## Star History
+
+<a href="https://star-history.com/#HachikoJ/starvault-imprint&Date">
+  <img src="https://api.star-history.com/svg?repos=HachikoJ/starvault-imprint&type=Date" alt="StarVault Imprint Star History" loading="lazy">
+</a>

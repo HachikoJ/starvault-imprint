@@ -1,0 +1,51 @@
+name: Bug report
+description: 报告可复现的功能、界面或文档问题。
+title: "[Bug] "
+labels:
+  - bug
+body:
+  - type: markdown
+    attributes:
+      value: |
+        请勿粘贴 Key、Token、账号二维码、真实用户数据或未公开的漏洞细节。
+  - type: textarea
+    id: summary
+    attributes:
+      label: 问题描述
+      description: 发生了什么，预期是什么？
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: 复现步骤
+      placeholder: |
+        1. 打开 ...
+        2. 点击 ...
+        3. 观察到 ...
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: 版本或提交
+      description: 发布版本、Commit SHA 或部署地址。
+    validations:
+      required: true
+  - type: dropdown
+    id: environment
+    attributes:
+      label: 运行环境
+      options:
+        - GitHub Pages 在线版
+        - 本机 Node 服务
+        - 其他
+    validations:
+      required: true
+  - type: textarea
+    id: evidence
+    attributes:
+      label: 证据
+      description: 可提供脱敏后的日志、截图或浏览器信息，请删除所有凭据。
+    validations:
+      required: false

@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Security report
+    url: https://github.com/HachikoJ/starvault-imprint/security/policy
+    about: 私下报告安全或隐私问题，不要在公开 Issue 中披露漏洞细节。
+  - name: Questions and ideas
+    url: https://github.com/HachikoJ/starvault-imprint/discussions
+    about: 讨论产品思路、使用问题和开放提案。

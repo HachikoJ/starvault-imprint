@@ -232,4 +232,5 @@
 | D-005 | Pages 子路径（`/<repo>/`）下资源与示例快照都能解析 | `npm run check:static` | Pass - 验收服务器使用 `/starvault-imprint/` 子路径，并逐项确认 HTML、运行时脚本、示例快照、OG 图和 favicon 返回 200。 |
 | D-006 | 静态版不承担账号、租户隔离与密钥托管 | 阅读 README、SECURITY 与页面说明 | Pass - 文档明确静态版无账号、无租户隔离，Key 只留在访客浏览器 IndexedDB。 |
 | D-007 | Git 历史与工作树都不含密钥或本地数据 | `npm run audit:secrets` | Pass - 同时扫描工作树与全部提交 patch，测试覆盖仅存在于历史的 Token、`data/`、`output/` 与本地快照。 |
-| D-008 | 真实 Pages 地址可访问且部署产物与本地验收一致 | 部署后打开 `https://hachikoj.github.io/starvault-imprint/` | Verify - 依赖仓库 Pages 设置、线上部署和真实域名复核。 |
+| D-008 | 真实 Pages 地址可访问且部署产物与本地验收一致 | 部署后打开 `https://hachikoj.github.io/starvault-imprint/` | Pass - 2026-09-16 Actions 发布成功（run `35078067145`）；线上页面返回 200，桌面和移动端全新浏览器均装载 `demo-content`、25 个项目、20 条榜单和 1 条扫描，横向溢出、console、失败请求与 HTTP 错误均为 0。 |
+| D-009 | 长页面提供可用、键盘可达的返回顶部按钮 | `npm run check:static` | Pass - 桌面与移动端滚动项目池后按钮出现，标签为“返回顶部”，可聚焦并用键盘触发，触发后滚动偏移归零且按钮自动隐藏。 |

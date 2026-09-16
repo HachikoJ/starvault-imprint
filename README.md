@@ -10,9 +10,11 @@
 
 <p align="center">
   <a href="LICENSE"><img alt="License" src="https://img.shields.io/badge/license-source--available%20non--commercial-black"></a>
-  <a href="package.json"><img alt="Node" src="https://img.shields.io/badge/node-%3E%3D22.5-2f855a"></a>
+  <a href="package.json"><img alt="Node" src="https://img.shields.io/badge/node-%3E%3D22.8.0-2f855a"></a>
   <a href="PRD.md"><img alt="PRD" src="https://img.shields.io/badge/PRD-aligned-2563eb"></a>
   <a href="VISUAL_REGRESSION.md"><img alt="Visual checks" src="https://img.shields.io/badge/visual-regression-7c3aed"></a>
+  <a href="https://hachikoj.github.io/starvault-imprint/"><img alt="Online demo" src="https://img.shields.io/badge/demo-live-0ea5e9"></a>
+  <a href="https://github.com/HachikoJ/starvault-imprint/stargazers"><img alt="GitHub stars" src="https://img.shields.io/github/stars/HachikoJ/starvault-imprint?style=social"></a>
 </p>
 
 <p align="center">
@@ -200,7 +202,7 @@ flowchart LR
 
 ## 技术架构
 
-- Runtime: Node.js 22.5+
+- Runtime: Node.js 22.8.0+（`node --test` 覆盖率阈值参数的最低支持版本）
 - Server: 原生 `node:http`
 - Frontend: 原生 HTML/CSS/JavaScript，无前端构建链
 - Storage: Node 使用 SQLite WAL；Web 静态模式使用 IndexedDB v5 记录级存储；桌面端沿用 SQLite 并规划 Keychain
@@ -416,6 +418,12 @@ npm run perf:storage
   </tr>
 </table>
 
+## Star History
+
+<a href="https://star-history.com/#HachikoJ/starvault-imprint&Date">
+  <img src="https://api.star-history.com/svg?repos=HachikoJ/starvault-imprint&type=Date" alt="StarVault Imprint Star History" loading="lazy">
+</a>
+
 ## Roadmap
 
 - 把 Node 端数万级项目的筛选、排序和摘要进一步下推到 SQL，降低全量内存占用。
@@ -427,3 +435,11 @@ npm run perf:storage
 ## 致谢
 
 感谢 GitHub 开源生态，以及所有认真维护项目、分享经验和持续探索的人。星仓印记希望成为一个更安静、更清楚、更可持续的观察窗口。
+
+## 进一步阅读
+
+- [贡献指南](CONTRIBUTING.md)
+- [行为准则](CODE_OF_CONDUCT.md)
+- [变更记录](CHANGELOG.md)
+- [安全政策](SECURITY.md)
+- [验收清单](ACCEPTANCE_CHECKLIST.md)
