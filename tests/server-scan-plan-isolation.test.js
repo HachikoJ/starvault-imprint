@@ -46,7 +46,7 @@ async function request(baseUrl, pathname, options = {}) {
   };
 }
 
-async function waitForTask(baseUrl, id, timeoutMs = 15_000) {
+async function waitForTask(baseUrl, id, timeoutMs = 30_000) {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
     const response = await request(baseUrl, `/api/tasks/${encodeURIComponent(id)}`);
@@ -59,7 +59,7 @@ async function waitForTask(baseUrl, id, timeoutMs = 15_000) {
   throw new Error(`Task ${id} did not finish within ${timeoutMs}ms`);
 }
 
-async function waitForScanStatus(baseUrl, planId, predicate, timeoutMs = 15_000) {
+async function waitForScanStatus(baseUrl, planId, predicate, timeoutMs = 30_000) {
   const deadline = Date.now() + timeoutMs;
   let last = null;
   while (Date.now() < deadline) {

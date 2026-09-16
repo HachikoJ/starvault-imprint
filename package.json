@@ -22,7 +22,7 @@
     "release:check": "npm run ci && npm run visual:check && npm run check:static && npm run perf:storage:fixture"
   },
   "engines": {
-    "node": ">=22.5"
+    "node": ">=22.8.0"
   },
   "devDependencies": {
     "fake-indexeddb": "^6.2.5",
