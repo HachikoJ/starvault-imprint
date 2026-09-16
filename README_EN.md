@@ -12,7 +12,7 @@
   <a href="LICENSE"><img alt="License" src="https://img.shields.io/badge/license-source--available%20non--commercial-black"></a>
   <a href="package.json"><img alt="Node" src="https://img.shields.io/badge/node-%3E%3D22.8.0-2f855a"></a>
   <a href="PRD.md"><img alt="PRD" src="https://img.shields.io/badge/PRD-aligned-2563eb"></a>
-  <a href="https://hachikoj.github.io/starvault-imprint/"><img alt="Online demo" src="https://img.shields.io/badge/demo-live-0ea5e9"></a>
+  <a href="https://starvault.deline.top/"><img alt="Online demo" src="https://img.shields.io/badge/demo-live-0ea5e9"></a>
   <a href="https://github.com/HachikoJ/starvault-imprint/stargazers"><img alt="GitHub stars" src="https://img.shields.io/github/stars/HachikoJ/starvault-imprint?style=social"></a>
 </p>
 
@@ -33,7 +33,8 @@
 
 ## Online Demo
 
-- Live site: <https://hachikoj.github.io/starvault-imprint/>
+- Live site: <https://starvault.deline.top/>
+- GitHub Pages mirror: <https://hachikoj.github.io/starvault-imprint/>
 - The first visit loads a sample observation plan built from real public GitHub repository metadata, so the full "plan → scan → project pool → leaderboard" flow is visible without any API key.
 - The online build is a static GitHub Pages site with **no accounts and no server-side data isolation**. Plans, project pools, favorites, notes, AI analyses and any key you enter stay in your own browser IndexedDB; nothing is uploaded to a StarVault server and nothing is written to Git.
 - The sample data is seeded once into an empty workspace. As soon as you have your own projects, plans, favorites, notes, scans or credentials, refreshes never overwrite or re-seed them.

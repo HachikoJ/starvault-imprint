@@ -13,7 +13,7 @@
   <a href="package.json"><img alt="Node" src="https://img.shields.io/badge/node-%3E%3D22.8.0-2f855a"></a>
   <a href="PRD.md"><img alt="PRD" src="https://img.shields.io/badge/PRD-aligned-2563eb"></a>
   <a href="VISUAL_REGRESSION.md"><img alt="Visual checks" src="https://img.shields.io/badge/visual-regression-7c3aed"></a>
-  <a href="https://hachikoj.github.io/starvault-imprint/"><img alt="Online demo" src="https://img.shields.io/badge/demo-live-0ea5e9"></a>
+  <a href="https://starvault.deline.top/"><img alt="Online demo" src="https://img.shields.io/badge/demo-live-0ea5e9"></a>
   <a href="https://github.com/HachikoJ/starvault-imprint/stargazers"><img alt="GitHub stars" src="https://img.shields.io/github/stars/HachikoJ/starvault-imprint?style=social"></a>
 </p>
 
@@ -34,9 +34,11 @@
 
 ## 在线体验
 
-- 在线地址：<https://hachikoj.github.io/starvault-imprint/>
+- 在线地址：<https://starvault.deline.top/>
+- GitHub Pages 镜像：<https://hachikoj.github.io/starvault-imprint/>
 - 打开即可看到一份示例方案，用真实 GitHub 公开仓库元数据演示“方案生成 → 扫描检索 → 项目池 → 榜单”的完整链路，不需要任何 Key。
-- 在线版是 GitHub Pages 静态部署，**没有账号体系，也没有服务端数据隔离**：方案、项目池、收藏、笔记、AI 分析和你填写的 Key 都只保存在当前浏览器的 IndexedDB，不上传到任何星仓印记服务器，也不进入 Git。
+- 在线版是静态部署（腾讯云 `starvault.deline.top` 与 GitHub Pages 镜像），**没有账号体系，也没有服务端数据隔离**：方案、项目池、收藏、笔记、AI 分析和你填写的 Key 都只保存在当前浏览器的 IndexedDB，不上传到任何星仓印记服务器，也不进入 Git。
+- 腾讯云主机的发布方式见 [deploy/README.md](deploy/README.md)：只上传 `public/` 静态产物到独立发布目录，通过软链接原子切换，不运行 Node 服务。
 - 静态部署会在启动时直接进入 IndexedDB 模式，不再探测不存在的后端接口；`npm run check:static` 会用 Chromium 在 `/starvault-imprint/` 子路径下验证无后端、无 Key、桌面与移动端均可正常加载。
 - 示例数据只在空工作区首次进入时写入一次。一旦你有了自己的项目、方案、收藏、笔记、扫描记录或 Key，页面刷新不会覆盖或重复写入这些内容。
 - 想用自己的账号扫描真实项目，在设置页填入 GitHub Token、AI Key 即可；频率预算、GitHub 风控冷却和长任务恢复逻辑与本地版一致。
