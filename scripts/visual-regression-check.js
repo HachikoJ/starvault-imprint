@@ -16,6 +16,7 @@ const BASE_URL = `http://${HOST}:${PORT}`;
 const VIEWPORTS = [
   { name: "desktop", width: 1440, height: 900 },
   { name: "laptop", width: 1280, height: 800 },
+  { name: "compact-desktop", width: 1024, height: 900 },
   { name: "tablet", width: 900, height: 900 },
   { name: "mobile", width: 390, height: 844 }
 ];
@@ -69,6 +70,9 @@ const OVERLAP_GROUP_SELECTORS = [
   ".language-switch",
   ".project-page-main",
   ".project-page-buttons",
+  ".repo-github-row",
+  ".leaderboard-github-row",
+  ".github-stat-actions.compact",
   ".repo-primary-actions",
   ".leaderboard-actions",
   ".secret-field",
@@ -253,7 +257,7 @@ function issue(context, type, message, extra = {}) {
 
 async function collectLayoutIssues(page, context) {
   const result = await page.evaluate(
-    ({ textSelectors, overlapSelectors }) => {
+    ({ textSelectors, overlapSelectors, actionRowSelectors }) => {
       const issues = [];
       const viewport = {
         width: document.documentElement.clientWidth,
@@ -401,11 +405,63 @@ async function collectLayoutIssues(page, context) {
         }
       }
 
+      for (const selector of actionRowSelectors) {
+        for (const row of document.querySelectorAll(selector)) {
+          if (!isVisible(row)) continue;
+          if (activeView && !activeView.contains(row)) continue;
+
+          const actionContainer = row.querySelector(".github-stat-actions.compact");
+          if (!actionContainer || !isVisible(actionContainer)) continue;
+
+          const containerRect = actionContainer.getBoundingClientRect();
+          const trend = row.querySelector(".trend-tag");
+          const trendRect = trend && isVisible(trend) ? trend.getBoundingClientRect() : null;
+          const actions = Array.from(actionContainer.querySelectorAll(".github-stat-action")).filter(isVisible);
+
+          for (const action of actions) {
+            const actionRect = action.getBoundingClientRect();
+            const overflow = Math.max(
+              containerRect.left - actionRect.left,
+              actionRect.right - containerRect.right,
+              containerRect.top - actionRect.top,
+              actionRect.bottom - containerRect.bottom
+            );
+            if (overflow > 2) {
+              issues.push({
+                type: "github-action-overflow",
+                selector,
+                label: labelFor(action),
+                overflow: Math.round(overflow),
+                action: rectData(actionRect),
+                container: rectData(containerRect),
+                activeViewId
+              });
+            }
+
+            if (trendRect) {
+              const overlapArea = intersectionArea(actionRect, trendRect);
+              if (overlapArea > 4) {
+                issues.push({
+                  type: "github-action-trend-overlap",
+                  selector,
+                  label: `${labelFor(action)} / ${labelFor(trend)}`,
+                  overlapArea: Math.round(overlapArea),
+                  action: rectData(actionRect),
+                  trend: rectData(trendRect),
+                  activeViewId
+                });
+              }
+            }
+          }
+        }
+      }
+
       return issues;
     },
     {
       textSelectors: TEXT_FIT_SELECTORS,
-      overlapSelectors: OVERLAP_GROUP_SELECTORS
+      overlapSelectors: OVERLAP_GROUP_SELECTORS,
+      actionRowSelectors: [".repo-github-row", ".leaderboard-github-row"]
     }
   );
 

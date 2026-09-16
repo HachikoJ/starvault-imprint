@@ -24283,3 +24283,65 @@ body {
     justify-content: flex-end;
   }
 }
+
+/* Narrow desktop action rows: wrap controls before they collide with trend text. */
+@media (min-width: 901px) and (max-width: 1440px) {
+  #view-projects .repo-github-row,
+  #view-leaderboard .leaderboard-github-row {
+    align-items: flex-start !important;
+    flex-wrap: wrap !important;
+  }
+
+  #view-projects .repo-github-row .github-stat-actions.compact,
+  #view-leaderboard .leaderboard-github-row .github-stat-actions.compact {
+    flex: 1 1 228px !important;
+    width: auto !important;
+    min-width: 0 !important;
+    display: flex !important;
+    align-items: stretch !important;
+    flex-wrap: wrap !important;
+    gap: 5px !important;
+  }
+
+  #view-projects .repo-github-row .github-stat-action,
+  #view-leaderboard .leaderboard-github-row .github-stat-action {
+    flex: 1 1 108px !important;
+    width: auto !important;
+    min-width: 0 !important;
+    grid-template-columns: minmax(0, 0.95fr) minmax(0, 0.78fr) !important;
+  }
+
+  #view-projects .repo-github-row .trend-tag,
+  #view-leaderboard .leaderboard-github-row .trend-tag {
+    flex: 1 1 180px !important;
+    width: auto !important;
+    min-width: 0 !important;
+    max-width: 100% !important;
+  }
+
+  #view-projects .chip,
+  #view-projects .chip > span,
+  #view-projects .semantic-filter-chip,
+  #view-projects .semantic-filter-chip > span,
+  #view-projects #language-chips .chip > span,
+  #view-projects .chip-label-line {
+    min-width: 0 !important;
+    max-width: 100% !important;
+    overflow-wrap: anywhere !important;
+    word-break: normal !important;
+  }
+
+  #view-projects #problem-chips .semantic-filter-chip .chip-label-line,
+  #view-projects #audience-chips .semantic-filter-chip .chip-label-line,
+  #view-projects #shape-chips .semantic-filter-chip .chip-label-line,
+  #view-projects #license-chips .chip .chip-label-line,
+  #view-projects #sort-chips .chip .chip-label-line {
+    white-space: normal !important;
+    overflow-wrap: anywhere !important;
+    word-break: normal !important;
+  }
+
+  #view-projects #license-chips .chip[data-filter-value="permissive-commercial"] .chip-label-line {
+    overflow-wrap: anywhere !important;
+  }
+}
