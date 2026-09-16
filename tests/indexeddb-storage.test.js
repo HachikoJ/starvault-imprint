@@ -3,9 +3,63 @@ const fs = require("node:fs");
 const path = require("node:path");
 const test = require("node:test");
 const vm = require("node:vm");
-const { indexedDB, IDBKeyRange } = require("fake-indexeddb");
+const { IDBFactory, IDBKeyRange, IDBObjectStore, indexedDB } = require("fake-indexeddb");
 
 const storageSource = fs.readFileSync(path.join(__dirname, "../public/indexeddb-storage.js"), "utf8");
+
+function createStorageApi(factory = new IDBFactory()) {
+  const window = { indexedDB: factory, IDBKeyRange };
+  vm.runInNewContext(storageSource, {
+    window,
+    indexedDB: factory,
+    IDBKeyRange,
+    Date,
+    JSON,
+    Map,
+    Set,
+    Promise,
+    Error,
+    Object,
+    Array,
+    String,
+    Number,
+    Boolean,
+    globalThis: { IDBKeyRange }
+  });
+  return window.StarVaultIndexedDB;
+}
+
+function snapshotFixture(overrides = {}) {
+  const createdAt = "2026-07-18T00:00:00.000Z";
+  const base = {
+    schema: "starvault-indexeddb-snapshot/v1",
+    exportedAt: createdAt,
+    activeObservationPlanId: "default",
+    settings: { activeObservationPlanId: "default" },
+    counts: { projects: 1, scans: 0, observationPlans: 1 },
+    store: {
+      version: 1,
+      createdAt,
+      updatedAt: createdAt,
+      projects: {
+        "acme/example": {
+          fullName: "acme/example",
+          description: "before",
+          observationPlanMatches: { default: { planId: "default" } }
+        }
+      },
+      observationPlans: { default: { id: "default", name: "Default", memory: {}, userData: {} } },
+      scans: [],
+      leaderboards: { daily: {}, byPlan: {} },
+      memory: {}
+    }
+  };
+  return {
+    ...base,
+    ...overrides,
+    store: { ...base.store, ...(overrides.store || {}) }
+  };
+}
 
 function requestResult(request) {
   return new Promise((resolve, reject) => {
@@ -33,10 +87,10 @@ async function seedLegacySnapshot(snapshot) {
 }
 
 async function openCurrentDatabase() {
-  return requestResult(indexedDB.open("starvault-imprint", 4));
+  return requestResult(indexedDB.open("starvault-imprint", 5));
 }
 
-test("IndexedDB v4 migrates the legacy blob and stores high-volume collections as records", async () => {
+test("IndexedDB v5 migrates the legacy blob and stores high-volume collections as records", async () => {
   const createdAt = "2026-07-10T00:00:00.000Z";
   const project = {
     fullName: "acme/cad-viewer",
@@ -81,10 +135,10 @@ test("IndexedDB v4 migrates the legacy blob and stores high-volume collections a
   assert.equal(migrated.store.observationPlans.cad.name, "CAD");
   assert.equal(migrated.store.scans[0].id, "scan-1");
   assert.equal(migrated.store.leaderboards.daily["2026-07-10"].items[0].fullName, project.fullName);
-  assert.equal((await api.getSnapshotMeta()).storageSchema, "starvault-indexeddb/v4");
+  assert.equal((await api.getSnapshotMeta()).storageSchema, "starvault-indexeddb/v5");
 
   const db = await openCurrentDatabase();
-  assert.deepEqual(Array.from(db.objectStoreNames), ["kv", "leaderboards", "meta", "plans", "projects", "scans"]);
+  assert.deepEqual(Array.from(db.objectStoreNames), ["kv", "leaderboards", "meta", "plans", "projects", "scans", "taskArtifacts"]);
   const tx = db.transaction(["kv", "projects", "leaderboards"], "readonly");
   const legacy = await requestResult(tx.objectStore("kv").get("localSnapshot"));
   const projectStore = tx.objectStore("projects");
@@ -102,7 +156,8 @@ test("IndexedDB v4 migrates the legacy blob and stores high-volume collections a
   db.close();
 
   assert.equal((await api.getProject("acme/cad-viewer")).fullName, project.fullName);
-  assert.deepEqual((await api.getProjectsByPlan("cad")).map((item) => item.fullName), [project.fullName]);
+  assert.deepEqual(Array.from(await api.getProjectsByPlan("cad")).map((item) => item.fullName), [project.fullName]);
+  assert.deepEqual(Array.from((await api.getProjectPageByPlan("cad", { offset: 0, limit: 1 })).items, (item) => item.fullName), [project.fullName]);
 
   migrated.store.observationPlans.cad.name = "CAD updated";
   migrated.store.projects["acme/cad-viewer"].description = "Updated in place";
@@ -184,4 +239,126 @@ test("IndexedDB v4 migrates the legacy blob and stores high-volume collections a
   assert.equal(pruned.deleted, 1);
   assert.equal(await coreApi.getProject("acme/stale"), null);
   assert.equal(await coreApi.countProjects(), 1);
+});
+
+test("IndexedDB reads return isolated copies and a core read invalidates stale plan caches", async () => {
+  const factory = new IDBFactory();
+  const first = createStorageApi(factory);
+  await first.putSnapshot(snapshotFixture());
+
+  const snapshot = await first.getSnapshot();
+  snapshot.store.projects["acme/example"].description = "mutated snapshot";
+  snapshot.store.observationPlans.default.name = "mutated plan";
+  assert.equal((await first.getSnapshot()).store.projects["acme/example"].description, "before");
+  assert.equal((await first.getSnapshot()).store.observationPlans.default.name, "Default");
+
+  const byPlan = await first.getProjectsByPlan("default");
+  byPlan[0].description = "mutated list";
+  assert.equal((await first.getProjectsByPlan("default"))[0].description, "before");
+  const page = await first.getProjectPageByPlan("default", { limit: 1 });
+  page.items[0].description = "mutated page";
+  assert.equal((await first.getProjectPageByPlan("default", { limit: 1 })).items[0].description, "before");
+
+  const second = createStorageApi(factory);
+  await second.replaceProjectsForPlan("default", [
+    {
+      fullName: "acme/replacement",
+      description: "replacement",
+      observationPlanMatches: { default: { planId: "default" } }
+    }
+  ]);
+  await first.getSnapshot({ includeProjects: false });
+  assert.deepEqual((await first.getProjectsByPlan("default")).map((item) => item.fullName), ["acme/replacement"]);
+});
+
+test("core-only snapshot updates preserve record-level projects until a full replacement is explicit", async () => {
+  const api = createStorageApi();
+  await api.putSnapshot(snapshotFixture());
+
+  const core = await api.getSnapshot({ includeProjects: false });
+  core.store.observationPlans.default.name = "Core updated";
+  await api.putSnapshot(core, { preserveProjects: true, preserveLeaderboards: true });
+
+  const full = await api.getSnapshot();
+  assert.equal(full.store.observationPlans.default.name, "Core updated");
+  assert.equal(full.store.projects["acme/example"].description, "before");
+  assert.equal(await api.countProjects(), 1);
+});
+
+test("deleting a plan commits projects, plan, scans and leaderboards as one consistent change", async () => {
+  const api = createStorageApi();
+  const fixture = snapshotFixture({
+    counts: { projects: 2, scans: 1, observationPlans: 2 },
+    store: {
+      projects: {
+        "acme/custom-only": {
+          fullName: "acme/custom-only",
+          observationPlanMatches: { cad: { planId: "cad" } }
+        },
+        "acme/shared": {
+          fullName: "acme/shared",
+          observationPlanMatches: { default: { planId: "default" }, cad: { planId: "cad" } }
+        }
+      },
+      observationPlans: {
+        default: { id: "default", name: "Default", memory: {}, userData: {} },
+        cad: { id: "cad", name: "CAD", memory: {}, userData: {} }
+      },
+      scans: [{ id: "scan-cad", at: "2026-07-18T01:00:00.000Z", observationPlanId: "cad" }],
+      leaderboards: {
+        daily: { "2026-07-18": { items: [{ fullName: "acme/shared" }] } },
+        byPlan: { cad: { daily: { "2026-07-18": { items: [{ fullName: "acme/custom-only" }] } } } }
+      }
+    }
+  });
+  await api.putSnapshot(fixture);
+
+  await api.deletePlanData("cad");
+
+  const remaining = await api.getSnapshot();
+  assert.equal(remaining.store.observationPlans.cad, undefined);
+  assert.equal(remaining.store.projects["acme/custom-only"], undefined);
+  assert.deepEqual(Object.keys(remaining.store.projects["acme/shared"].observationPlanMatches), ["default"]);
+  assert.equal(remaining.store.scans.some((scan) => scan.observationPlanId === "cad"), false);
+  assert.equal(remaining.store.leaderboards.byPlan.cad, undefined);
+  assert.equal(remaining.store.leaderboards.daily["2026-07-18"].items[0].fullName, "acme/shared");
+});
+
+test("an aborted IndexedDB write leaves persisted records and in-memory hashes unchanged", async () => {
+  const api = createStorageApi();
+  await api.putSnapshot(snapshotFixture());
+  await api.getSnapshot();
+
+  const originalPut = IDBObjectStore.prototype.put;
+  let abortProjectWrite = true;
+  IDBObjectStore.prototype.put = function patchedPut(...args) {
+    const request = originalPut.apply(this, args);
+    if (abortProjectWrite && this.name === "projects" && this.transaction.mode === "readwrite") {
+      abortProjectWrite = false;
+      this.transaction.abort();
+    }
+    return request;
+  };
+
+  try {
+    await assert.rejects(
+      api.putProjects([
+        {
+          fullName: "acme/example",
+          description: "after",
+          observationPlanMatches: { default: { planId: "default" } }
+        }
+      ])
+    );
+  } finally {
+    IDBObjectStore.prototype.put = originalPut;
+  }
+
+  assert.equal((await api.getProject("acme/example")).description, "before");
+  assert.equal((await api.getSnapshot()).store.projects["acme/example"].description, "before");
+
+  const retry = await api.getSnapshot();
+  retry.store.projects["acme/example"].description = "after";
+  await api.putSnapshot(retry);
+  assert.equal((await api.getProject("acme/example")).description, "after");
 });

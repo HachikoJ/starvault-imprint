@@ -26,6 +26,16 @@ test("local action rerenders preserve the inner project list scroll container", 
   assert.match(selector, /const projectScroll = projectListScrollElement\(\)/);
 });
 
+test("project cards remain selectable even though the card itself has button semantics", () => {
+  const wire = functionBody("wireEvents");
+
+  assert.match(wire, /\[role='button'\]:not\(\.repo-item\):not\(\.leaderboard-item\)/);
+  assert.match(
+    wire,
+    /const repoItem = event\.target\.closest\("#view-projects \.repo-item\[data-full-name\]"\);[\s\S]*selectProject\(repoItem\.dataset\.fullName, \{ renderList: false \}\)/
+  );
+});
+
 test("GitHub action rerenders preserve project, detail, leaderboard, and page scroll", () => {
   const renderer = functionBody("renderGithubActionSurfaces");
   const result = functionBody("applyGithubActionResult");

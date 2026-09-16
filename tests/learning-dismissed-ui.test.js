@@ -151,6 +151,7 @@ test("clearing learning records uses inline confirmation and loading feedback", 
   assert.match(clear, /state\.pendingMemoryClearRange = range/);
   assert.match(confirm, /state\.memoryClearBusyRange = range/);
   assert.match(confirm, /showMemoryClearCompleteStatus\(completeLabel\)/);
+  assert.match(confirm, /selectProject\(selectedFullName, \{ recordMemory: false \}\)/);
   assert.doesNotMatch(confirm, /showLearningInlineStatus\("saved"/);
   assert.match(confirm, /finally\s*{\s*state\.memoryClearBusyRange = ""/s);
   assert.match(cancel, /state\.pendingMemoryClearRange = ""/);

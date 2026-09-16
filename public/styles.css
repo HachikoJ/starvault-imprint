@@ -268,6 +268,16 @@ button {
   border-color: var(--danger);
 }
 
+#export-menu > summary.local-action-done {
+  color: var(--moss-ink);
+  border-color: var(--moss-ink);
+}
+
+#export-menu > summary.local-action-failed {
+  color: var(--danger);
+  border-color: var(--danger);
+}
+
 .language-switch {
   display: inline-grid;
   grid-template-columns: repeat(2, 40px);
@@ -21673,6 +21683,13 @@ body {
   align-self: start !important;
 }
 
+#view-settings .local-backup-status:not([hidden]) {
+  display: block;
+  margin-top: 6px;
+  color: var(--intel-amber, #9a6700);
+  line-height: 1.45;
+}
+
 #view-settings .observation-plan-select-row {
   min-width: 0 !important;
   display: grid !important;
@@ -23622,5 +23639,513 @@ body {
     justify-content: flex-start !important;
     padding-inline: 5px !important;
     text-align: left !important;
+  }
+}
+
+/* Durable task notices: plan generation can outlive the tab that started it. */
+.task-notifications {
+  position: fixed;
+  right: 22px;
+  bottom: 22px;
+  z-index: 30;
+  display: grid;
+  gap: 10px;
+  width: min(360px, calc(100vw - 32px));
+  max-height: min(72vh, 560px);
+  overflow-y: auto;
+  pointer-events: none;
+}
+
+.task-notifications[hidden] {
+  display: none !important;
+}
+
+.task-notification-card {
+  position: relative;
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  gap: 10px;
+  padding: 12px 34px 12px 12px;
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius-sm);
+  background: rgba(255, 255, 255, 0.96);
+  box-shadow: var(--shadow-float);
+  backdrop-filter: blur(10px);
+  -webkit-backdrop-filter: blur(10px);
+  pointer-events: auto;
+}
+
+.task-notification-card.running {
+  border-left: 3px solid var(--steel);
+}
+
+.task-notification-card.completed {
+  border-left: 3px solid var(--ok);
+}
+
+.task-notification-card.failed {
+  border-left: 3px solid var(--danger);
+}
+
+.task-notification-card.unknown {
+  border-left: 3px solid var(--amber);
+}
+
+.task-notification-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 26px;
+  border-radius: 999px;
+  background: var(--surface);
+  color: var(--muted);
+}
+
+.task-notification-card.running .task-notification-icon {
+  background: color-mix(in srgb, var(--steel) 14%, white 86%);
+  color: var(--steel);
+}
+
+.task-notification-card.completed .task-notification-icon {
+  background: color-mix(in srgb, var(--ok) 15%, white 85%);
+  color: var(--moss-ink);
+}
+
+.task-notification-card.failed .task-notification-icon {
+  background: color-mix(in srgb, var(--danger) 13%, white 87%);
+  color: #a33f3f;
+}
+
+.task-notification-card.unknown .task-notification-icon {
+  background: color-mix(in srgb, var(--amber) 20%, white 80%);
+  color: #8a6a2f;
+}
+
+.task-notification-card.running .task-notification-icon .ui-icon {
+  animation: task-notification-spin 1.6s linear infinite;
+}
+
+.task-notification-body {
+  display: grid;
+  gap: 4px;
+  min-width: 0;
+}
+
+.task-notification-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 6px;
+}
+
+.task-notification-head strong {
+  font-size: 13px;
+  font-weight: 800;
+}
+
+.task-notification-name {
+  min-width: 0;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 700;
+  overflow-wrap: anywhere;
+}
+
+.task-notification-body p {
+  margin: 0;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+}
+
+.task-notification-body p.task-notification-detail {
+  padding: 6px 8px;
+  border-radius: 6px;
+  background: color-mix(in srgb, var(--danger) 8%, white 92%);
+  color: #a33f3f;
+}
+
+.task-notification-time {
+  color: var(--faint);
+  font-size: 11px;
+}
+
+.task-notification-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 4px;
+}
+
+.task-notification-action {
+  min-block-size: 28px;
+  padding-inline: 10px;
+  font-size: 12px;
+}
+
+.task-notification-dismiss {
+  position: absolute;
+  top: 8px;
+  right: 8px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  padding: 0;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--muted);
+}
+
+.task-notification-dismiss:hover,
+.task-notification-dismiss:focus-visible {
+  background: var(--surface);
+  color: var(--ink);
+}
+
+.task-notification-dismiss .ui-icon {
+  width: 14px;
+  height: 14px;
+  flex-basis: 14px;
+}
+
+.toast {
+  bottom: calc(22px + var(--task-notification-stack, 0px));
+}
+
+.observation-plan-inline-status.unknown {
+  border-color: color-mix(in srgb, var(--amber) 38%, var(--line));
+  background: color-mix(in srgb, var(--amber) 15%, white 85%);
+  color: #8a6a2f;
+}
+
+@keyframes task-notification-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+@media (max-width: 720px) {
+  .task-notifications {
+    left: 14px;
+    right: 14px;
+    bottom: 14px;
+    width: auto;
+  }
+
+  .toast {
+    left: 14px;
+    right: 14px;
+    max-width: none;
+    bottom: calc(14px + var(--task-notification-stack, 0px));
+  }
+}
+
+.observation-plan-confirm-open {
+  overflow: hidden;
+  overscroll-behavior: none;
+}
+
+#observation-plan-confirm-dialog:empty {
+  display: none;
+}
+
+.observation-plan-confirm-layer {
+  position: fixed;
+  inset: 0;
+  z-index: 1100;
+  display: grid;
+  place-items: center;
+  padding: 24px;
+  background: rgba(20, 24, 21, 0.62);
+  backdrop-filter: blur(6px) saturate(0.72);
+  -webkit-backdrop-filter: blur(6px) saturate(0.72);
+  animation: observation-plan-confirm-fade 140ms ease-out;
+}
+
+.observation-plan-confirm-dialog {
+  width: min(620px, 100%);
+  max-height: min(86dvh, 720px);
+  padding: 22px;
+  overflow: auto;
+  border: 1px solid rgba(205, 211, 201, 0.96);
+  border-radius: var(--radius);
+  background: #ffffff;
+  box-shadow:
+    0 30px 90px rgba(12, 18, 14, 0.34),
+    0 8px 28px rgba(12, 18, 14, 0.18);
+  color: var(--ink);
+  animation: observation-plan-confirm-rise 180ms ease-out;
+}
+
+.observation-plan-confirm-head {
+  display: flex;
+  align-items: flex-start;
+  gap: 14px;
+}
+
+.observation-plan-confirm-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 44px;
+  height: 44px;
+  flex: 0 0 44px;
+  border: 1px solid rgba(154, 103, 0, 0.26);
+  border-radius: 12px;
+  background: #fff5d6;
+  color: #8a5a00;
+}
+
+.observation-plan-confirm-dialog.danger .observation-plan-confirm-icon {
+  border-color: rgba(185, 28, 28, 0.24);
+  background: #fff1f0;
+  color: #b42318;
+}
+
+.observation-plan-confirm-icon .ui-icon {
+  width: 23px;
+  height: 23px;
+  flex-basis: 23px;
+  stroke-width: 2.1;
+}
+
+.observation-plan-confirm-kicker {
+  display: block;
+  margin-bottom: 4px;
+  color: #8a5a00;
+  font-size: 12px;
+  font-weight: 850;
+}
+
+.observation-plan-confirm-dialog.danger .observation-plan-confirm-kicker {
+  color: #b42318;
+}
+
+.observation-plan-confirm-dialog h2 {
+  margin: 0;
+  color: #20241f;
+  font-size: 23px;
+  font-weight: 880;
+  line-height: 1.22;
+}
+
+.observation-plan-confirm-body {
+  display: grid;
+  gap: 10px;
+  margin-top: 18px;
+}
+
+.observation-plan-confirm-message {
+  display: block;
+  max-width: none;
+  margin: 0;
+  padding: 15px 16px;
+  border: 1px solid rgba(154, 103, 0, 0.3);
+  border-left: 5px solid #b7791f;
+  border-radius: var(--radius-sm);
+  background: #fff8e5;
+  color: #5f430d;
+  font-size: 15px;
+  font-weight: 800;
+  line-height: 1.68;
+  overflow-wrap: anywhere;
+}
+
+.observation-plan-confirm-dialog.danger .observation-plan-confirm-message {
+  border-color: rgba(185, 28, 28, 0.28);
+  border-left-color: #b42318;
+  background: #fff4f2;
+  color: #7a271a;
+}
+
+.observation-plan-confirm-detail {
+  margin: 0;
+  color: var(--muted);
+  font-size: 13px;
+  font-weight: 650;
+  line-height: 1.6;
+}
+
+.observation-plan-confirm-detail.success {
+  color: var(--moss-ink);
+  font-weight: 800;
+}
+
+.observation-plan-confirm-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 10px;
+  margin-top: 18px;
+  padding-top: 16px;
+  border-top: 1px solid rgba(205, 211, 201, 0.78);
+}
+
+.observation-plan-confirm-actions .observation-plan-confirm-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-block-size: 42px;
+  padding-inline: 18px;
+  font-size: 14px;
+  font-weight: 840;
+  white-space: nowrap;
+}
+
+.observation-plan-confirm-actions .primary-button {
+  box-shadow: 0 8px 20px rgba(47, 110, 74, 0.2);
+}
+
+.observation-plan-confirm-actions .observation-plan-confirm-button:focus-visible {
+  outline: 3px solid color-mix(in srgb, var(--accent) 28%, transparent);
+  outline-offset: 2px;
+}
+
+@keyframes observation-plan-confirm-fade {
+  from {
+    opacity: 0;
+  }
+}
+
+@keyframes observation-plan-confirm-rise {
+  from {
+    opacity: 0;
+    transform: translateY(10px) scale(0.985);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .observation-plan-confirm-layer,
+  .observation-plan-confirm-dialog {
+    animation: none;
+  }
+}
+
+@media (max-width: 640px) {
+  .observation-plan-confirm-layer {
+    align-items: end;
+    padding: 12px;
+  }
+
+  .observation-plan-confirm-dialog {
+    max-height: calc(100dvh - 24px);
+    padding: 18px;
+  }
+
+  .observation-plan-confirm-dialog h2 {
+    font-size: 20px;
+  }
+
+  .observation-plan-confirm-actions {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .observation-plan-confirm-actions .observation-plan-confirm-button {
+    width: 100%;
+  }
+}
+
+/* GitHub rate-limit cooldown: amber, never the red used for real failures. */
+#view-projects #scan-status.is-cooling {
+  border-color: rgba(180, 83, 9, 0.34) !important;
+  background: rgba(255, 248, 235, 0.98) !important;
+  color: #b45309 !important;
+}
+
+#view-projects #scan-status.is-cooling .scan-spinner {
+  animation: none !important;
+  border: 0 !important;
+  background: currentColor !important;
+  box-shadow: 0 0 0 4px color-mix(in srgb, currentColor 14%, transparent) !important;
+}
+
+#view-projects #scan-status.is-cooling .scan-main {
+  grid-template-columns: 12px minmax(48px, auto) !important;
+}
+
+#view-projects #scan-status.is-cooling .scan-clock {
+  width: 10px;
+  height: 10px;
+  border: 2px solid currentColor;
+  border-radius: 999px;
+  box-shadow: 0 0 0 3px color-mix(in srgb, currentColor 12%, transparent);
+}
+
+#view-projects #scan-status.is-cooling .scan-stage,
+#view-projects #scan-status.is-cooling .scan-eta,
+#view-projects #scan-status.is-cooling .scan-percent,
+#view-projects #scan-status.is-cooling .scan-step {
+  color: #b45309 !important;
+}
+
+#view-projects #scan-status.is-cooling .scan-stage,
+#view-projects #scan-status.is-cooling .scan-eta {
+  min-width: 0 !important;
+  max-width: 100% !important;
+  overflow: hidden !important;
+  text-overflow: ellipsis !important;
+  white-space: nowrap !important;
+}
+
+#view-projects #scan-status.is-cooling .scan-eta {
+  font-variant-numeric: tabular-nums !important;
+  font-size: 10px !important;
+  line-height: 1.15 !important;
+}
+
+#view-projects .project-pool-metrics:has(#scan-status.is-cooling) {
+  width: 100% !important;
+}
+
+#view-projects .project-pool-metrics:has(#scan-status.is-cooling) #scan-status {
+  flex: 1 1 238px !important;
+  min-width: 0 !important;
+  max-width: 260px !important;
+}
+
+#view-projects .project-pool-metrics:has(#scan-status.is-cooling) .metric-tile.accent {
+  flex: 0 1 124px !important;
+  min-width: 104px !important;
+}
+
+#scan-button.local-action-cooling {
+  border-color: rgba(180, 83, 9, 0.34) !important;
+  background: rgba(255, 248, 235, 0.98) !important;
+  color: #b45309 !important;
+  cursor: not-allowed !important;
+}
+
+#scan-button.local-action-cooling .action-label-copy,
+#scan-button.local-action-cooling svg {
+  color: #b45309 !important;
+}
+
+#scan-button.local-action-cooling .action-label-copy {
+  font-variant-numeric: tabular-nums !important;
+}
+
+.task-notification-cooldown {
+  margin: 0;
+  color: #b45309;
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+  font-weight: 780;
+}
+
+.task-notification-card.failed:has(.task-notification-cooldown) {
+  border-color: rgba(180, 83, 9, 0.3);
+  background: rgba(255, 248, 235, 0.98);
+}
+
+@media (max-width: 640px) {
+  #scan-button.local-action-cooling {
+    width: 100% !important;
   }
 }

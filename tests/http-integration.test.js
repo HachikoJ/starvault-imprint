@@ -52,6 +52,11 @@ test("HTTP server exposes a lightweight core snapshot and paged IndexedDB record
   assert.equal(health.status, 200);
   assert.equal(health.headers["x-content-type-options"], "nosniff");
 
+  const runtimeConfig = await invoke(handle, { path: "/runtime-config.js" });
+  assert.equal(runtimeConfig.status, 200);
+  assert.match(runtimeConfig.headers["content-type"], /javascript/);
+  assert.match(runtimeConfig.body, /__STARVAULT_DEPLOYMENT__ = "server"/);
+
   const snapshotResponse = await invoke(handle, { path: "/api/local-snapshot" });
   assert.equal(snapshotResponse.status, 200);
   const snapshot = JSON.parse(snapshotResponse.body);

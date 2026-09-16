@@ -29,7 +29,7 @@ const I18N = {
     guideTourScanTitle: "点击扫描刷新项目池",
     guideTourScanBody: "扫描会先检查 GitHub Token，再按当前方案检索 GitHub Search、Trending 和可选外部信号。完成后会回到项目池。",
     guideTourPoolTitle: "在项目池筛选和判断项目",
-    guideTourPoolBody: "左侧筛选缩小范围，点击列表打开档案。收藏、隐藏、研判、AI 分析、更多数据、Star/Fork 才是更强的学习信号。",
+    guideTourPoolBody: "左侧筛选缩小范围，点击列表打开档案。收藏、隐藏、研判、AI 分析和 Star/Fork 等明确操作才会影响系统学习。",
     guideTourLearningTitle: "到学习中枢校准系统记忆",
     guideTourLearningBody: "这里查看偏好画像、隐藏项目样本和学习策略；需要重来时再清除学习记录，平时可压缩上下文保留长期记忆。",
     runtimeStatus: "运行状态",
@@ -39,6 +39,7 @@ const I18N = {
     headlineSub: "从海量 GitHub 项目中发现值得学习、理解与持续跟踪的开源灵感。",
     exportJson: "导出 JSON",
     exportCsv: "导出 CSV",
+    exportFailed: "导出失败",
     exportShort: "导出",
     exportHint: "导出当前方案项目池数据",
     runScan: "重新扫描",
@@ -110,6 +111,7 @@ const I18N = {
     scanStageScore: "分析与保存",
     scanStageCompleted: "完成",
     scanStageFailed: "失败",
+    scanStageCooling: "GitHub 限流冷却中",
     scanProgressHint: "{stage} · {percent}%",
     scanEtaPending: "剩余估算中",
     scanEtaRemaining: "剩余约 {time}",
@@ -118,6 +120,9 @@ const I18N = {
     scanEtaNetworkSensitive: "接口耗时会有波动",
     scanEtaSteady: "估算较稳定",
     scanEtaUnderMinute: "不到 1 分钟",
+    scanCooldownRemaining: "冷却剩余 {time}",
+    scanCooldownMessage: "GitHub 已触发限流，账号正在冷却；期间不会发送任何扫描请求。",
+    scanCoolingButton: "冷却 {time}",
     longTaskBeforeUnload: "当前仍有任务正在进行，刷新或关闭页面可能中断结果写入。请等待任务完成。",
     project: "项目",
     opportunity: "推荐值",
@@ -142,9 +147,9 @@ const I18N = {
     repo: "仓库",
     selection: "项目详情",
     chooseProject: "尚未选择项目",
-    chooseProjectHint: "点击左侧项目后再打开详情；默认留白不会写入学习记录。",
+    chooseProjectHint: "点击左侧项目后再打开详情；仅浏览不会写入偏好。",
     chooseProjectTipBrowse: "筛选、翻页和扫描只是浏览项目池。",
-    chooseProjectTipLearn: "只有打开详情、收藏、Star/Fork、研判或 AI 分析才会进入学习记录。",
+    chooseProjectTipLearn: "只有收藏、隐藏、Star/Fork、研判或 AI 分析等明确操作才会进入学习记录。",
     dailyBrief: "结构看板",
     topActionable: "机会摘要",
     compliance: "许可视图",
@@ -198,6 +203,8 @@ const I18N = {
     observationPlanGenerateModuleHint: "填写需求后生成可编辑草案",
     observationPlanTransferModule: "导入导出配置",
     observationPlanTransferModuleHint: "备份或恢复配置与学习数据",
+    localBackupDue: "浏览器本地数据尚未备份，建议导出一次配置。",
+    localStorageNotPersistent: "浏览器未授予持久化存储，清理站点数据时可能丢失记录。",
     activeObservationPlan: "当前方案",
     observationPlanName: "方案名称",
     observationPlanNamePlaceholder: "如：内容创作工具观察",
@@ -238,6 +245,7 @@ const I18N = {
     saveObservationPlanHint: "保存方案",
     observationPlanCanceledInline: "已取消",
     observationPlanSavedInline: "已保存",
+    observationPlanMergedIntoSameName: "已并入同名方案「{name}」，沿用其项目池和学习记录",
     openObservationPlanPicker: "选择方案",
     editObservationPlanAction: "编辑方案",
     deleteObservationPlanAction: "删除方案",
@@ -247,12 +255,19 @@ const I18N = {
     observationPlanDeleteConfirmAction: "确认删除",
     observationPlanDeleteBackupDone: "备份已导出，可继续删除",
     observationPlanConfirmSwitchAction: "切换并扫描",
+    observationPlanCancelSwitchAction: "取消切换",
+    observationPlanSwitchConfirmKicker: "方案尚未切换",
+    observationPlanSwitchConfirmTitle: "还需点击「切换并扫描」",
+    observationPlanDeleteConfirmKicker: "重要操作",
+    observationPlanDeleteConfirmTitle: "确认删除方案",
     observationPlanDeletedInline: "已删除",
     exportPortableData: "导出配置",
     importPortableData: "导入配置",
     observationPlanSwitched: "观察方案已切换",
     observationPlanSwitchScan: "观察方案已切换，开始重新扫描",
-    observationPlanSwitchConfirm: "重要提醒：切换到「{name}」后，将应用该方案的检索逻辑、学习中枢配置、用户操作记录和平台自进化内容，并立即重新扫描项目池。扫描可能需要一些时间。确定切换并重新扫描吗？",
+    observationPlanSwitchCooldown: "观察方案已切换；GitHub 冷却中，扫描尚未启动。倒计时结束后请再次点击扫描。",
+    observationPlanSwitchConfirm: "当前仅选中了「{name}」，方案尚未切换，也不会开始扫描。点击下方「切换并扫描」后才会应用该方案并重新扫描项目池。",
+    observationPlanSwitchConfirmDetail: "切换会应用该方案的检索逻辑、学习中枢配置、用户操作记录和平台自进化内容；扫描可能需要一些时间。",
     observationPlanSwitchHint: "切换方案会立即重新扫描项目池。",
     planSwitchingTitle: "正在切换观察方案",
     planSwitchingBody: "正在重建当前方案的项目池与榜单，完成前不会记录浏览、收藏、研判、AI 分析等学习行为。",
@@ -266,6 +281,23 @@ const I18N = {
     observationPlanGenerated: "方案草案已生成，可编辑 JSON 后保存",
     observationPlanDraftReady: "方案草案已生成",
     observationPlanDraftFallback: "AI 未返回标准方案，已生成可编辑的本地草案。",
+    observationPlanStatusUnknownInline: "暂时无法确认生成结果，任务可能仍在后台运行，稍后会自动更新。",
+    taskNotificationsLabel: "任务提醒",
+    taskNotificationNameTag: "「{name}」",
+    taskNotificationRunningTitle: "方案生成中",
+    taskNotificationRunningBody: "任务仍在后台生成，完成后这条提醒会自动更新。",
+    taskNotificationCompletedTitle: "方案草案已生成",
+    taskNotificationCompletedBody: "点击查看并保存生成的方案草案，也可以在设置中继续编辑。",
+    taskNotificationFailedTitle: "方案生成失败",
+    taskNotificationFailedBody: "可以点击重试生成，或检查模型配置后再试。",
+    taskNotificationCooldownTitle: "GitHub 限流冷却中",
+    taskNotificationCooldownBody: "GitHub 已触发限流，账号正在冷却；冷却结束前不会发送扫描请求。",
+    taskNotificationUnknownTitle: "生成状态待确认",
+    taskNotificationUnknownBody: "任务可能仍在后台生成，恢复连接后会自动更新结果。",
+    taskNotificationViewAction: "查看方案",
+    taskNotificationRetryAction: "重试生成",
+    taskNotificationDismissAction: "关闭提醒",
+    taskNotificationResultMissing: "无法读取该方案的生成结果，请重新生成。",
     portableDataImported: "配置与学习数据已导入",
     portableDataExported: "配置与学习数据已导出，不包含任何密钥",
     observationPlanStats: "{profiles} 条查询 · {keywords} 个关键词",
@@ -290,7 +322,7 @@ const I18N = {
     rankingLogicCopy: "价值、增长、Trending、记忆与用途轮转。",
     memoryState: "记忆状态",
     memoryTuning: "记忆偏好调优",
-    memoryTuningHint: "系统从收藏、Star、Fork、点开、AI 分析和榜单反馈中学习；手动校准会作为长期偏好保留。",
+    memoryTuningHint: "系统从收藏、隐藏、Star、Fork、研判、AI 分析和榜单反馈中学习；手动校准会作为长期偏好保留。",
     increasePreference: "增强",
     decreasePreference: "减弱",
     removePreference: "移除",
@@ -417,10 +449,12 @@ const I18N = {
     scoreScale: "0-100 · 越高越好",
     scoreMeaning: "评分口径",
     scoreOverallHint: "综合相关、重复、许可与探索。",
-    scoreRelevanceHint: "偏好匹配度。",
+    scoreRelevanceHint: "基于已发现项目与明确行为的正向产出代理值。",
     scoreRepetitionHint: "越高表示重复越少。",
     scoreActionabilityHint: "清晰、成熟、可验证。",
-    relevanceHitRate: "相关命中",
+    relevanceHitRate: "正向产出",
+    positiveYield: "正向产出",
+    negativeRate: "明确负向",
     diversityCoverage: "用途覆盖",
     repetitionControl: "重复控制",
     actionabilityFit: "可落地性",
@@ -462,6 +496,7 @@ const I18N = {
     providerCatalog: "接口地址库",
     providerReady: "配置可用",
     providerFailed: "配置失败",
+    providerKeyInvalid: "Key 无效或已过期",
     modelsLoaded: "模型已拉取",
     deepSeekOnly: "当前默认只开放 DeepSeek，其他模型会在后续扩展。",
     lastChecked: "最近检查",
@@ -538,6 +573,8 @@ const I18N = {
     noProjectMatchesHint: "可以清除筛选条件，或撤销刚才隐藏的项目。",
     noProjectsYet: "项目池还是空的",
     noProjectsYetHint: "配置 GitHub Token 后点击扫描，检索结果会显示在这里。",
+    noPlanScanYet: "该方案尚未扫描",
+    noPlanScanYetHint: "点击扫描，生成该方案自己的项目池。",
     openGitHub: "打开 GitHub",
     copyUrl: "复制地址",
     watch: "收藏",
@@ -698,7 +735,7 @@ const I18N = {
     guideTourScanTitle: "Scan to refresh the project pool",
     guideTourScanBody: "A scan validates GitHub Token first, then uses the active plan with GitHub Search, Trending, and optional external signals.",
     guideTourPoolTitle: "Filter and judge projects in the pool",
-    guideTourPoolBody: "Use filters to narrow the pool, then click rows for details. Favorites, dismissals, triage, AI analysis, more data, and Star/Fork are the stronger learning signals.",
+    guideTourPoolBody: "Use filters to narrow the pool, then click rows for details. Explicit actions such as favorites, dismissals, triage, AI analysis, and Star/Fork affect system learning.",
     guideTourLearningTitle: "Calibrate system memory in Learning",
     guideTourLearningBody: "Review preference profile, hidden samples, and learning strategy here. Clear learning records only when needed; compact context keeps long-term memory lighter.",
     runtimeStatus: "Runtime",
@@ -708,6 +745,7 @@ const I18N = {
     headlineSub: "Discover open-source projects worth learning from, understanding, and tracking over time.",
     exportJson: "Export JSON",
     exportCsv: "Export CSV",
+    exportFailed: "Export failed",
     exportShort: "Export",
     exportHint: "Export active-plan project pool data",
     runScan: "Rescan GitHub",
@@ -779,6 +817,7 @@ const I18N = {
     scanStageScore: "Analyze & Save",
     scanStageCompleted: "Done",
     scanStageFailed: "Failed",
+    scanStageCooling: "GitHub rate limit cooldown",
     scanProgressHint: "{stage} · {percent}%",
     scanEtaPending: "Estimating time left",
     scanEtaRemaining: "About {time} left",
@@ -787,6 +826,9 @@ const I18N = {
     scanEtaNetworkSensitive: "API timing may vary",
     scanEtaSteady: "Estimate is steadier",
     scanEtaUnderMinute: "under 1 min",
+    scanCooldownRemaining: "{time} left in cooldown",
+    scanCooldownMessage: "GitHub rate-limited this account. No scan requests are sent until the cooldown ends.",
+    scanCoolingButton: "Cooling {time}",
     longTaskBeforeUnload: "A task is still running. Refreshing or closing this page may interrupt saving the result.",
     project: "Project",
     opportunity: "Opportunity",
@@ -811,9 +853,9 @@ const I18N = {
     repo: "Repo",
     selection: "Project detail",
     chooseProject: "No project selected",
-    chooseProjectHint: "Click a project in the list to open details. The blank default state does not write learning history.",
+    chooseProjectHint: "Click a project in the list to open details. Browsing alone does not change preferences.",
     chooseProjectTipBrowse: "Filtering, paging, and scanning only browse the pool.",
-    chooseProjectTipLearn: "Opening details, favoriting, Star/Fork, triage, and AI analysis feed learning records.",
+    chooseProjectTipLearn: "Only explicit actions such as favoriting, hiding, Star/Fork, triage, or AI analysis feed learning records.",
     dailyBrief: "Structure Board",
     topActionable: "Opportunity snapshot",
     compliance: "License view",
@@ -867,6 +909,8 @@ const I18N = {
     observationPlanGenerateModuleHint: "Generate an editable draft from the need",
     observationPlanTransferModule: "Config import/export",
     observationPlanTransferModuleHint: "Back up or restore config and learning data",
+    localBackupDue: "Browser-local data has not been backed up recently. Export the configuration once.",
+    localStorageNotPersistent: "Persistent storage was not granted; clearing site data may remove local records.",
     activeObservationPlan: "Active plan",
     observationPlanName: "Plan name",
     observationPlanNamePlaceholder: "e.g. Creator tools watch",
@@ -907,6 +951,7 @@ const I18N = {
     saveObservationPlanHint: "Save plan",
     observationPlanCanceledInline: "Canceled",
     observationPlanSavedInline: "Saved",
+    observationPlanMergedIntoSameName: "Merged into the existing plan \"{name}\" and kept its project pool and learning history",
     openObservationPlanPicker: "Choose plan",
     editObservationPlanAction: "Edit plan",
     deleteObservationPlanAction: "Delete plan",
@@ -916,12 +961,19 @@ const I18N = {
     observationPlanDeleteConfirmAction: "Delete",
     observationPlanDeleteBackupDone: "Backup exported. You can continue deleting.",
     observationPlanConfirmSwitchAction: "Switch and scan",
+    observationPlanCancelSwitchAction: "Cancel switch",
+    observationPlanSwitchConfirmKicker: "Plan not switched yet",
+    observationPlanSwitchConfirmTitle: "Click \"Switch and scan\" to continue",
+    observationPlanDeleteConfirmKicker: "Important action",
+    observationPlanDeleteConfirmTitle: "Confirm plan deletion",
     observationPlanDeletedInline: "Deleted",
     exportPortableData: "Export config",
     importPortableData: "Import config",
     observationPlanSwitched: "Observation plan switched",
     observationPlanSwitchScan: "Observation plan switched. Starting a fresh scan.",
-    observationPlanSwitchConfirm: "Important: switching to \"{name}\" will apply its search logic, Learning Hub settings, user actions, and self-evolution data, then immediately rescan the project pool. The scan may take some time. Switch and rescan?",
+    observationPlanSwitchCooldown: "Observation plan switched; GitHub is cooling down, so the scan has not started. Click Scan again when the countdown ends.",
+    observationPlanSwitchConfirm: "Only \"{name}\" is selected. The plan has not switched, and no scan has started. The plan applies and the project pool is rescanned only after you click \"Switch and scan\" below.",
+    observationPlanSwitchConfirmDetail: "Switching applies this plan's search logic, Learning Hub settings, user actions, and self-evolution data. The scan may take some time.",
     observationPlanSwitchHint: "Switching plans immediately rescans the project pool.",
     planSwitchingTitle: "Switching observation plan",
     planSwitchingBody: "Rebuilding the project pool and leaderboard for this plan. Browsing, favorites, triage, AI analysis, and other learning actions are not recorded until it finishes.",
@@ -935,6 +987,23 @@ const I18N = {
     observationPlanGenerated: "Draft generated. Edit the JSON before saving.",
     observationPlanDraftReady: "Draft ready",
     observationPlanDraftFallback: "AI did not return a valid plan; a local editable draft was generated.",
+    observationPlanStatusUnknownInline: "Cannot confirm the result yet. The task may still be running in the background and will update automatically.",
+    taskNotificationsLabel: "Task notices",
+    taskNotificationNameTag: "\u201c{name}\u201d",
+    taskNotificationRunningTitle: "Generating the plan",
+    taskNotificationRunningBody: "This task is still running in the background. The notice updates when it finishes.",
+    taskNotificationCompletedTitle: "Plan draft is ready",
+    taskNotificationCompletedBody: "Open it to review and save the generated draft, or keep editing in Settings.",
+    taskNotificationFailedTitle: "Plan generation failed",
+    taskNotificationFailedBody: "Retry the generation, or check the model configuration first.",
+    taskNotificationCooldownTitle: "GitHub rate limit cooldown",
+    taskNotificationCooldownBody: "GitHub rate-limited this account. No scan requests are sent until the cooldown finishes.",
+    taskNotificationUnknownTitle: "Generation status pending",
+    taskNotificationUnknownBody: "The task may still be running in the background. The result updates automatically once the connection recovers.",
+    taskNotificationViewAction: "View plan",
+    taskNotificationRetryAction: "Retry generation",
+    taskNotificationDismissAction: "Dismiss notice",
+    taskNotificationResultMissing: "This generated plan could not be loaded. Generate the plan again.",
     portableDataImported: "Configuration and learning data imported",
     portableDataExported: "Configuration and learning data exported without secrets",
     observationPlanStats: "{profiles} profiles · {keywords} keywords",
@@ -959,7 +1028,7 @@ const I18N = {
     rankingLogicCopy: "Value, growth, Trending, memory, rotation.",
     memoryState: "Memory State",
     memoryTuning: "Memory tuning",
-    memoryTuningHint: "The system learns from favorites, Star, Fork, opens, AI analysis, and rank feedback. Manual calibration is kept as long-term preference.",
+    memoryTuningHint: "The system learns from favorites, hiding, Star, Fork, triage, AI analysis, and rank feedback. Manual calibration is kept as long-term preference.",
     increasePreference: "Increase",
     decreasePreference: "Decrease",
     removePreference: "Remove",
@@ -1086,10 +1155,12 @@ const I18N = {
     scoreScale: "0-100 · higher is better",
     scoreMeaning: "Scoring rule",
     scoreOverallHint: "Relevance, repetition, license, exploration.",
-    scoreRelevanceHint: "Preference fit.",
+    scoreRelevanceHint: "A proxy based on discovered projects and explicit positive actions.",
     scoreRepetitionHint: "Higher means less repetition.",
     scoreActionabilityHint: "Clear, mature, verifiable.",
-    relevanceHitRate: "Relevance hit",
+    relevanceHitRate: "Positive yield",
+    positiveYield: "Positive yield",
+    negativeRate: "Explicit negative",
     diversityCoverage: "Use-case coverage",
     repetitionControl: "Repeat control",
     actionabilityFit: "Actionability",
@@ -1131,6 +1202,7 @@ const I18N = {
     providerCatalog: "Endpoint catalog",
     providerReady: "Config works",
     providerFailed: "Config failed",
+    providerKeyInvalid: "Key invalid or expired",
     modelsLoaded: "Models loaded",
     deepSeekOnly: "DeepSeek is the only default provider enabled for now. More providers can be added later.",
     lastChecked: "Last checked",
@@ -1207,6 +1279,8 @@ const I18N = {
     noProjectMatchesHint: "Clear filters or undo the last hidden project.",
     noProjectsYet: "Your project pool is empty",
     noProjectsYetHint: "Configure a GitHub Token and scan to populate this list.",
+    noPlanScanYet: "This plan has not been scanned",
+    noPlanScanYetHint: "Run a scan to build this plan's project pool.",
     openGitHub: "Open GitHub",
     copyUrl: "Copy URL",
     watch: "Favorite",
@@ -2337,6 +2411,10 @@ const PROTOCOL_LABELS = {
     gemini: "Gemini"
   }
 };
+const DEEPSEEK_MODEL_LABELS = {
+  "deepseek-flash": "DeepSeek V4.1 Flash",
+  "deepseek-v4-pro": "DeepSeek V4 Pro"
+};
 const ANOMALY_ZH = {
   "High stars with unusually low fork activity": "星标较高，但分叉活跃度异常偏低",
   "Very young repository with sudden attention": "项目很新，但突然获得大量关注",
@@ -2599,6 +2677,11 @@ const state = {
     tavily: readServiceKeyIssue("tavily"),
     exa: readServiceKeyIssue("exa")
   },
+  keyIssueMessages: {
+    github: "",
+    tavily: "",
+    exa: ""
+  },
   githubTokenIssue: readServiceKeyIssue("github"),
   learningBusy: "",
   learningPolicySaveStatus: "",
@@ -2618,7 +2701,10 @@ const state = {
   scanEtaDisplaySeconds: null,
   scanEtaUpdatedAt: 0,
   scanProgressTimer: null,
+  cooldownTicker: null,
+  cooldownResumePending: false,
   durableTasksRestored: false,
+  taskNotificationSyncBusy: false,
   scanIdleTimer: null,
   projects: [],
   dismissedProjects: [],
@@ -2764,6 +2850,9 @@ const elements = {
   observationPlanToolbar: document.querySelector("#observation-plan-toolbar"),
   observationPlanView: document.querySelector("#observation-plan-view"),
   observationPlanLogic: document.querySelector("#observation-plan-logic"),
+  localBackupStatus: document.querySelector("#local-backup-status"),
+  observationPlanConfirmDialog: document.querySelector("#observation-plan-confirm-dialog"),
+  taskNotifications: document.querySelector("#task-notifications"),
   switchObservationPlanButton: document.querySelector("#switch-observation-plan-button"),
   observationPlanStatus: document.querySelector("#observation-plan-status")
 };
@@ -4111,6 +4200,10 @@ function providerKeyUrl(providerId) {
   return links[providerId] || "";
 }
 
+function providerModelLabel(providerId, model) {
+  return providerId === "deepseek" ? DEEPSEEK_MODEL_LABELS[model] || model : model;
+}
+
 function anomalyLabel(label) {
   if (state.language !== "zh") return label;
   return ANOMALY_ZH[label] || label;
@@ -4149,6 +4242,7 @@ function cssEscape(value) {
 }
 
 const ICON_PATHS = {
+  alert: '<path d="m21.7 18-8-14a2 2 0 0 0-3.4 0l-8 14A2 2 0 0 0 4 21h16a2 2 0 0 0 1.7-3z"/><path d="M12 9v4"/><path d="M12 17h.01"/>',
   archive: '<path d="M3 7h18"/><path d="M5 7v12h14V7"/><path d="M8 7V5h8v2"/><path d="M10 12h4"/>',
   arrowRight: '<path d="M5 12h14"/><path d="m13 6 6 6-6 6"/>',
   arrowDown: '<path d="M12 5v14"/><path d="m19 12-7 7-7-7"/>',
@@ -4156,6 +4250,7 @@ const ICON_PATHS = {
   brain: '<path d="M9 5a3 3 0 0 0-3 3v7a4 4 0 0 0 4 4"/><path d="M15 5a3 3 0 0 1 3 3v7a4 4 0 0 1-4 4"/><path d="M9 5a3 3 0 0 1 6 0"/><path d="M8 11h8"/><path d="M9 15h6"/>',
   chart: '<path d="M4 19V5"/><path d="M4 19h16"/><path d="M8 15v-4"/><path d="M12 15V8"/><path d="M16 15v-6"/>',
   check: '<path d="m5 12 4 4L19 6"/>',
+  clock: '<circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/>',
   copy: '<rect x="8" y="8" width="11" height="11" rx="2"/><path d="M5 15H4a1 1 0 0 1-1-1V5a2 2 0 0 1 2-2h9a1 1 0 0 1 1 1v1"/>',
   download: '<path d="M12 3v12"/><path d="m7 10 5 5 5-5"/><path d="M5 21h14"/>',
   edit: '<path d="M12 20h9"/><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4z"/>',
@@ -4675,24 +4770,10 @@ async function api(path, options = {}) {
     response = await fetch(path, { ...fetchOptions, headers });
   } catch (error) {
     if (!skipIndexedDbSync && localApi?.canHandle?.(path, fetchOptions)) {
+      localApi.activateLocalMode?.();
       return localApi.handle(path, fetchOptions);
     }
     throw error;
-  }
-
-  // Server has AUTH_TOKEN configured but we haven't provided one yet — ask once, then retry.
-  if (response.status === 401 && !token) {
-    let prompted = "";
-    try {
-      prompted = (window.prompt("Access token required:") || "").trim();
-    } catch {
-      prompted = "";
-    }
-    if (prompted) {
-      setAuthToken(prompted);
-      headers["Authorization"] = `Bearer ${prompted}`;
-      response = await fetch(path, { ...fetchOptions, headers });
-    }
   }
 
   let json = null;
@@ -4700,16 +4781,21 @@ async function api(path, options = {}) {
     json = await response.json();
   } catch (error) {
     if (!skipIndexedDbSync && localApi?.canHandle?.(path, fetchOptions)) {
+      localApi.activateLocalMode?.();
       return localApi.handle(path, fetchOptions);
     }
     throw error;
   }
   if (!response.ok && response.status === 404 && !skipIndexedDbSync && localApi?.canHandle?.(path, fetchOptions)) {
+    if (["/api/config", "/api/settings"].some((prefix) => String(path).startsWith(prefix))) localApi.activateLocalMode?.();
     return localApi.handle(path, fetchOptions);
   }
   if (!response.ok) {
-    const error = new Error(json.message || json.error || "Request failed");
+    const message = json.message || json.error || "Request failed";
+    const error = new Error(json.authRequired ? "访问令牌未配置或无效，请联系部署管理员。" : message);
     error.status = response.status;
+    error.code = String(json.code || (/^[A-Z0-9_]+$/.test(String(json.error || "")) ? json.error : "")) || "";
+    error.cooldown = json.cooldown?.active ? json.cooldown : json.task?.cooldown?.active ? json.task.cooldown : null;
     error.details = json;
     throw error;
   }
@@ -4719,7 +4805,26 @@ async function api(path, options = {}) {
   return json;
 }
 
+async function restoreServerApiMode() {
+  const localApi = window.StarVaultLocalApi;
+  if (localApi?.isStaticDeployment?.()) return false;
+  if (!localApi?.localModeForced?.()) return false;
+  try {
+    await api("/api/config", { skipIndexedDbSync: true });
+    localApi.deactivateLocalMode?.();
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 const DURABLE_TASK_IDS_KEY = "starvault.pendingTaskIds";
+const TASK_NOTIFICATIONS_KEY = "starvault.taskNotifications";
+const TASK_NOTIFICATION_LIMIT = 5;
+const TASK_STATUS_POLL_DELAY_MS = 850;
+const TASK_STATUS_LOOKUP_MAX_RETRIES = 4;
+const TASK_STATUS_SYNC_INTERVAL_MS = 45000;
+const TASK_NOTIFICATION_STATUSES = ["running", "completed", "failed", "unknown"];
 
 function durableTaskIds() {
   try {
@@ -4749,19 +4854,396 @@ function forgetDurableTask(id) {
   setDurableTaskIds(durableTaskIds().filter((taskId) => taskId !== id));
 }
 
-async function waitForDurableTaskResponse(response) {
+function taskNotificationRecords() {
+  try {
+    const parsed = JSON.parse(localStorage.getItem(TASK_NOTIFICATIONS_KEY) || "[]");
+    if (!Array.isArray(parsed)) return [];
+    return parsed
+      .filter((item) => item && typeof item === "object" && item.taskId)
+      .map((item) => ({
+        taskId: String(item.taskId),
+        type: String(item.type || "plan-generation"),
+        status: TASK_NOTIFICATION_STATUSES.includes(item.status) ? item.status : "unknown",
+        name: String(item.name || "").slice(0, 120),
+        idea: String(item.idea || "").slice(0, 2000),
+        error: String(item.error || "").slice(0, 400),
+        cooldown: activeCooldown(item.cooldown),
+        finishedAt: String(item.finishedAt || ""),
+        updatedAt: String(item.updatedAt || "")
+      }));
+  } catch {
+    return [];
+  }
+}
+
+function setTaskNotificationRecords(records = []) {
+  try {
+    if (!records.length) {
+      localStorage.removeItem(TASK_NOTIFICATIONS_KEY);
+      return;
+    }
+    localStorage.setItem(TASK_NOTIFICATIONS_KEY, JSON.stringify(records.slice(-TASK_NOTIFICATION_LIMIT)));
+  } catch {
+    /* Local persistence is best effort; the current session still renders notices. */
+  }
+}
+
+function taskNotificationRecord(taskId) {
+  const id = String(taskId || "");
+  if (!id) return null;
+  return taskNotificationRecords().find((item) => item.taskId === id) || null;
+}
+
+function upsertTaskNotification(record = {}) {
+  const taskId = String(record.taskId || "");
+  if (!taskId) return null;
+  const existing = taskNotificationRecord(taskId);
+  const status = TASK_NOTIFICATION_STATUSES.includes(record.status) ? record.status : existing?.status || "unknown";
+  const next = {
+    taskId,
+    type: String(record.type || existing?.type || "plan-generation"),
+    status,
+    name: String(record.name ?? existing?.name ?? "").slice(0, 120),
+    idea: String(record.idea ?? existing?.idea ?? "").slice(0, 2000),
+    error: String(record.error ?? existing?.error ?? "").slice(0, 400),
+    cooldown: status === "failed" ? activeCooldown(record.cooldown) || activeCooldown(existing?.cooldown) : null,
+    finishedAt: String(record.finishedAt ?? existing?.finishedAt ?? ""),
+    updatedAt: new Date().toISOString()
+  };
+  setTaskNotificationRecords([...taskNotificationRecords().filter((item) => item.taskId !== taskId), next]);
+  renderTaskNotifications();
+  return next;
+}
+
+function markTaskNotificationUnresolved(taskId) {
+  const record = taskNotificationRecord(taskId);
+  if (!record || record.status === "unknown") return;
+  upsertTaskNotification({ taskId, status: "unknown" });
+}
+
+function removeTaskNotification(taskId) {
+  const id = String(taskId || "");
+  if (!id) return;
+  const records = taskNotificationRecords();
+  const next = records.filter((item) => item.taskId !== id);
+  if (next.length === records.length) return;
+  setTaskNotificationRecords(next);
+  renderTaskNotifications();
+}
+
+function taskNotificationTime(record = {}) {
+  const value = record.finishedAt || record.updatedAt;
+  if (!value) return "";
+  const parsed = new Date(value);
+  if (Number.isNaN(parsed.getTime())) return "";
+  return fmtDate(value);
+}
+
+function taskNotificationView(record = {}) {
+  const nameTag = record.name ? t("taskNotificationNameTag").replace("{name}", record.name) : "";
+  if (record.status === "completed") {
+    return {
+      icon: "check",
+      title: t("taskNotificationCompletedTitle"),
+      body: t("taskNotificationCompletedBody"),
+      nameTag,
+      detail: "",
+      actions: ["view"]
+    };
+  }
+  if (record.status === "failed") {
+    const cooldown = taskNotificationRecordCooldown(record);
+    if (cooldown) {
+      return {
+        icon: "alert",
+        title: t("taskNotificationCooldownTitle"),
+        body: t("taskNotificationCooldownBody"),
+        nameTag,
+        detail: cooldown.message || "",
+        cooldown,
+        actions: []
+      };
+    }
+    return {
+      icon: "x",
+      title: t("taskNotificationFailedTitle"),
+      body: t("taskNotificationFailedBody"),
+      nameTag,
+      detail: record.error || "",
+      actions: ["retry"]
+    };
+  }
+  if (record.status === "running") {
+    return {
+      icon: "clock",
+      title: t("taskNotificationRunningTitle"),
+      body: t("taskNotificationRunningBody"),
+      nameTag,
+      detail: "",
+      actions: []
+    };
+  }
+  return {
+    icon: "clock",
+    title: t("taskNotificationUnknownTitle"),
+    body: t("taskNotificationUnknownBody"),
+    nameTag,
+    detail: "",
+    actions: ["view"]
+  };
+}
+
+function taskNotificationActionLabel(action) {
+  if (action === "view") return t("taskNotificationViewAction");
+  if (action === "retry") return t("taskNotificationRetryAction");
+  return t("taskNotificationDismissAction");
+}
+
+function renderTaskNotificationCard(record = {}) {
+  const view = taskNotificationView(record);
+  const taskId = escapeHtml(record.taskId);
+  const actions = view.actions
+    .map((action) => {
+      const label = taskNotificationActionLabel(action);
+      const icon = action === "retry" ? "refresh" : "eye";
+      const classes = action === "retry" ? "task-notification-action primary-button" : "task-notification-action ghost-button";
+      return `<button class="${classes}" type="button" data-task-notification-action="${action}" data-task-id="${taskId}">${iconLabel(icon, label)}</button>`;
+    })
+    .join("");
+  const dismissLabel = t("taskNotificationDismissAction");
+  const time = taskNotificationTime(record);
+  return `
+    <article class="task-notification-card ${escapeHtml(record.status)}" data-task-notification="${taskId}" role="status">
+      <span class="task-notification-icon" aria-hidden="true">${iconSvg(view.icon)}</span>
+      <div class="task-notification-body">
+        <div class="task-notification-head">
+          <strong>${escapeHtml(view.title)}</strong>
+          ${view.nameTag ? `<span class="task-notification-name">${escapeHtml(view.nameTag)}</span>` : ""}
+        </div>
+        <p>${escapeHtml(view.body)}</p>
+        ${view.detail ? `<p class="task-notification-detail">${escapeHtml(view.detail)}</p>` : ""}
+        ${
+          view.cooldown
+            ? `<p class="task-notification-cooldown" data-cooldown-until="${escapeHtml(view.cooldown.until)}">${escapeHtml(
+                cooldownCountdownLabel(view.cooldown)
+              )}</p>`
+            : ""
+        }
+        ${time ? `<time class="task-notification-time" datetime="${escapeHtml(record.finishedAt || record.updatedAt)}">${escapeHtml(time)}</time>` : ""}
+        ${actions ? `<div class="task-notification-actions">${actions}</div>` : ""}
+      </div>
+      <button class="task-notification-dismiss" type="button" data-task-notification-action="dismiss" data-task-id="${taskId}" aria-label="${escapeHtml(dismissLabel)}" data-tooltip="${escapeHtml(dismissLabel)}">${iconSvg("x")}</button>
+    </article>
+  `;
+}
+
+function renderTaskNotifications() {
+  const container = elements.taskNotifications;
+  if (!container) return;
+  const records = taskNotificationRecords();
+  if (!records.length) {
+    container.innerHTML = "";
+    container.hidden = true;
+    document.documentElement.style.setProperty("--task-notification-stack", "0px");
+    return;
+  }
+  container.innerHTML = records
+    .slice()
+    .reverse()
+    .map(renderTaskNotificationCard)
+    .join("");
+  container.hidden = false;
+  document.documentElement.style.setProperty("--task-notification-stack", `${Math.round(container.getBoundingClientRect().height)}px`);
+  if (records.some((record) => taskNotificationRecordCooldown(record))) ensureCooldownTicker();
+  else maybeStopCooldownTicker();
+}
+
+function applyGeneratedObservationPlanDraft(plan, options = {}) {
+  if (!plan) return false;
+  const requirements = Array.isArray(plan.requirements) ? plan.requirements : [];
+  const name = options.name || plan.name || "";
+  state.observationPlanDraft = {
+    ...plan,
+    id: options.planId || plan.id,
+    name,
+    nameEn: plan.nameEn || name,
+    requirements
+  };
+  state.observationPlanEditMode = "draft";
+  state.observationPlanInlineStatus = null;
+  state.observationPlanDraftNotice = t("observationPlanDraftReady");
+  if (options.fillInputs) {
+    restoreObservationPlanFormValues({
+      name,
+      idea: options.idea || observationPlanRequirementsText(plan)
+    });
+  }
+  return true;
+}
+
+async function openTaskNotificationResult(taskId) {
+  const record = taskNotificationRecord(taskId);
+  if (!record) return;
+  let task = null;
+  try {
+    const response = await api(`/api/tasks/${encodeURIComponent(record.taskId)}`);
+    task = response?.task || null;
+  } catch (error) {
+    switchView("settings");
+    upsertTaskNotification({ taskId: record.taskId, status: "unknown" });
+    showObservationPlanInlineStatus("unknown", error?.message || t("observationPlanStatusUnknownInline"), { preserveInputs: true });
+    return;
+  }
+  if (task?.status === "failed") {
+    upsertTaskNotification({
+      taskId: record.taskId,
+      status: "failed",
+      error: task.error || "",
+      cooldown: activeCooldown(task.cooldown) || null
+    });
+    switchView("settings");
+    showObservationPlanInlineStatus("failed", task.error || t("observationPlanGenerateFailed"), { preserveInputs: true });
+    return;
+  }
+  if (task?.status === "queued" || task?.status === "running") {
+    upsertTaskNotification({ taskId: record.taskId, status: "running" });
+    restoreDurableTask(task).catch(() => {});
+    return;
+  }
+  if (!applyGeneratedObservationPlanDraft(task?.result?.plan, { name: record.name, idea: record.idea, fillInputs: true })) {
+    switchView("settings");
+    showObservationPlanInlineStatus("failed", t("taskNotificationResultMissing"), { preserveInputs: true });
+    return;
+  }
+  removeTaskNotification(record.taskId);
+  switchView("settings");
+  renderObservationPlans();
+  showObservationPlanInlineStatus("saved", t("observationPlanGenerated"), { preserveInputs: true });
+  revealObservationPlanEditorStart();
+}
+
+async function retryTaskNotification(taskId) {
+  const record = taskNotificationRecord(taskId);
+  if (!record) return;
+  if (state.observationPlanGenerating) {
+    openObservationPlanSettings();
+    return;
+  }
+  removeTaskNotification(record.taskId);
+  restoreObservationPlanFormValues({ name: record.name, idea: record.idea });
+  switchView("settings");
+  renderObservationPlans();
+  await generateObservationPlan();
+}
+
+async function resumePendingTaskNotifications() {
+  if (state.taskNotificationSyncBusy) return;
+  const pending = taskNotificationRecords().filter((record) => record.status === "running" || record.status === "unknown");
+  if (!pending.length) return;
+  state.taskNotificationSyncBusy = true;
+  try {
+    for (const record of pending.slice(-3)) {
+      let task = null;
+      try {
+        const response = await api(`/api/tasks/${encodeURIComponent(record.taskId)}`);
+        task = response?.task || null;
+      } catch (error) {
+        if (Number(error?.status || 0) === 404) markTaskNotificationUnresolved(record.taskId);
+        continue;
+      }
+      if (!task?.status) continue;
+      if (task.status === "completed") {
+        upsertTaskNotification({ taskId: record.taskId, status: "completed", finishedAt: task.finishedAt || "" });
+      } else if (task.status === "failed") {
+        upsertTaskNotification({
+          taskId: record.taskId,
+          status: "failed",
+          error: task.error || "",
+          cooldown: activeCooldown(task.cooldown) || null
+        });
+      } else if (record.status !== "running") {
+        upsertTaskNotification({ taskId: record.taskId, status: "running" });
+      }
+    }
+  } finally {
+    state.taskNotificationSyncBusy = false;
+  }
+}
+
+function taskStatusLookupFailureKind(error) {
+  return Number(error?.status || 0) === 404 ? "unresolved" : "transient";
+}
+
+function taskStatusPollDelay(failures = 0) {
+  if (failures <= 0) return TASK_STATUS_POLL_DELAY_MS;
+  return Math.min(15000, TASK_STATUS_POLL_DELAY_MS + 1200 * 2 ** (failures - 1));
+}
+
+function taskStatusUnknownError(message = "") {
+  const error = new Error(message || t("observationPlanStatusUnknownInline"));
+  error.code = "TASK_STATUS_UNKNOWN";
+  return error;
+}
+
+function taskStatusIsTerminal(task) {
+  return Boolean(task) && task.status !== "queued" && task.status !== "running";
+}
+
+async function waitForDurableTaskResponse(response, options = {}) {
   if (!response?.task?.id) return response;
   const taskId = response.task.id;
+  const context = options.context && typeof options.context === "object" ? options.context : null;
   rememberDurableTask(response.task);
+  if (context) upsertTaskNotification({ ...context, taskId, status: "running" });
   let task = response.task;
-  while (task.status === "queued" || task.status === "running") {
-    await new Promise((resolve) => setTimeout(resolve, 850));
-    const latest = await api(`/api/tasks/${encodeURIComponent(taskId)}`);
-    task = latest.task;
+  let lookupFailures = 0;
+  while (task && !taskStatusIsTerminal(task)) {
+    await new Promise((resolve) => setTimeout(resolve, taskStatusPollDelay(lookupFailures)));
+    try {
+      const latest = await api(`/api/tasks/${encodeURIComponent(taskId)}`);
+      if (!latest?.task?.status) throw taskStatusUnknownError();
+      task = latest.task;
+      lookupFailures = 0;
+    } catch (error) {
+      const kind = taskStatusLookupFailureKind(error);
+      lookupFailures += 1;
+      if (kind === "unresolved" || lookupFailures > TASK_STATUS_LOOKUP_MAX_RETRIES) {
+        if (context) upsertTaskNotification({ ...context, taskId, status: "unknown" });
+        throw taskStatusUnknownError();
+      }
+    }
+  }
+  if (task?.status === "completed") {
+    if (context) upsertTaskNotification({ ...context, taskId, status: "completed", finishedAt: task.finishedAt || "" });
+    forgetDurableTask(taskId);
+    return task.result;
+  }
+  if (task?.status === "failed") {
+    const message = task.error || "Task failed";
+    const cooldown = activeCooldown(task.cooldown);
+    if (context) {
+      upsertTaskNotification({
+        ...context,
+        taskId,
+        status: "failed",
+        error: message,
+        cooldown: cooldown || null,
+        finishedAt: task.finishedAt || ""
+      });
+    }
+    forgetDurableTask(taskId);
+    const failure = new Error(message);
+    // Keep the cooldown payload on the error so callers show the countdown
+    // instead of a generic failure, matching the HTTP 429 code path.
+    if (cooldown) {
+      failure.code = "GITHUB_COOLDOWN";
+      failure.status = 429;
+      failure.cooldown = cooldown;
+    }
+    throw failure;
   }
   forgetDurableTask(taskId);
-  if (task.status === "failed") throw new Error(task.error || "Task failed");
-  return task.result;
+  return task?.result;
 }
 
 function indexedDbStore() {
@@ -4883,12 +5365,135 @@ function scanErrorMessage(error) {
   if (error?.status === 401 || /GitHub Token is invalid|GitHub Token is required|bad credentials|requires authentication/i.test(message)) {
     return /required/i.test(message) ? t("githubTokenRequiredScan") : t("githubTokenInvalidHelp");
   }
+  if (error?.code === "GITHUB_COOLDOWN" || cooldownFromError(error)) {
+    const cooldown = cooldownFromError(error);
+    return cooldown ? cooldownSummaryLabel(cooldown) : message || t("scanFailed");
+  }
   return message || t("scanFailed");
 }
 
 function isGithubTokenScanError(error) {
   const message = String(error?.message || error?.details?.message || "");
   return error?.status === 401 || /GitHub Token is invalid|GitHub Token is required|bad credentials|requires authentication/i.test(message);
+}
+
+const COOLDOWN_TICK_MS = 1000;
+
+function cooldownSecondsRemaining(cooldown = {}) {
+  if (!cooldown || cooldown.active === false) return 0;
+  const untilMs = Date.parse(String(cooldown.until || ""));
+  if (Number.isFinite(untilMs)) return Math.max(0, Math.ceil((untilMs - Date.now()) / 1000));
+  return Math.max(0, Math.ceil(Number(cooldown.remainingSeconds || 0)));
+}
+
+function formatCooldownClock(seconds = 0) {
+  const total = Math.max(0, Math.round(Number(seconds || 0)));
+  const hours = Math.floor(total / 3600);
+  const minutes = Math.floor((total % 3600) / 60);
+  const rest = total % 60;
+  const pad = (value) => String(value).padStart(2, "0");
+  return hours ? `${hours}:${pad(minutes)}:${pad(rest)}` : `${pad(minutes)}:${pad(rest)}`;
+}
+
+// A cooldown is only "active" while its own deadline is still in the future, so
+// stale snapshots kept in local storage cannot freeze scanning forever.
+function activeCooldown(input = {}) {
+  const cooldown = input?.cooldown || input;
+  if (!cooldown || cooldown.active === false || !cooldown.until) return null;
+  return cooldownSecondsRemaining(cooldown) > 0 ? cooldown : null;
+}
+
+function cooldownFromError(error) {
+  const candidates = [error?.cooldown, error?.details?.cooldown, error?.details?.task?.cooldown];
+  for (const candidate of candidates) {
+    const cooldown = activeCooldown(candidate);
+    if (cooldown) return cooldown;
+  }
+  return null;
+}
+
+function cooldownCountdownLabel(cooldown = {}) {
+  return t("scanCooldownRemaining").replace("{time}", formatCooldownClock(cooldownSecondsRemaining(cooldown)));
+}
+
+function cooldownSummaryLabel(cooldown = {}) {
+  return [cooldown.message || t("scanCooldownMessage"), cooldownCountdownLabel(cooldown)].filter(Boolean).join(" · ");
+}
+
+function cooldownCountdownNodes() {
+  return Array.from(document.querySelectorAll("[data-cooldown-until]"));
+}
+
+function taskNotificationRecordCooldown(record = {}) {
+  return activeCooldown(record.cooldown);
+}
+
+function clearExpiredTaskNotificationCooldowns() {
+  const now = Date.now();
+  const records = taskNotificationRecords();
+  let changed = false;
+  const next = records.map((record) => {
+    const untilMs = Date.parse(String(record.cooldown?.until || ""));
+    if (!record.cooldown || (Number.isFinite(untilMs) && untilMs > now)) return record;
+    changed = true;
+    return { ...record, cooldown: null };
+  });
+  if (!changed) return;
+  setTaskNotificationRecords(next);
+  renderTaskNotifications();
+}
+
+function updateCooldownCountdownNodes() {
+  const nodes = cooldownCountdownNodes();
+  let expired = false;
+  nodes.forEach((node) => {
+    const cooldown = { until: node.dataset.cooldownUntil, active: true };
+    const seconds = cooldownSecondsRemaining(cooldown);
+    node.textContent = cooldownCountdownLabel(cooldown);
+    if (seconds <= 0) expired = true;
+  });
+  if (expired) clearExpiredTaskNotificationCooldowns();
+  return nodes.length;
+}
+
+function ensureCooldownTicker() {
+  if (state.cooldownTicker) return;
+  state.cooldownTicker = setInterval(tickCooldownSurfaces, COOLDOWN_TICK_MS);
+}
+
+function maybeStopCooldownTicker() {
+  if (state.scanProgress?.status === "cooling") return;
+  if (cooldownCountdownNodes().length) return;
+  if (taskNotificationRecords().some((record) => taskNotificationRecordCooldown(record))) return;
+  if (!state.cooldownTicker) return;
+  clearInterval(state.cooldownTicker);
+  state.cooldownTicker = null;
+}
+
+function tickCooldownSurfaces() {
+  updateCooldownCountdownNodes();
+  if (state.scanProgress?.status === "cooling") {
+    if (activeCooldown(state.scanProgress)) {
+      state.cooldownResumePending = false;
+      renderScanStatus(state.scanProgress);
+    } else if (!state.cooldownResumePending) {
+      // Re-ask the server instead of guessing: a queued scan may have been
+      // released by the cooldown timer, and a queued task that failed to start
+      // gets another chance here.
+      state.cooldownResumePending = true;
+      loadScanProgress()
+        .then((progress) => {
+          state.cooldownResumePending = false;
+          if (progress?.status === "running" || progress?.running) startScanProgressPolling();
+        })
+        .catch(() => {
+          state.cooldownResumePending = false;
+          state.scanProgress = { ...state.scanProgress, status: "idle", stage: "idle", percent: 0, cooldown: null, running: false };
+          renderScanStatus(state.scanProgress);
+        });
+    }
+  }
+  maybeStopCooldownTicker();
 }
 
 function githubCredentialReady() {
@@ -4979,6 +5584,11 @@ function setServiceKeyIssues(nextIssues = {}) {
     ...(state.keyIssues || {}),
     ...nextIssues
   };
+  for (const [kind, value] of Object.entries(nextIssues)) {
+    if (!value && state.keyIssueMessages) {
+      state.keyIssueMessages[kind] = "";
+    }
+  }
   state.githubTokenIssue = Boolean(state.keyIssues.github);
   Object.keys(SERVICE_KEY_ISSUE_STORAGE_KEYS).forEach((kind) => {
     writeServiceKeyIssue(kind, Boolean(state.keyIssues[kind]));
@@ -4997,11 +5607,27 @@ function setGithubTokenIssue(value) {
 
 function applyServiceKeyValidation(validation = null) {
   if (!validation) return;
+  state.keyIssueMessages = {
+    github: validation.github?.message || "",
+    tavily: validation.tavily?.message || "",
+    exa: validation.exa?.message || ""
+  };
   setServiceKeyIssues({
     github: Boolean(validation.github?.configured && validation.github.valid === false),
     tavily: Boolean(validation.tavily?.configured && validation.tavily.valid === false),
     exa: Boolean(validation.exa?.configured && validation.exa.valid === false)
   });
+}
+
+function firstServiceKeyValidationIssue(validation = null) {
+  if (!validation) return "";
+  for (const kind of ["github", "tavily", "exa"]) {
+    const result = validation[kind];
+    if (result?.configured && result.valid === false) {
+      return result.message || SERVICE_KEY_ISSUE_LABELS[kind];
+    }
+  }
+  return "";
 }
 
 function settingsRevealQuery() {
@@ -5259,8 +5885,29 @@ function providerApiKeyInputValue(providerId = "deepseek") {
 
 function handleProviderActionError(error, providerId = "deepseek") {
   const message = error?.message || t("aiCredentialRequiredAction");
+  if (error?.details?.settings) {
+    state.settings = applyPendingSecretClears(error.details.settings);
+    renderSettings();
+    renderConfig(state.config);
+  }
   openSettingsFor(providerId || "deepseek", { focus: false });
   showSettingsInlineStatus("failed", message);
+}
+
+function isProviderAuthFailureMessage(error) {
+  return /api key.*(?:无效|过期|invalid|expired)|invalid[_\s-]*api[_\s-]*key|unauthori[sz]ed|authentication|permission denied|\b401\b/i.test(
+    String(error?.message || "")
+  );
+}
+
+async function refreshProviderStatusUi() {
+  try {
+    await loadSettingsWithVisibleSecrets();
+    renderSettings();
+    renderConfig(state.config);
+  } catch {
+    /* Keep the original task error visible when the status refresh is unavailable. */
+  }
 }
 
 function projectListScrollElement() {
@@ -5356,12 +6003,9 @@ function revealObservationPlanEditorStart() {
 }
 
 function revealObservationPlanConfirmStart() {
-  const target =
-    document.querySelector("#view-settings .observation-plan-toolbar") ||
-    document.querySelector("#view-settings .observation-plan-logic");
-  if (!target) return;
   requestAnimationFrame(() => {
-    target.scrollIntoView({ block: "start", behavior: "smooth" });
+    const confirmButton = document.querySelector("#observation-plan-confirm-dialog [data-action='confirm-observation-plan-action']");
+    confirmButton?.focus?.({ preventScroll: true });
   });
 }
 
@@ -5593,6 +6237,7 @@ function applyTranslations() {
   });
   decorateStaticIcons();
   renderScanStatus(state.scanProgress);
+  renderTaskNotifications();
   if (state.guideTourActive) {
     renderGuideTourStep();
   }
@@ -5608,6 +6253,7 @@ function scanStageLabel(stage = "idle") {
     score: "scanStageScore",
     completed: "scanStageCompleted",
     failed: "scanStageFailed",
+    cooling: "scanStageCooling",
     idle: "idle"
   }[stage];
   return key ? t(key) : t("scanning");
@@ -5685,13 +6331,26 @@ function scanCopyForProgress(progress = {}) {
 }
 
 function normalizeScanProgress(progress = {}) {
-  const status = progress.status || (progress.running ? "running" : "idle");
-  const percent = Math.max(0, Math.min(100, Math.round(Number(progress.percent || 0))));
+  // Cooling outranks every other scan status: while the account is in its
+  // penalty window nothing is sent to GitHub, so "running" would be a lie.
+  const cooldown = activeCooldown(progress.cooldown);
+  const rawStatus = progress.status || (progress.running ? "running" : "idle");
+  // `hasScan: false` means this plan has no scan of its own, and another plan's
+  // finished run must never be rendered as this plan's scan. A failure that
+  // belongs to this plan is not that case: hiding it behind "idle" would drop
+  // the only visible report of a failed run.
+  const unowned =
+    progress.hasScan === false && !progress.running && rawStatus !== "running" && rawStatus !== "failed";
+  const status = cooldown ? "cooling" : unowned ? "idle" : rawStatus;
+  const percent = unowned ? 0 : Math.max(0, Math.min(100, Math.round(Number(progress.percent || 0))));
   return {
     ...progress,
+    hasScan: progress.hasScan !== false,
+    cooldown,
     status,
     percent,
-    stage: progress.stage || (status === "running" ? "prepare" : status)
+    running: status === "running",
+    stage: cooldown ? "cooling" : unowned ? "idle" : progress.stage || (status === "running" ? "prepare" : status)
   };
 }
 
@@ -5757,14 +6416,17 @@ function renderScanButtonState(progress = state.scanProgress) {
   const isRunning = normalized.status === "running" || normalized.running;
   const isCompleted = normalized.status === "completed";
   const isFailed = normalized.status === "failed";
-  const mode = isRunning ? "running" : isCompleted ? "completed" : isFailed ? "failed" : "idle";
-  const label = isRunning ? t("scanRunning") : isCompleted ? t("scanDone") : isFailed ? t("scanFailed") : t("runScanShort");
+  const isCooling = normalized.status === "cooling";
+  const mode = isCooling ? "cooling" : isRunning ? "running" : isCompleted ? "completed" : isFailed ? "failed" : "idle";
+  const coolingLabel = t("scanCoolingButton").replace("{time}", formatCooldownClock(cooldownSecondsRemaining(normalized.cooldown)));
+  const label = isRunning ? t("scanRunning") : isCooling ? coolingLabel : isCompleted ? t("scanDone") : isFailed ? t("scanFailed") : t("runScanShort");
 
   elements.scanButton.classList.toggle("local-action-loading", isRunning);
   elements.scanButton.classList.toggle("local-action-done", isCompleted);
   elements.scanButton.classList.toggle("local-action-failed", isFailed);
+  elements.scanButton.classList.toggle("local-action-cooling", isCooling);
   elements.scanButton.setAttribute("aria-busy", isRunning ? "true" : "false");
-  elements.scanButton.disabled = isRunning;
+  elements.scanButton.disabled = isRunning || isCooling;
 
   if (elements.scanButton.dataset.scanRenderMode === mode && elements.scanButton.dataset.scanRenderLabel === label) {
     return;
@@ -5773,6 +6435,8 @@ function renderScanButtonState(progress = state.scanProgress) {
   elements.scanButton.dataset.scanRenderLabel = label;
   if (isRunning) {
     elements.scanButton.innerHTML = renderActionLabelContent("scan", label, true);
+  } else if (isCooling) {
+    elements.scanButton.innerHTML = iconLabel("clock", label);
   } else if (isCompleted) {
     elements.scanButton.innerHTML = iconLabel("check", label);
   } else if (isFailed) {
@@ -5792,6 +6456,18 @@ function activeScanStatusMarkup() {
         <strong class="scan-percent"></strong>
       </span>
       <span class="scan-eta" hidden></span>
+    </span>
+  `;
+}
+
+function coolingScanStatusMarkup() {
+  return `
+    <span class="scan-status-content">
+      <span class="scan-main">
+        <span class="scan-clock" aria-hidden="true"></span>
+        <span class="scan-stage"></span>
+      </span>
+      <span class="scan-eta"></span>
     </span>
   `;
 }
@@ -5829,16 +6505,17 @@ function renderScanStatus(progress = state.scanProgress) {
   state.scanProgress = normalized;
   renderScanButtonState(normalized);
   const isRunning = normalized.status === "running" || normalized.running;
+  const isCooling = normalized.status === "cooling";
   const isCompleted = normalized.status === "completed";
   const isFailed = normalized.status === "failed";
-  const isIdle = !isRunning && !isCompleted && !isFailed;
+  const isIdle = !isRunning && !isCompleted && !isFailed && !isCooling;
   const copy = scanCopyForProgress(normalized);
   const label = copy.stageLabel;
   const percent = normalized.percent;
   const failureDetail = isFailed && normalized.error ? scanErrorMessage({ message: normalized.error }) : "";
-  const eta = failureDetail || scanEtaLabel(normalized);
+  const eta = failureDetail || (isCooling ? "" : scanEtaLabel(normalized));
   const detailText = isRunning && normalized.total > 0 ? `${fmtNumber(normalized.completed || 0)}/${fmtNumber(normalized.total || 0)}` : "";
-  const mode = isRunning ? "running" : isCompleted ? "completed" : isFailed ? "failed" : "idle";
+  const mode = isRunning ? "running" : isCooling ? "cooling" : isCompleted ? "completed" : isFailed ? "failed" : "idle";
   const statusCopy = isRunning
     ? { title: t("scanRunning"), body: "", stageLabel: label }
     : isCompleted
@@ -5847,11 +6524,13 @@ function renderScanStatus(progress = state.scanProgress) {
         ? { title: t("scanStageFailed"), body: "", stageLabel: label }
         : copy;
   const statusPercent = isRunning ? percent : null;
+  const coolingCountdown = isCooling ? cooldownCountdownLabel(normalized.cooldown || {}) : "";
   const statusEta = isCompleted ? scanActualDurationLabel(normalized) : eta;
   const statusDetail = isRunning ? detailText : "";
 
-  elements.scanStatus.classList.remove("is-running", "is-completed", "is-failed", "is-idle");
+  elements.scanStatus.classList.remove("is-running", "is-completed", "is-failed", "is-idle", "is-cooling");
   if (isRunning) elements.scanStatus.classList.add("is-running");
+  if (isCooling) elements.scanStatus.classList.add("is-cooling");
   if (isCompleted) elements.scanStatus.classList.add("is-completed");
   if (isFailed) elements.scanStatus.classList.add("is-failed");
   if (isIdle) elements.scanStatus.classList.add("is-idle");
@@ -5859,10 +6538,47 @@ function renderScanStatus(progress = state.scanProgress) {
     "aria-label",
     isRunning
       ? [t("scanProgressHint").replace("{stage}", label).replace("{percent}", String(percent)), statusEta].filter(Boolean).join(" · ")
+      : isCooling
+        ? [t("scanStageCooling"), normalized.cooldown?.message || t("scanCooldownMessage"), statusEta].filter(Boolean).join(" · ")
       : isCompleted
         ? [t("scanStageCompleted"), statusEta].filter(Boolean).join(" · ")
       : label
   );
+  elements.scanStatus.setAttribute(
+    "aria-live",
+    isCooling ? "polite" : isRunning || isCompleted || isFailed ? "polite" : "off"
+  );
+  if (isCooling && normalized.cooldown?.until) {
+    elements.scanStatus.dataset.cooldownUntil = normalized.cooldown.until;
+    ensureCooldownTicker();
+  } else {
+    delete elements.scanStatus.dataset.cooldownUntil;
+  }
+
+  if (isCooling) {
+    const coolingCopy = {
+      title: t("scanStageCooling"),
+      body: normalized.cooldown?.message || t("scanCooldownMessage"),
+      stageLabel: label
+    };
+    if (elements.scanStatus.dataset.scanRenderMode !== mode) {
+      elements.scanStatus.innerHTML = coolingScanStatusMarkup();
+      elements.scanStatus.dataset.scanRenderMode = mode;
+    }
+    const stageNode = elements.scanStatus.querySelector(".scan-stage");
+    const etaNode = elements.scanStatus.querySelector(".scan-eta");
+    if (stageNode) stageNode.textContent = coolingCopy.title;
+    if (etaNode) {
+      etaNode.textContent = [coolingCopy.body, coolingCountdown].filter(Boolean).join(" · ");
+      etaNode.hidden = !etaNode.textContent;
+    }
+    if (isPlanTransitionActive()) {
+      renderProjectPoolTransitionState();
+      renderLeaderboardTransitionState();
+      renderDetail(null);
+    }
+    return;
+  }
 
   if (isRunning || isCompleted || isFailed) {
     if (elements.scanStatus.dataset.scanRenderMode !== mode || !updateScanStatusContent(statusCopy, statusPercent, statusDetail, statusEta)) {
@@ -5900,10 +6616,26 @@ function renderScanStatus(progress = state.scanProgress) {
 }
 
 async function loadScanProgress(options = {}) {
-  const progress = await api("/api/scan/status");
+  const requestedPlanId = String(options.observationPlanId || activeObservationPlanId());
+  const payload = await api(`/api/scan/status?observationPlanId=${encodeURIComponent(requestedPlanId)}`);
+  // A slow response for a plan the user has already left must not paint over
+  // the plan that is on screen now.
+  if (requestedPlanId !== activeObservationPlanId()) {
+    return normalizeScanProgress(state.scanProgress || {});
+  }
+  const progress = normalizeScanProgress(payload);
   renderScanStatus(progress);
-  const running = Boolean(progress.running || progress.status === "running");
+  const cooling = progress.status === "cooling";
+  const running = Boolean(!cooling && (progress.running || progress.status === "running"));
   elements.scanButton.disabled = running;
+  if (cooling) {
+    // A cooling account sends nothing to GitHub, so polling the scan endpoint
+    // would be pure noise. The cooldown ticker takes over and re-checks once.
+    clearScanIdleReset();
+    stopScanProgressPolling();
+    ensureCooldownTicker();
+    return progress;
+  }
   if (!running && state.scanProgressTimer) {
     stopScanProgressPolling();
     if (options.scheduleIdleReset !== false && (progress.status === "completed" || progress.status === "failed")) {
@@ -6343,9 +7075,13 @@ function formatNoteTime(value) {
 }
 
 function providerConnectionIssue(provider) {
-  if (!provider?.testStatus || !/^failed/i.test(provider.testStatus)) return "";
-  const detail = provider.testStatus.replace(/^failed:\s*/i, "").trim();
+  if (!provider?.testStatus || !/^auth-failed:/i.test(provider.testStatus)) return "";
+  const detail = provider.testStatus.replace(/^auth-failed:\s*/i, "").trim();
   return detail ? `${t("providerFailed")} · ${detail}` : t("providerFailed");
+}
+
+function providerAuthIssue(provider) {
+  return Boolean(provider?.testStatus && /^auth-failed:/i.test(provider.testStatus));
 }
 
 function renderConfigDot(element, name, ready, extra = "", issue = "") {
@@ -6377,21 +7113,21 @@ function renderConfig(config) {
     "GitHub",
     config.githubConfigured,
     t("autoScanHint").replace("{time}", scanTime),
-    state.keyIssues?.github ? SERVICE_KEY_ISSUE_LABELS.github : ""
+    state.keyIssues?.github ? state.keyIssueMessages?.github || SERVICE_KEY_ISSUE_LABELS.github : ""
   );
   renderConfigDot(
     elements.tavilyState,
     "Tavily",
     config.tavilyConfigured,
     "",
-    state.keyIssues?.tavily ? SERVICE_KEY_ISSUE_LABELS.tavily : ""
+    state.keyIssues?.tavily ? state.keyIssueMessages?.tavily || SERVICE_KEY_ISSUE_LABELS.tavily : ""
   );
   renderConfigDot(
     elements.exaState,
     "Exa",
     config.exaConfigured,
     "",
-    state.keyIssues?.exa ? SERVICE_KEY_ISSUE_LABELS.exa : ""
+    state.keyIssues?.exa ? state.keyIssueMessages?.exa || SERVICE_KEY_ISSUE_LABELS.exa : ""
   );
   renderConfigDot(elements.modelState, "AI", activeProvider?.enabled !== false && activeProvider?.apiKeySet, "", providerConnectionIssue(activeProvider));
 }
@@ -6729,6 +7465,12 @@ function activeObservationPlanLabel() {
   return observationPlanLabel(active) || t("defaultObservationPlan");
 }
 
+function activeObservationPlanId() {
+  const plans = state.observationPlans?.plans || [];
+  const active = state.observationPlans?.active || plans.find((plan) => plan.active) || null;
+  return String(active?.id || "default");
+}
+
 function renderProjectPoolHeading(summaryContent = "") {
   const planLabel = activeObservationPlanLabel();
   const summary = Array.isArray(summaryContent)
@@ -7052,7 +7794,7 @@ function renderLeaderboard(leaderboard) {
         .map((project) => {
           const selected = state.leaderboardSelectedFullName === project.fullName ? "selected" : "";
           return `
-            <article class="leaderboard-item ${selected}" data-full-name="${escapeHtml(project.fullName)}">
+            <article class="leaderboard-item ${selected}" data-full-name="${escapeHtml(project.fullName)}" role="button" tabindex="0" aria-label="${escapeHtml(project.fullName)}">
               <span class="leaderboard-rank-select" aria-hidden="true">
                 <span class="rank-cell ${rankPodiumClass(project.rank)}">
                   ${rankPodiumClass(project.rank) ? iconOnly("trophy", rankMedalLabel(project.rank), "rank-medal") : ""}
@@ -7575,6 +8317,8 @@ function renderLearning(memory = state.memory || {}) {
     elements.learningHarness.innerHTML = `
       <div class="harness-panel">
         <div class="harness-metrics">
+          <span>${escapeHtml(t("positiveYield"))}: ${escapeHtml(String(metrics.positiveYield ?? "-"))}</span>
+          <span>${escapeHtml(t("negativeRate"))}: ${escapeHtml(String(metrics.negativeRate ?? "-"))}</span>
           <span>${escapeHtml(t("diversityCoverage"))}: ${escapeHtml(String(metrics.diversityCoverage ?? "-"))}</span>
           <span>${escapeHtml(t("explorationFit"))}: ${escapeHtml(String(metrics.explorationFit ?? "-"))}</span>
           <span>${escapeHtml(t("licenseReadiness"))}: ${escapeHtml(String(metrics.licenseReadiness ?? "-"))}</span>
@@ -7726,7 +8470,7 @@ function renderProjects(response) {
       const selected = selectedFullName === project.fullName ? "selected" : "";
       const description = projectBrief(project);
       return `
-        <article class="repo-item ${selected}" data-full-name="${escapeHtml(project.fullName)}">
+        <article class="repo-item ${selected}" data-full-name="${escapeHtml(project.fullName)}" role="button" tabindex="0" aria-label="${escapeHtml(project.fullName)}">
           <span class="repo-score-select" aria-hidden="true">
             <span class="repo-score-rail">
               <strong>${project.scores?.opportunity || 0}</strong>
@@ -7764,15 +8508,23 @@ function renderProjects(response) {
       `;
     })
     .join("");
+  const poolEmptyWithoutFilters = !hasActiveFilters() && Number(state.projectPool.total || 0) === 0;
+  // A plan that never ran its own scan has an empty pool by definition; calling
+  // that "no matches" reads like a broken search instead of pending work.
+  const planNeverScanned = poolEmptyWithoutFilters && Boolean(state.summary) && state.summary.hasScan === false;
   const isNewProjectPool =
-    !hasActiveFilters() &&
-    Number(state.projectPool.total || 0) === 0 &&
+    poolEmptyWithoutFilters &&
     !state.summary?.lastScan &&
     (!state.summary || Number(state.summary.totalProjects || 0) === 0);
+  const emptyStateKeys = planNeverScanned
+    ? { title: "noPlanScanYet", hint: "noPlanScanYetHint" }
+    : isNewProjectPool
+      ? { title: "noProjectsYet", hint: "noProjectsYetHint" }
+      : { title: "noProjectMatches", hint: "noProjectMatchesHint" };
   const emptyRowsHtml = `
     <div class="project-list-empty">
-      <strong>${escapeHtml(t(isNewProjectPool ? "noProjectsYet" : "noProjectMatches"))}</strong>
-      <span>${escapeHtml(t(isNewProjectPool ? "noProjectsYetHint" : "noProjectMatchesHint"))}</span>
+      <strong>${escapeHtml(t(emptyStateKeys.title))}</strong>
+      <span>${escapeHtml(t(emptyStateKeys.hint))}</span>
     </div>
   `;
   elements.projectRows.innerHTML = `
@@ -8185,6 +8937,13 @@ function renderSettings() {
   const settings = state.settings;
   if (!settings) return;
   renderObservationPlans();
+  if (elements.localBackupStatus) {
+    const localRuntime = state.config?.runtime === "browser-indexeddb";
+    const persistenceWarning = localRuntime && state.config?.storagePersistence?.supported && !state.config.storagePersistence.persisted;
+    const backupWarning = localRuntime && state.config?.backupDue;
+    elements.localBackupStatus.hidden = !persistenceWarning && !backupWarning;
+    elements.localBackupStatus.textContent = persistenceWarning ? t("localStorageNotPersistent") : backupWarning ? t("localBackupDue") : "";
+  }
 
   [
     ["github", elements.githubTokenIssue],
@@ -8193,7 +8952,7 @@ function renderSettings() {
   ].forEach(([kind, element]) => {
     if (!element) return;
     element.hidden = !state.keyIssues?.[kind];
-    element.textContent = SERVICE_KEY_ISSUE_LABELS[kind];
+    element.textContent = state.keyIssueMessages?.[kind] || SERVICE_KEY_ISSUE_LABELS[kind];
   });
   const githubVisible = isSecretVisible("github");
   const tavilyVisible = isSecretVisible("tavily");
@@ -8273,7 +9032,7 @@ function renderSettings() {
       const modelControl = modelOptions.length
         ? `<select data-provider-field="model">
             ${modelOptions
-              .map((model) => `<option value="${escapeHtml(model)}" ${provider.model === model ? "selected" : ""}>${escapeHtml(model)}</option>`)
+              .map((model) => `<option value="${escapeHtml(model)}" ${provider.model === model ? "selected" : ""}>${escapeHtml(providerModelLabel(provider.id, model))}</option>`)
               .join("")}
           </select>`
         : `<input data-provider-field="model" value="${escapeHtml(provider.model || "")}" />`;
@@ -8282,9 +9041,11 @@ function renderSettings() {
           ? t("providerReady")
           : provider.testStatus === "models-loaded"
             ? t("modelsLoaded")
-            : provider.testStatus
-              ? `${t("providerFailed")} · ${provider.testStatus.replace(/^failed:\s*/i, "")}`
-              : t("keyEmpty");
+            : /^auth-failed:/i.test(provider.testStatus || "")
+              ? `${t("providerFailed")} · ${provider.testStatus.replace(/^(?:failed|auth-failed):\s*/i, "")}`
+              : provider.apiKeySet
+                ? t("providerReady")
+                : t("keyEmpty");
       const protocols = [
         ["openai-compatible", protocolLabel("openai-compatible")]
       ];
@@ -8326,6 +9087,7 @@ function renderSettings() {
             <label class="secret-label">
               <span class="field-title-row">
                 <span>${t("apiKey")}</span>
+                <span class="token-issue-badge" data-provider-key-issue="${escapeHtml(provider.id)}" ${providerAuthIssue(provider) ? "" : "hidden"}>${escapeHtml(t("providerKeyInvalid"))}</span>
                 ${safeExternalUrl(keyUrl) ? `<a class="key-source-link" href="${escapeHtml(safeExternalUrl(keyUrl))}" target="_blank" rel="noopener noreferrer">${escapeHtml(t("getKey"))}</a>` : ""}
               </span>
               <div class="secret-field">
@@ -8380,7 +9142,7 @@ function observationPlanLabel(plan = {}) {
 
 function observationPlanSearchLogic(plan = {}) {
   return plan.searchLogic || plan.strategy || {
-    baseMode: "focused",
+    baseMode: "only",
     keywords: [],
     excludeTerms: [],
     customQueries: [],
@@ -8512,20 +9274,41 @@ function renderObservationPlanPendingConfirm() {
   const isDelete = pending.type === "delete";
   const busy = Boolean(pending.busy || (pending.type === "switch" && state.observationPlanSwitching));
   const confirmLabel = isDelete ? t("observationPlanDeleteConfirmAction") : t("observationPlanConfirmSwitchAction");
-  const message = pending.backupExported ? t("observationPlanDeleteBackupDone") : pending.message || "";
+  const cancelLabel = isDelete ? t("clearBehaviorCancelAction") : t("observationPlanCancelSwitchAction");
+  const message = pending.message || "";
+  const backupStatus = pending.backupExported ? t("observationPlanDeleteBackupDone") : "";
   const backupButton = isDelete
     ? `<button class="observation-plan-confirm-button ghost-button" type="button" data-action="export-observation-plan-delete-backup" ${busy ? "disabled" : ""}>${iconLabel("download", t("observationPlanDeleteBackupAction"))}</button>`
     : "";
   return `
-    <span class="observation-plan-confirm-message ${isDelete ? "danger" : ""}" role="status">
-      ${iconSvg(isDelete ? "trash" : "scan")}
-      <span>${escapeHtml(message)}</span>
-    </span>
-    <button class="observation-plan-confirm-button ghost-button" type="button" data-action="cancel-observation-plan-confirm" ${busy ? "disabled" : ""}>${iconLabel("x", t("clearBehaviorCancelAction"))}</button>
-    ${backupButton}
-    <button class="observation-plan-confirm-button ${isDelete ? "danger-button" : "primary-button"} ${busy ? "local-action-loading" : ""}" type="button" data-action="confirm-observation-plan-action" ${busy ? "disabled" : ""}>
-      ${busy ? renderMiniActionBusy(confirmLabel) : iconLabel(isDelete ? "trash" : "scan", confirmLabel)}
-    </button>
+    <div class="observation-plan-confirm-layer" data-observation-plan-confirm-layer>
+      <section class="observation-plan-confirm-dialog ${isDelete ? "danger" : "switch"}" role="alertdialog" aria-modal="true" aria-labelledby="observation-plan-confirm-title" aria-describedby="observation-plan-confirm-message">
+        <div class="observation-plan-confirm-head">
+          <span class="observation-plan-confirm-icon" aria-hidden="true">${iconSvg(isDelete ? "trash" : "alert")}</span>
+          <div>
+            <span class="observation-plan-confirm-kicker">${escapeHtml(t(isDelete ? "observationPlanDeleteConfirmKicker" : "observationPlanSwitchConfirmKicker"))}</span>
+            <h2 id="observation-plan-confirm-title">${escapeHtml(t(isDelete ? "observationPlanDeleteConfirmTitle" : "observationPlanSwitchConfirmTitle"))}</h2>
+          </div>
+        </div>
+        <div class="observation-plan-confirm-body">
+          <p id="observation-plan-confirm-message" class="observation-plan-confirm-message">${escapeHtml(message)}</p>
+          ${
+            isDelete
+              ? backupStatus
+                ? `<p class="observation-plan-confirm-detail success">${escapeHtml(backupStatus)}</p>`
+                : ""
+              : `<p class="observation-plan-confirm-detail">${escapeHtml(t("observationPlanSwitchConfirmDetail"))}</p>`
+          }
+        </div>
+        <div class="observation-plan-confirm-actions">
+          <button class="observation-plan-confirm-button ghost-button" type="button" data-action="cancel-observation-plan-confirm" ${busy ? "disabled" : ""}>${iconLabel("x", cancelLabel)}</button>
+          ${backupButton}
+          <button class="observation-plan-confirm-button ${isDelete ? "danger-button" : "primary-button"} ${busy ? "local-action-loading" : ""}" type="button" data-action="confirm-observation-plan-action" ${busy ? "disabled" : ""}>
+            ${busy ? renderMiniActionBusy(confirmLabel) : iconLabel(isDelete ? "trash" : "scan", confirmLabel)}
+          </button>
+        </div>
+      </section>
+    </div>
   `;
 }
 
@@ -8543,18 +9326,17 @@ function renderObservationPlanToolbar(editable = {}, draft = null) {
       `
     : editable?.builtIn ? "" : `<button class="observation-plan-tool ghost-button" type="button" data-action="edit-observation-plan" aria-label="${escapeHtml(editHint)}">${iconLabel("edit", t("editObservationPlan"))}</button>`;
   const kind = state.observationPlanInlineStatus?.kind || "";
-  const statusIcon = kind === "failed" ? "x" : kind === "canceled" ? "x" : "check";
+  const statusIcon = kind === "failed" ? "x" : kind === "canceled" ? "x" : kind === "unknown" ? "clock" : "check";
   const status = state.observationPlanInlineStatus
     ? `<span class="observation-plan-inline-status ${escapeHtml(kind)}">${iconLabel(statusIcon, state.observationPlanInlineStatus.label || "")}</span>`
     : "";
-  const pendingConfirm = renderObservationPlanPendingConfirm();
-  const actionContent = pendingConfirm || `${actions}${status}`;
+  const actionContent = `${actions}${status}`;
   return `
     <div class="observation-plan-toolbar-title">
       <strong>${escapeHtml(t("observationPlanLogicItems"))}</strong>
       <span>${escapeHtml(fmtNumber(count))}</span>
     </div>
-    <div class="observation-plan-toolbar-actions ${pendingConfirm ? "confirming" : ""}">${actionContent}</div>
+    <div class="observation-plan-toolbar-actions">${actionContent}</div>
   `;
 }
 
@@ -8772,6 +9554,7 @@ function queueObservationPlanSwitchConfirm(id = "") {
     message: t("observationPlanSwitchConfirm").replace("{name}", label)
   };
   renderObservationPlans();
+  revealObservationPlanConfirmStart();
 }
 
 function queueObservationPlanDeleteConfirm(id = "") {
@@ -9017,6 +9800,10 @@ function renderObservationPlans() {
   if (elements.observationPlanToolbar) {
     elements.observationPlanToolbar.innerHTML = renderObservationPlanToolbar(editable, draft);
   }
+  if (elements.observationPlanConfirmDialog) {
+    elements.observationPlanConfirmDialog.innerHTML = renderObservationPlanPendingConfirm();
+  }
+  document.documentElement.classList.toggle("observation-plan-confirm-open", Boolean(state.observationPlanPendingConfirm));
   updateObservationPlanSwitchButton();
   if (elements.observationPlanRequirements) {
     elements.observationPlanRequirements.innerHTML = renderObservationPlanRequirements(editable, { canDelete: state.observationPlanEditMode === "edit" && !editable?.builtIn });
@@ -9153,6 +9940,28 @@ function exportUrl(format) {
   return `/api/export?${params.toString()}`;
 }
 
+async function downloadLocalProjectExport(format) {
+  const payload = await api(exportUrl(format));
+  if (!payload?.content || !payload?.filename) throw new Error(t("exportFailed"));
+  const blob = new Blob([payload.content], { type: payload.mimeType || "application/octet-stream" });
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = payload.filename;
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 0);
+}
+
+function showExportActionStatus(kind = "saved") {
+  const summary = elements.exportMenu?.querySelector("summary");
+  if (!summary) return;
+  summary.classList.remove("local-action-done", "local-action-failed");
+  summary.classList.add(kind === "failed" ? "local-action-failed" : "local-action-done");
+  setTimeout(() => summary.classList.remove("local-action-done", "local-action-failed"), 1600);
+}
+
 function projectPoolParams(limit = String(state.projectPool.pageSize), offset = "0") {
   collectFilters();
   const params = new URLSearchParams({
@@ -9253,6 +10062,9 @@ async function refreshSummaryInBackground() {
     state.summary = summary;
     renderSummary(summary);
     renderChips();
+    // The empty-pool copy depends on whether this plan ever scanned, so the
+    // rows have to be redrawn once the plan-scoped summary lands.
+    if (!state.projectPool.items.length) renderProjectPoolPage();
   } finally {
     state.summaryRefreshInFlight = null;
     if (state.summaryRefreshQueued) {
@@ -9327,13 +10139,29 @@ async function loadLeaderboard(period = state.leaderboardPeriod, date = state.le
 
 async function restoreDurableTask(task) {
   if (!task?.id) return;
+  const taskPlanId = String(task.observationPlanId || task.input?.observationPlanId || "").trim();
+  // A scan belongs to the plan that started it. Restoring another plan's scan
+  // would fill the current pool with results it never asked for.
+  if (task.type === "scan" && taskPlanId && taskPlanId !== activeObservationPlanId()) return;
   const fullName = task.type === "analysis" ? String(task.key || "").replace(/^analysis:/, "") : "";
   if (task.type === "analysis" && fullName) {
     state.analysisInFlight = { ...(state.analysisInFlight || {}), [fullName]: true };
   }
   if (task.type === "plan-generation") state.observationPlanGenerating = true;
   try {
-    const result = await waitForDurableTaskResponse({ task });
+    const notification = task.type === "plan-generation" ? taskNotificationRecord(task.id) : null;
+    const result = await waitForDurableTaskResponse(
+      { task },
+      task.type === "plan-generation"
+        ? {
+            context: {
+              type: "plan-generation",
+              name: notification?.name || String(task.key || "").replace(/^plan:/, ""),
+              idea: notification?.idea || ""
+            }
+          }
+        : {}
+    );
     if (task.type === "analysis" && result) {
       state.analysis[fullName] = result.analysis || null;
       if (result.project) mergeLocalProject(result.project);
@@ -9345,13 +10173,14 @@ async function restoreDurableTask(task) {
       }
     }
     if (task.type === "plan-generation" && result?.plan) {
-      state.observationPlanDraft = { ...result.plan, name: result.plan.name, nameEn: result.plan.nameEn || result.plan.name };
-      state.observationPlanEditMode = "draft";
-      state.observationPlanDraftNotice = t("observationPlanDraftReady");
+      applyGeneratedObservationPlanDraft(result.plan, { name: notification?.name || "" });
       showObservationPlanInlineStatus("saved", t("observationPlanGenerated"), { preserveInputs: true });
       renderObservationPlans();
     }
     if (task.type === "scan") {
+      // The user may have switched plans while the scan was running; its pool
+      // belongs to the plan that started it.
+      if (taskPlanId && taskPlanId !== activeObservationPlanId()) return;
       state.projectPool.page = 1;
       state.selected = null;
       switchView("projects");
@@ -9360,9 +10189,22 @@ async function restoreDurableTask(task) {
       queueIndexedDbSnapshotSync("restored-scan-complete", 250, { force: true, syncProjects: true });
     }
   } catch (error) {
-    if (task.type === "plan-generation") showObservationPlanInlineStatus("failed", error.message, { preserveInputs: true });
+    if (isProviderAuthFailureMessage(error)) {
+      await refreshProviderStatusUi();
+    }
+    if (task.type === "plan-generation") {
+      const kind = error?.code === "TASK_STATUS_UNKNOWN" ? "unknown" : "failed";
+      showObservationPlanInlineStatus(kind, error.message, { preserveInputs: true });
+    }
     if (task.type === "scan") {
-      renderScanStatus({ status: "failed", stage: "failed", percent: 0, error: error.message });
+      if (taskPlanId && taskPlanId !== activeObservationPlanId()) return;
+      const cooldown = cooldownFromError(error);
+      if (cooldown) {
+        renderScanStatus({ status: "cooling", stage: "cooling", percent: 0, cooldown });
+        ensureCooldownTicker();
+      } else {
+        renderScanStatus({ status: "failed", stage: "failed", percent: 0, error: error.message });
+      }
     }
   } finally {
     if (fullName) delete state.analysisInFlight[fullName];
@@ -9379,13 +10221,28 @@ async function restoreDurableTasks() {
     try {
       const response = await api(`/api/tasks/${encodeURIComponent(id)}`);
       if (response.task) tasks.push(response.task);
-    } catch {
-      forgetDurableTask(id);
+      else forgetDurableTask(id);
+    } catch (error) {
+      if (Number(error?.status || 0) === 404) {
+        forgetDurableTask(id);
+        markTaskNotificationUnresolved(id);
+      }
+      /* A transient lookup failure keeps the id so a later visit can resolve it. */
     }
   }
   try {
     const response = await api("/api/tasks?limit=30");
-    tasks.push(...(response.tasks || []).filter((task) => task.status === "queued" || task.status === "running"));
+    const activePlanId = activeObservationPlanId();
+    tasks.push(
+      ...(response.tasks || []).filter((task) => {
+        if (task.status !== "queued" && task.status !== "running") return false;
+        // Scans are per plan: adopting another plan's queued or running scan
+        // would report this plan as scanned while its pool stays empty.
+        if (task.type !== "scan") return true;
+        const taskPlanId = String(task.observationPlanId || "").trim();
+        return !taskPlanId || taskPlanId === activePlanId;
+      })
+    );
   } catch {
     /* Local browser mode completes operations in the current tab. */
   }
@@ -9394,6 +10251,7 @@ async function restoreDurableTasks() {
 }
 
 async function loadAll(options = {}) {
+  await restoreServerApiMode();
   const leaderboardParams = new URLSearchParams({
     period: state.leaderboardPeriod,
     limit: String(LEADERBOARD_LIMIT)
@@ -9410,8 +10268,9 @@ async function loadAll(options = {}) {
   state.config = config;
   state.settings = settings;
   state.observationPlans = observationPlans;
-  if (scanProgress?.running || scanProgress?.status === "running") {
-    state.scanProgress = scanProgress;
+  const normalizedScanProgress = normalizeScanProgress(scanProgress);
+  if (normalizedScanProgress.status === "running" || normalizedScanProgress.status === "cooling") {
+    state.scanProgress = normalizedScanProgress;
   } else if (!options.preserveScanStatus) {
     state.scanProgress = {
       status: "idle",
@@ -9429,6 +10288,8 @@ async function loadAll(options = {}) {
   maybeShowInitialGuide();
   if (state.scanProgress.running || state.scanProgress.status === "running") {
     startScanProgressPolling();
+  } else if (state.scanProgress.status === "cooling") {
+    ensureCooldownTicker();
   }
   await loadProjects({
     resetPosition: Boolean(options.resetProjectPool),
@@ -9490,7 +10351,9 @@ async function selectProject(fullName, options = {}) {
     return state.selected;
   }
   state.selected = project;
-  recordMemoryEvent(fullName, "select_project", { source: options.source || "ui" }).catch(() => {});
+  if (options.recordMemory !== false) {
+    recordMemoryEvent(fullName, "select_project", { source: options.source || "ui" }).catch(() => {});
+  }
   renderDetail(project);
   if (options.renderList !== false) {
     renderProjectPoolPage();
@@ -9999,6 +10862,9 @@ async function analyzeProject(fullName) {
     scrollAnalysisSectionToTop();
   } catch (error) {
     delete state.analysisInFlight[fullName];
+    if (isProviderAuthFailureMessage(error)) {
+      await refreshProviderStatusUi();
+    }
     renderDetailPreservingScroll(state.selected);
     throw error;
   }
@@ -10010,7 +10876,18 @@ async function runScan(options = {}) {
       failPlanTransition(t("githubTokenRequiredScan"));
     }
     promptCredentialSetup("github", { messageKey: "githubTokenRequiredScan", scan: true });
-    return;
+    return { status: "blocked" };
+  }
+  const knownCooldown = activeCooldown(state.scanProgress);
+  if (knownCooldown) {
+    // Never render an optimistic "running" state while the account is already
+    // cooling: the request would be rejected without touching GitHub.
+    renderScanStatus({ status: "cooling", stage: "cooling", percent: 0, cooldown: knownCooldown });
+    ensureCooldownTicker();
+    if (isPlanTransitionActive()) {
+      failPlanTransition(cooldownSummaryLabel(knownCooldown));
+    }
+    return { status: "cooling", cooldown: knownCooldown };
   }
   elements.scanButton.disabled = true;
   state.scanEtaDisplaySeconds = null;
@@ -10031,8 +10908,9 @@ async function runScan(options = {}) {
     if (result.status === "already-running") {
       const finalProgress = await loadScanProgress({ scheduleIdleReset: false }).catch(() => null);
       if (finalProgress) renderScanStatus(finalProgress);
+      if (finalProgress?.status === "cooling") return { status: "cooling", cooldown: finalProgress.cooldown };
       startScanProgressPolling();
-      return;
+      return { status: "started" };
     }
     const finalProgress =
       result.status === "started"
@@ -10040,6 +10918,9 @@ async function runScan(options = {}) {
         : await loadScanProgress({ scheduleIdleReset: false }).catch(() => null);
     if (finalProgress?.status === "failed") {
       throw new Error(finalProgress.error || "Scan failed");
+    }
+    if (finalProgress?.status === "cooling") {
+      return { status: "cooling", cooldown: finalProgress.cooldown };
     }
     if (result.task?.id) forgetDurableTask(result.task.id);
     queueIndexedDbSnapshotSync("scan-complete", 250, { force: true, syncProjects: true });
@@ -10063,7 +10944,17 @@ async function runScan(options = {}) {
       completePlanTransition();
     }
     scheduleScanIdleReset();
+    return { status: "completed", progress: finalProgress || null };
   } catch (error) {
+    const cooldown = cooldownFromError(error);
+    if (cooldown) {
+      renderScanStatus({ status: "cooling", stage: "cooling", percent: 0, cooldown });
+      ensureCooldownTicker();
+      if (isPlanTransitionActive()) {
+        failPlanTransition(cooldownSummaryLabel(cooldown));
+      }
+      return { status: "cooling", cooldown };
+    }
     const message = scanErrorMessage(error);
     renderScanStatus({
       status: "failed",
@@ -10079,12 +10970,14 @@ async function runScan(options = {}) {
       openSettingsFor("github", { focus: false });
     }
     scheduleScanIdleReset(2600);
+    return { status: "failed", error: message };
   } finally {
     const stillRunning = Boolean(state.scanProgress.running || state.scanProgress.status === "running");
-    if (!stillRunning) {
+    const stillCooling = state.scanProgress.status === "cooling";
+    if (!stillRunning && !stillCooling) {
       stopScanProgressPolling();
     }
-    elements.scanButton.disabled = stillRunning;
+    elements.scanButton.disabled = stillRunning || stillCooling;
   }
 }
 
@@ -10108,7 +11001,7 @@ function collectObservationPlanDraft() {
   }
   if (!searchLogic) {
     searchLogic = {
-      baseMode: "focused",
+      baseMode: "only",
       keywords: idea ? [idea] : [],
       excludeTerms: [],
       customQueries: [],
@@ -10173,11 +11066,24 @@ async function switchObservationPlan(id = currentObservationPlanPreview()?.id ||
     state.observationPlanPreviewId = id;
     beginPlanTransition(state.observationPlans.active || targetPlan || {});
     renderObservationPlans();
-    if (!options.silent) showObservationPlanInlineStatus("saved", t("observationPlanSwitchScan"));
+    let scanResult = null;
     if (options.scan !== false) {
-      await runScan({ source: "plan-switch" });
+      scanResult = await runScan({ source: "plan-switch" });
     } else {
       completePlanTransition();
+    }
+    if (!options.silent) {
+      // The two-step switch has to describe what actually happened, not what
+      // was requested: a cooling account accepts the plan but starts no scan.
+      if (scanResult?.status === "cooling") {
+        showObservationPlanInlineStatus("saved", t("observationPlanSwitchCooldown"));
+      } else if (scanResult?.status === "completed" || scanResult?.status === "started" || !scanResult) {
+        showObservationPlanInlineStatus("saved", t("observationPlanSwitchScan"));
+      } else if (scanResult?.status === "failed") {
+        showObservationPlanInlineStatus("failed", scanResult.error || t("planSwitchFailedTitle"), { preserveInputs: true });
+      } else if (scanResult?.status === "blocked") {
+        showObservationPlanInlineStatus("saved", t("observationPlanSwitched"));
+      }
     }
   } finally {
     state.observationPlanSwitching = false;
@@ -10205,24 +11111,29 @@ async function generateObservationPlan() {
   const isEditingObservationPlan = state.observationPlanEditMode === "edit" && Boolean(state.observationPlanDraft);
   const editingPlanId = isEditingObservationPlan ? state.observationPlanDraft?.id || currentPlan?.id || "" : "";
   try {
-    const result = await waitForDurableTaskResponse(
-      await api("/api/observation-plans/generate", {
-        method: "POST",
-        body: JSON.stringify({
-          name: nameInput,
-          idea
-        })
+    const taskResponse = await api("/api/observation-plans/generate", {
+      method: "POST",
+      body: JSON.stringify({
+        name: nameInput,
+        idea
       })
-    );
-    await refreshObservationPlans();
-    if (elements.observationPlanSelect && editingPlanId) {
-      elements.observationPlanSelect.value = editingPlanId;
-    }
+    });
+    const result = await waitForDurableTaskResponse(taskResponse, {
+      context: {
+        type: "plan-generation",
+        name: nameInput,
+        idea
+      }
+    });
+    if (!result?.plan) throw new Error(t("observationPlanGenerateFailed"));
     const resultRequirements = Array.isArray(result.plan?.requirements) ? result.plan.requirements : [];
     const draftRequirements = resultRequirements.length ? resultRequirements : [];
     state.observationPlanDraft = {
       ...(result.plan || {}),
-      id: editingPlanId || result.plan?.id,
+      // A freshly generated draft must not claim an id before it is saved.
+      // Otherwise the save request looks explicit and bypasses same-name plan
+      // reuse, which can fork a second empty pool in browser-local mode.
+      id: editingPlanId,
       name: nameInput,
       nameEn: nameInput,
       requirements: draftRequirements
@@ -10233,9 +11144,20 @@ async function generateObservationPlan() {
       result.source === "ai"
         ? t("observationPlanDraftReady")
         : `${t("observationPlanDraftReady")} · ${t("observationPlanDraftFallback")}`;
+    await refreshObservationPlans().catch(() => {});
+    if (elements.observationPlanSelect && editingPlanId) {
+      elements.observationPlanSelect.value = editingPlanId;
+    }
     generated = true;
   } catch (error) {
-    showObservationPlanInlineStatus("failed", error?.message || t("observationPlanGenerateFailed"), { preserveInputs: true });
+    if (isProviderAuthFailureMessage(error)) {
+      await refreshProviderStatusUi();
+    }
+    if (error?.code === "TASK_STATUS_UNKNOWN") {
+      showObservationPlanInlineStatus("unknown", error?.message || t("observationPlanStatusUnknownInline"), { preserveInputs: true });
+    } else {
+      showObservationPlanInlineStatus("failed", error?.message || t("observationPlanGenerateFailed"), { preserveInputs: true });
+    }
   } finally {
     state.observationPlanGenerating = false;
     renderObservationPlans();
@@ -10392,6 +11314,7 @@ function cancelObservationPlanDraft() {
 async function saveObservationPlan() {
   const plan = collectObservationPlanDraft();
   const previousActive = state.observationPlans?.active || null;
+  const previousPlans = Array.isArray(state.observationPlans?.plans) ? state.observationPlans.plans : [];
   const result = await api("/api/observation-plans", {
     method: "POST",
     body: JSON.stringify({ plan })
@@ -10409,7 +11332,17 @@ async function saveObservationPlan() {
     elements.observationPlanSelect.value = result.plan.id;
   }
   renderObservationPlans();
-  showObservationPlanInlineStatus("saved", t("observationPlanSavedInline"), { clearInputs: true });
+  // Re-saving under a name that already owns a pool adopts that plan; say so
+  // instead of reporting a plain save that looks like a fresh empty plan.
+  const adoptedSameNamePlan =
+    !plan.id && Boolean(result.plan?.id) && previousPlans.some((item) => item?.id === result.plan.id);
+  showObservationPlanInlineStatus(
+    "saved",
+    adoptedSameNamePlan
+      ? t("observationPlanMergedIntoSameName").replace("{name}", result.plan.name || "")
+      : t("observationPlanSavedInline"),
+    { clearInputs: true }
+  );
   if (result.plan?.id && result.plan.id !== previousActive?.id) {
     queueObservationPlanSwitchConfirm(result.plan.id);
   }
@@ -10430,6 +11363,10 @@ function downloadJson(filename, payload) {
 async function exportPortableData(options = {}) {
   const payload = await api("/api/portable-data/export");
   downloadJson(`starvault-config-learning-${new Date().toISOString().slice(0, 10)}.json`, payload);
+  if (state.config?.runtime === "browser-indexeddb") {
+    state.config = { ...state.config, backupDue: false, lastPortableExportAt: payload.exportedAt || new Date().toISOString() };
+    renderSettings();
+  }
   if (!options.silent) showObservationPlanInlineStatus("saved", t("portableDataExported"));
 }
 
@@ -10540,11 +11477,12 @@ async function saveSettings(options = {}) {
   try {
     const result = await api("/api/settings", {
       method: "POST",
-      body: JSON.stringify(next)
+      body: JSON.stringify({ ...next, validateProvider: !options.silent })
     });
     const { keyValidation, ...settingsResult } = result;
     state.settings = settingsResult;
     applyServiceKeyValidation(keyValidation);
+    const serviceIssue = firstServiceKeyValidationIssue(keyValidation);
     resetPendingSecretClears();
     const [visibleSettings, configResult] = await Promise.all([
       loadSettingsWithVisibleSecrets(),
@@ -10568,7 +11506,10 @@ async function saveSettings(options = {}) {
     renderLearning(state.memory);
     renderProjectPoolPage();
     renderDetail(state.selected);
-    if (!options.silent) showSaveSettingsCompleteStatus();
+    if (!options.silent) {
+      if (serviceIssue) showSettingsInlineStatus("failed", serviceIssue);
+      else showSaveSettingsCompleteStatus();
+    }
   } catch (error) {
     if (!options.silent) {
       state.settingsSaveStatus = "";
@@ -10579,8 +11520,8 @@ async function saveSettings(options = {}) {
 }
 
 async function refreshProviderCatalog(providerId = "deepseek") {
+  await saveSettings({ silent: true });
   return withProviderActionFeedback(providerId, "refresh-provider-catalog", "actionCompleted", async () => {
-    await saveSettings({ silent: true });
     const result = await api("/api/provider-catalog/refresh", {
       method: "POST",
       body: JSON.stringify({})
@@ -10588,11 +11529,7 @@ async function refreshProviderCatalog(providerId = "deepseek") {
     state.settings = result.settings || state.settings;
     await loadSettingsWithVisibleSecrets();
     renderSettings();
-    renderConfig({
-      ...state.config,
-      tavilyConfigured: state.settings?.tavilyKeySet || state.config?.tavilyConfigured,
-      exaConfigured: state.settings?.exaKeySet || state.config?.exaConfigured
-    });
+    renderConfig(state.config);
   });
 }
 
@@ -10601,8 +11538,8 @@ async function fetchProviderModels(providerId) {
     promptCredentialSetup("ai", { messageKey: "aiCredentialRequiredAction" });
     return;
   }
+  await saveSettings({ silent: true });
   return withProviderActionFeedback(providerId, "fetch-provider-models", "modelsLoaded", async () => {
-    await saveSettings({ silent: true });
     const result = await api("/api/provider-models", {
       method: "POST",
       body: JSON.stringify({ providerId })
@@ -10610,6 +11547,7 @@ async function fetchProviderModels(providerId) {
     state.settings = result.settings || state.settings;
     await loadSettingsWithVisibleSecrets();
     renderSettings();
+    renderConfig(state.config);
   });
 }
 
@@ -10618,8 +11556,8 @@ async function testProvider(providerId) {
     promptCredentialSetup("ai", { messageKey: "aiCredentialRequiredAction" });
     return;
   }
+  await saveSettings({ silent: true });
   return withProviderActionFeedback(providerId, "test-provider", "providerReady", async () => {
-    await saveSettings({ silent: true });
     const result = await api("/api/provider-test", {
       method: "POST",
       body: JSON.stringify({ providerId })
@@ -10627,6 +11565,7 @@ async function testProvider(providerId) {
     state.settings = result.settings || state.settings;
     await loadSettingsWithVisibleSecrets();
     renderSettings();
+    renderConfig(state.config);
   });
 }
 
@@ -10767,7 +11706,7 @@ async function confirmClearMemoryEvents(range = state.pendingMemoryClearRange ||
     await loadProjects();
     await loadLeaderboard(state.leaderboardPeriod, state.leaderboardDate);
     if (selectedFullName) {
-      await selectProject(selectedFullName).catch(() => {
+      await selectProject(selectedFullName, { recordMemory: false }).catch(() => {
         state.selected = null;
         renderDetail(null);
       });
@@ -11414,12 +12353,41 @@ function wireEvents() {
   document.addEventListener("wheel", blockGuideTourBackgroundInteraction, { passive: false, capture: true });
   document.addEventListener("touchmove", blockGuideTourBackgroundInteraction, { passive: false, capture: true });
   document.addEventListener("keydown", handleGuideTourKeydown, true);
+  document.addEventListener("click", (event) => {
+    const action = event.target?.closest?.("[data-task-notification-action]");
+    if (!action) return;
+    const taskId = action.dataset.taskId || "";
+    if (!taskId) return;
+    const notificationAction = action.dataset.taskNotificationAction;
+    if (notificationAction === "view") {
+      openTaskNotificationResult(taskId).catch((error) => toast(error.message));
+      return;
+    }
+    if (notificationAction === "retry") {
+      retryTaskNotification(taskId).catch((error) => toast(error.message));
+      return;
+    }
+    removeTaskNotification(taskId);
+  });
+  window.setInterval(() => {
+    resumePendingTaskNotifications().catch(() => {});
+  }, TASK_STATUS_SYNC_INTERVAL_MS);
+  document.addEventListener("visibilitychange", () => {
+    if (document.visibilityState === "visible") resumePendingTaskNotifications().catch(() => {});
+  });
   elements.scanButton.addEventListener("click", () => runScan());
   elements.exportMenu?.addEventListener("click", (event) => {
     const button = event.target.closest("[data-export-format]");
     if (!button) return;
     event.preventDefault();
     elements.exportMenu.open = false;
+    const localApi = window.StarVaultLocalApi;
+    if (localApi?.localModeForced?.()) {
+      downloadLocalProjectExport(button.dataset.exportFormat)
+        .then(() => showExportActionStatus("saved"))
+        .catch(() => showExportActionStatus("failed"));
+      return;
+    }
     window.location.href = exportUrl(button.dataset.exportFormat);
   });
   document.addEventListener("click", (event) => {
@@ -11592,7 +12560,7 @@ function wireEvents() {
     const target = event.target.closest("[data-action]");
     if (!target) {
       const interactiveTarget = event.target.closest(
-        "a, button, input, select, textarea, label, summary, details, [role='button'], .repo-github-row, .leaderboard-github-row, .github-stat-actions, .github-stat-count, .trend-tag, [data-project-page], [data-project-page-prev], [data-project-page-next], [data-project-page-jump], [data-project-page-input], [data-project-page-size], [data-project-tag-filter], [data-overview-filter], [data-filter-key], [data-filter-preset], [data-filter-reset], [data-filter-reset-group], [data-filter-clear-all]"
+        "a, button, input, select, textarea, label, summary, details, [role='button']:not(.repo-item):not(.leaderboard-item), .repo-github-row, .leaderboard-github-row, .github-stat-actions, .github-stat-count, .trend-tag, [data-project-page], [data-project-page-prev], [data-project-page-next], [data-project-page-jump], [data-project-page-input], [data-project-page-size], [data-project-tag-filter], [data-overview-filter], [data-filter-key], [data-filter-preset], [data-filter-reset], [data-filter-reset-group], [data-filter-clear-all]"
       );
       if (interactiveTarget) return;
 
@@ -11906,6 +12874,11 @@ function wireEvents() {
   });
   document.addEventListener("wheel", relayBoundedScroll, { passive: false });
   document.addEventListener("keydown", (event) => {
+    if (state.observationPlanPendingConfirm && !state.observationPlanPendingConfirm.busy && !state.observationPlanSwitching && event.key === "Escape") {
+      event.preventDefault();
+      cancelObservationPlanPendingConfirm();
+      return;
+    }
     if (state.guideTourActive && event.key === "Escape") {
       event.preventDefault();
       stopGuideTour();
@@ -11935,6 +12908,14 @@ function wireEvents() {
     if (pageInput && event.key === "Enter") {
       event.preventDefault();
       setProjectPage(pageInput.value || state.projectPool.page);
+      return;
+    }
+    const projectCard = event.target.closest?.(".repo-item[data-full-name], .leaderboard-item[data-full-name]");
+    if (projectCard && (event.key === "Enter" || event.key === " ")) {
+      if (event.target.closest("a, button, input, select, textarea, [role='button']:not(.repo-item):not(.leaderboard-item)")) return;
+      event.preventDefault();
+      if (projectCard.classList.contains("leaderboard-item")) openProjectDetailFromLeaderboard(projectCard.dataset.fullName).catch(() => {});
+      else selectProject(projectCard.dataset.fullName, { renderList: false }).catch(() => {});
     }
   });
   elements.leaderboardArchive.addEventListener("change", () => {

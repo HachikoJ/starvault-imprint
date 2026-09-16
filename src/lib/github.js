@@ -1,4 +1,15 @@
 const { fetchWithRetries, parseRetryAfter, defaultRetryDelay } = require("./http-client");
+const {
+  completePlanQuery,
+  escapeRegExp,
+  isLowValuePlanContainer,
+  legacyProfileKey,
+  mergeProfileMatches,
+  planAnchorTerms,
+  profileEvidence,
+  relaxPlanQuery,
+  repositoryMatchesPlanAnchors
+} = require("../../public/domain-core");
 
 function dateDaysAgo(days) {
   const date = new Date();
@@ -21,10 +32,6 @@ function quoteSearchTerm(term = "") {
   const clean = String(term || "").trim();
   if (!clean) return "";
   return /\s/.test(clean) && !/^".*"$/.test(clean) ? `"${clean.replaceAll('"', "")}"` : clean;
-}
-
-function escapeRegExp(value = "") {
-  return String(value).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
 const GENERIC_CHINESE_PLAN_TERMS = new Set(["方案名称", "详细需求", "历史需求", "相关", "项目", "开源", "工具", "平台", "软件", "系统", "应用", "服务", "领域", "方向", "观察"]);
@@ -102,112 +109,18 @@ function planFilterTerms(plan = {}) {
   return explicitPlanTerms(plan).slice(0, 80);
 }
 
-const GENERIC_PROFILE_ANCHORS = new Set([
-  "app",
-  "application",
-  "dashboard",
-  "editor",
-  "extension",
-  "github",
-  "integration",
-  "open",
-  "platform",
-  "plugin",
-  "project",
-  "repository",
-  "sdk",
-  "software",
-  "source",
-  "system",
-  "tool",
-  "viewer",
-  "workflow"
-]);
-
-function profileAnchorTerms(item = {}, query = "") {
-  const core = String(query || "")
-    .replace(/\bin:name,description,readme\b/gi, " ")
-    .replace(/\b(?:archived|mirror):(?:true|false)\b/gi, " ")
-    .replace(/\b(?:stars|pushed|created|language|license|topic):[^\s]+/gi, " ")
-    .replace(/\s+-\S+/g, " ")
-    .replace(/[()]/g, " ")
-    .replace(/\b(?:AND|OR|NOT)\b/gi, " ")
-    .replace(/\s+/g, " ")
-    .trim();
-  const phrases = Array.from(core.matchAll(/"([^"]{2,80})"/g)).map((match) => match[1]);
-  const unquoted = core.replace(/"[^"]+"/g, " ");
-  const words = unquoted.match(/[A-Za-z0-9][A-Za-z0-9.+#-]{1,40}|[\u4e00-\u9fa5]{2,16}/g) || [];
-  const labels = [item.label, item.labelZh, item.labelEn]
-    .filter(Boolean)
-    .flatMap((value) => String(value).match(/[A-Za-z0-9][A-Za-z0-9.+#-]{1,40}|[\u4e00-\u9fa5]{2,16}/g) || []);
-  return Array.from(new Set([...phrases, ...words, ...labels].map((term) => String(term).trim()).filter(Boolean)))
-    .filter((term) => !GENERIC_PROFILE_ANCHORS.has(term.toLowerCase()))
-    .slice(0, 16);
-}
-
-const LOW_VALUE_CONTAINER_TOPIC_RE = /\b(awesome|awesome-list|awesome-lists|resources?|resource-list|book|books|tutorials?)\b/i;
-const LOW_VALUE_CONTAINER_TEXT_RE =
-  /(^|[\/\s_-])awesome[-_\s]|professional[-_\s]+complete[-_\s]+edition|\b(config files for my github profile|github profile|profile readme|awesome list|curated list|curated.+resources?|resource hub|reference hub|free assets|book list|pdf download|tools assets and tutorials|crack|activation|license key|serial key|do not use|stick to upstream|oiledmachine overlay)\b|个人收藏书籍|电子书下载|pdf下载|百度云|不限速下载/i;
-
-function normalizePlanSearchText(value = "") {
-  return String(value || "")
-    .toLowerCase()
-    .replace(/[_./-]+/g, " ")
-    .replace(/\s+/g, " ")
-    .trim();
-}
-
-function compactPlanSearchText(value = "") {
-  return String(value || "")
-    .toLowerCase()
-    .replace(/[^a-z0-9]+/g, "");
-}
-
-function textContainsPlanTerm(text = "", term = "") {
-  const cleanText = normalizePlanSearchText(text);
-  const cleanTerm = normalizePlanSearchText(String(term || "").replace(/^["“]|["”]$/g, ""));
-  if (!cleanText || !cleanTerm) return false;
-  if (cleanTerm.includes(" ")) {
-    if (cleanText.includes(cleanTerm)) return true;
-    const compactTerm = compactPlanSearchText(cleanTerm);
-    return compactTerm.length >= 4 && compactPlanSearchText(cleanText).includes(compactTerm);
-  }
-  const boundaryMatch = new RegExp(`(^|[^a-z0-9])${escapeRegExp(cleanTerm)}($|[^a-z0-9])`).test(cleanText);
-  if (boundaryMatch) return true;
-  return false;
-}
-
-function repositoryPlanText(repo = {}) {
-  return [repo.fullName, repo.name, repo.owner, repo.description, repo.homepage, ...(Array.isArray(repo.topics) ? repo.topics : [])]
-    .filter(Boolean)
-    .join(" ");
-}
-
-function isLowValuePlanContainer(repo = {}) {
-  const owner = normalizePlanSearchText(repo.owner);
-  const name = normalizePlanSearchText(repo.name);
-  const description = String(repo.description || "");
-  const topics = Array.isArray(repo.topics) ? repo.topics.join(" ") : "";
-  const text = `${repo.fullName || ""} ${repo.name || ""} ${description} ${topics}`;
-
-  if (owner && name && owner === name && /config files for my github profile|github profile/i.test(description)) {
-    return true;
-  }
-  if (description.length > 1000) return true;
-  if (LOW_VALUE_CONTAINER_TOPIC_RE.test(topics) || LOW_VALUE_CONTAINER_TEXT_RE.test(text)) return true;
-  return false;
-}
-
 function repositoryMatchesPlanProfile(repo = {}, profile = {}) {
   if (!profile?.planGenerated) return true;
-  const terms = Array.isArray(profile.planTerms) ? profile.planTerms.filter(Boolean) : [];
-  if (!terms.length) return true;
-
-  const fullText = repositoryPlanText(repo);
-  const hasPlanTerm = terms.some((term) => textContainsPlanTerm(fullText, term));
-  if (!hasPlanTerm) return false;
-
-  return !isLowValuePlanContainer(repo);
+  const anchors = Array.isArray(profile.planAnchors) && profile.planAnchors.length
+    ? profile.planAnchors.filter(Boolean)
+    : Array.isArray(profile.requiredPlanTerms)
+      ? profile.requiredPlanTerms.filter(Boolean)
+      : [];
+  // A generated profile without a verifiable anchor is a broken contract: it
+  // must fail closed instead of admitting every repository the query returns.
+  if (!anchors.length) return false;
+  if (isLowValuePlanContainer(repo)) return false;
+  return repositoryMatchesPlanAnchors(repo, anchors);
 }
 
 function queryContainsPlanTerm(query = "", term = "") {
@@ -305,30 +218,12 @@ function normalizeLooseGithubOrQuery(query = "", plan = {}) {
     .trim();
 }
 
+// The generated query is the contract the user reviews and the scan executes.
+// Only OR chains are normalized here; stars/recency/anti-noise conditions the
+// plan declared are never silently deleted. Controlled relaxation for sparse
+// domains happens later, per profile, and is reported as a separate query.
 function normalizePlanGeneratedQuery(query = "", plan = {}) {
-  const clean = normalizeGithubOrGroups(query, plan);
-  if (!clean) return "";
-  const cleanWithoutAntiNoise = stripPlanGeneratedAntiNoise(clean);
-  if (isSpecificPlanQuery(cleanWithoutAntiNoise, plan)) {
-    return cleanWithoutAntiNoise
-      .replace(/\bstars:[^\s]+/g, "")
-      .replace(/\bpushed:>=\d{4}-\d{2}-\d{2}\b/g, "")
-      .replace(/\s+/g, " ")
-      .trim();
-  }
-  const days = planQueryFreshnessDays(cleanWithoutAntiNoise, plan);
-  if (days <= 90 || !/\bpushed:>=\d{4}-\d{2}-\d{2}\b/.test(cleanWithoutAntiNoise)) return cleanWithoutAntiNoise;
-  const relaxedDate = dateDaysAgo(days);
-  return cleanWithoutAntiNoise.replace(/\bpushed:>=(\d{4}-\d{2}-\d{2})\b/g, (match, date) => (date > relaxedDate ? `pushed:>=${relaxedDate}` : match));
-}
-
-function stripPlanGeneratedAntiNoise(query = "") {
-  return String(query || "")
-    .replace(/\s+-topic:(?:agent|agents|ai-agent|agentic|multi-agent|autonomous-agent|swarm|mcp|awesome|tutorial|course|paper|benchmark)\b/gi, "")
-    .replace(/\s+-"(?:awesome list|paper list|toy example)"/gi, "")
-    .replace(/\s+-(?:benchmark|course|tutorial)\b/gi, "")
-    .replace(/\s+/g, " ")
-    .trim();
+  return normalizeGithubOrGroups(String(query || "").replace(/\s+/g, " ").trim(), plan);
 }
 
 
@@ -393,7 +288,6 @@ const PROFILE_LABEL_ZH = {
 function buildObservationPlanProfiles(plan, defaults) {
   if (!plan || plan.id === "default") return [];
   const strategy = plan.searchLogic || plan.strategy || {};
-  const productScope = "in:name,description,readme";
   const planTerms = planFilterTerms(plan);
   const customQueries = Array.isArray(strategy.customQueries) ? strategy.customQueries : [];
   const keywordQueries = planWords(strategy.keywords || strategy.focusTerms || [])
@@ -411,29 +305,29 @@ function buildObservationPlanProfiles(plan, defaults) {
       const label = typeof item === "string" ? item : item.label || item.name || query;
       const cleanQuery = normalizeGithubOrGroups(String(query || "").replace(/\s+/g, " ").trim(), plan);
       if (!cleanQuery) return null;
-      const keyBase = `${plan.id}-${index}-${cleanQuery}`
-        .toLowerCase()
-        .replace(/[^a-z0-9]+/g, "-")
-        .replace(/^-|-$/g, "")
-        .slice(0, 64);
-      const key = `plan-${keyBase || index}`;
+      const key = String(item.profileId || item.profileKey || item.id || item.key || legacyProfileKey(plan.id, index, cleanQuery));
       if (seen.has(key)) return null;
       seen.add(key);
-      const stars = Math.max(0, Number(item.stars ?? strategy.minStars ?? 0));
-      const completeQuery = /in:name,description,readme/.test(cleanQuery) && /archived:false/.test(cleanQuery);
-      const specificQuery = isSpecificPlanQuery(cleanQuery, plan);
-      const pushedDate = dateDaysAgo(planQueryFreshnessDays(cleanQuery, plan));
-      const starPart = stars > 0 && !specificQuery ? `stars:>${stars}` : "";
-      const fresh = `${specificQuery ? "" : `pushed:>=${pushedDate}`} archived:false mirror:false`;
-      const normalizedQuery = completeQuery ? normalizePlanGeneratedQuery(cleanQuery, plan) : cleanQuery;
+      const normalizedQuery = normalizePlanGeneratedQuery(cleanQuery, plan);
+      // Completion only adds qualifiers that are missing. Everything the plan
+      // declared (stars, pushed, created, negated noise topics) stays intact so
+      // the saved/visible query and the executed query remain the same string.
+      const q = completePlanQuery(normalizedQuery);
+      const queryAnchors = planAnchorTerms(q, [label, item?.labelZh, item?.labelEn], { limit: 16 });
+      // When a single query carries no usable anchor (legacy drafts full of
+      // generic surface words), fall back to the plan-level domain terms so the
+      // profile keeps its boundary instead of silently widening to everything.
+      const planAnchors = queryAnchors.length ? queryAnchors : planTerms.slice(0, 8);
+      if (!planAnchors.length) return null;
       return {
         key,
         label: `${plan.name || plan.nameEn || "Observation"} · ${label}`.slice(0, 96),
         labelEn: item.labelEn || label,
         labelZh: item.labelZh || label,
-        q: completeQuery ? normalizedQuery : `${normalizedQuery} ${productScope} ${starPart} ${fresh}`.replace(/\s+/g, " ").trim(),
+        q,
         observationPlanId: plan.id,
-        planTerms: Array.from(new Set([...planTerms, ...profileAnchorTerms(item, cleanQuery)])).slice(0, 32),
+        planTerms: Array.from(new Set([...planTerms, ...planAnchors])).slice(0, 32),
+        planAnchors,
         planGenerated: true
       };
     })
@@ -544,8 +438,9 @@ function buildQueryProfiles(plan = null) {
     }
   ];
   const planProfiles = buildObservationPlanProfiles(plan, defaults);
+  if (plan && plan.id !== "default" && !planProfiles.length) return [];
   if (!planProfiles.length) return defaults;
-  const baseMode = (plan?.searchLogic || plan?.strategy)?.baseMode || "focused";
+  const baseMode = (plan?.searchLogic || plan?.strategy)?.baseMode || "only";
   if (baseMode === "only") return planProfiles;
   if (baseMode === "blend") return [...planProfiles, ...defaults];
   return [...planProfiles, ...defaults.slice(0, 10)];
@@ -771,7 +666,22 @@ function profileMemoryScore(profile, memory = {}) {
       0
     );
   const directProfileSignal = Number(memory.discoveryProfiles?.[profile.key] || 0) * 4;
-  return positive - penalty + directProfileSignal;
+  const profileText = [profile.key, profile.label, profile.labelZh, profile.labelEn, profile.q, profile.query, ...(profile.planTerms || [])]
+    .filter(Boolean)
+    .join(" ")
+    .toLowerCase()
+    .replace(/[_./-]+/g, " ");
+  const dynamicSignal = (root, multiplier) =>
+    ["useCases", "categories", "languages", "licenses", "riskLevels"]
+      .flatMap((bucket) => Object.entries(root?.[bucket] || {}).map(([key, value]) => ({ key, value: Number(value || 0) })))
+      .filter((entry) => entry.value > 0)
+      .reduce((score, entry) => {
+        const term = memorySearchTerm(entry.key).toLowerCase().replace(/[_./-]+/g, " ").trim();
+        if (!term || term.length < 3) return score;
+        const matches = profileText.includes(term) || term.split(/\s+/).filter((part) => part.length >= 4).some((part) => profileText.includes(part));
+        return matches ? score + entry.value * multiplier : score;
+      }, 0);
+  return positive - penalty + directProfileSignal + dynamicSignal(preferences, 0.55) - dynamicSignal(negative, 0.75);
 }
 
 function applyMemoryToQueryProfiles(profiles = buildQueryProfiles(), memory = {}) {
@@ -854,13 +764,122 @@ const GITHUB_RATE_RESOURCE_RESERVE = {
   search: 2,
   graphql: 50
 };
+const GITHUB_COOLDOWN_MESSAGES = {
+  secondary: "GitHub 已触发二级限流，账号进入冷却期。冷却期间不会再发出任何扫描请求，请等倒计时结束后再扫描。",
+  primary: "GitHub 接口额度已用尽，账号进入冷却期，额度重置后会自动恢复扫描。",
+  budget: "GitHub 剩余额度已接近安全线，为避免账号被风控，扫描已提前熔断并进入冷却期。",
+  blocked: "GitHub 暂时拒绝了本次请求，账号进入冷却期，请等倒计时结束后再扫描。"
+};
 let githubCooldownUntil = 0;
+let githubCooldownReason = "";
+let githubCooldownMessage = "";
+let githubCooldownPersister = null;
 let githubNextRequestAt = 0;
 let githubRequestGate = Promise.resolve();
 const githubRateBudgets = new Map();
 
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, Math.max(0, ms)));
+}
+
+function githubCooldownSnapshot(now = Date.now()) {
+  const untilMs = Number(githubCooldownUntil || 0);
+  const active = untilMs > now;
+  return {
+    active,
+    until: untilMs > 0 ? new Date(untilMs).toISOString() : "",
+    remainingSeconds: active ? Math.ceil((untilMs - now) / 1000) : 0,
+    reason: active ? githubCooldownReason : "",
+    message: active ? githubCooldownMessage : ""
+  };
+}
+
+function githubCooldownMessageFor(reason, fallback = "") {
+  const explicit = String(fallback || "").trim();
+  if (explicit) return explicit;
+  return GITHUB_COOLDOWN_MESSAGES[String(reason || "")] || GITHUB_COOLDOWN_MESSAGES.blocked;
+}
+
+function persistGithubCooldown(snapshot) {
+  if (typeof githubCooldownPersister !== "function") return;
+  try {
+    githubCooldownPersister(snapshot);
+  } catch {
+    // Cooldown persistence is best effort; the in-memory gate still applies.
+  }
+}
+
+function setGithubCooldownPersister(persister) {
+  githubCooldownPersister = typeof persister === "function" ? persister : null;
+}
+
+// Engage the account-wide circuit breaker. Requests are never retried while it
+// is active, so a rate-limited account stops hitting GitHub immediately.
+function activateGithubCooldown(options = {}) {
+  const now = Date.now();
+  const delayMs = Math.max(1000, Number(options.delayMs || 0));
+  const until = now + delayMs;
+  const reason = String(options.reason || "blocked");
+  const message = githubCooldownMessageFor(reason, options.message);
+  if (until >= githubCooldownUntil) {
+    githubCooldownUntil = until;
+    githubCooldownReason = reason;
+    githubCooldownMessage = message;
+  } else if (!githubCooldownReason) {
+    githubCooldownReason = reason;
+    githubCooldownMessage = message;
+  }
+  const snapshot = githubCooldownSnapshot(now);
+  persistGithubCooldown(snapshot);
+  return snapshot;
+}
+
+function clearGithubCooldown() {
+  const hadCooldown = Boolean(githubCooldownUntil || githubCooldownReason || githubCooldownMessage);
+  githubCooldownUntil = 0;
+  githubCooldownReason = "";
+  githubCooldownMessage = "";
+  const snapshot = githubCooldownSnapshot();
+  if (hadCooldown) persistGithubCooldown(snapshot);
+  return snapshot;
+}
+
+function restoreGithubCooldown(persisted = {}) {
+  const untilMs = Date.parse(String(persisted?.until || ""));
+  if (Number.isFinite(untilMs) && untilMs > Date.now()) {
+    githubCooldownUntil = untilMs;
+    githubCooldownReason = String(persisted.reason || "secondary");
+    githubCooldownMessage = githubCooldownMessageFor(githubCooldownReason, persisted.message);
+    return githubCooldownSnapshot();
+  }
+  githubCooldownUntil = 0;
+  githubCooldownReason = "";
+  githubCooldownMessage = "";
+  return githubCooldownSnapshot();
+}
+
+function ensureGithubCooldownFresh(now = Date.now()) {
+  if (githubCooldownUntil && githubCooldownUntil <= now) {
+    clearGithubCooldown();
+  }
+  return githubCooldownSnapshot(now);
+}
+
+function createGithubCooldownError(cooldown = githubCooldownSnapshot()) {
+  const error = new Error(cooldown?.message || GITHUB_COOLDOWN_MESSAGES.blocked);
+  error.name = "GithubCooldownError";
+  error.status = 429;
+  error.code = "GITHUB_COOLDOWN";
+  error.cooldown = cooldown;
+  error.retryAfterSeconds = Math.max(0, Number(cooldown?.remainingSeconds || 0));
+  return error;
+}
+
+function isGithubCooldownError(error) {
+  if (!error) return false;
+  if (String(error.code || "") === "GITHUB_COOLDOWN") return true;
+  if (String(error.name || "") === "GithubCooldownError") return true;
+  return Boolean(error.cooldown && error.cooldown.active !== false && error.cooldown.until);
 }
 
 function githubRequestSpacingMs(url = "") {
@@ -910,21 +929,23 @@ function updateGithubRateBudgetFromHeaders(response, url = "") {
   }
 }
 
-function githubRateBudgetWaitMs(resource) {
+// Stop scanning well before the account hits zero, because burning the last
+// few requests is what turns a soft budget into an enforced secondary limit.
+function githubBudgetCooldown(resource) {
   const budget = githubRateBudgets.get(resource);
-  if (!budget || budget.remaining === null || !budget.resetAt) return 0;
+  if (!budget || budget.remaining === null || !budget.resetAt) return null;
   const reserve = GITHUB_RATE_RESOURCE_RESERVE[resource] ?? 5;
-  if (budget.remaining > reserve) return 0;
-  return Math.max(0, budget.resetAt - Date.now() + 1000);
-}
-
-function setGithubCooldown(delayMs) {
-  const ms = Math.max(0, Number(delayMs || 0));
-  if (!ms) return;
-  githubCooldownUntil = Math.max(githubCooldownUntil, Date.now() + ms);
+  if (budget.remaining > reserve) return null;
+  return activateGithubCooldown({
+    delayMs: Math.max(1000, budget.resetAt - Date.now() + 1000),
+    reason: "budget",
+    message: `GitHub ${resource} 剩余额度只有 ${budget.remaining} 次（安全线 ${reserve} 次），为避免账号被风控，扫描已提前熔断并进入冷却期。`
+  });
 }
 
 async function waitForGithubRequestWindow(url = "") {
+  const entryCooldown = ensureGithubCooldownFresh();
+  if (entryCooldown.active) throw createGithubCooldownError(entryCooldown);
   const resource = githubRateResourceForUrl(url);
   const previous = githubRequestGate;
   let release = () => {};
@@ -933,15 +954,10 @@ async function waitForGithubRequestWindow(url = "") {
   });
   await previous;
   try {
-    const now = Date.now();
-    const cooldownWait = Math.max(0, githubCooldownUntil - now);
-    if (cooldownWait) {
-      await sleep(cooldownWait);
-    }
-    const budgetWait = githubRateBudgetWaitMs(resource);
-    if (budgetWait) {
-      await sleep(budgetWait);
-    }
+    const queueCooldown = ensureGithubCooldownFresh();
+    if (queueCooldown.active) throw createGithubCooldownError(queueCooldown);
+    const budgetCooldown = githubBudgetCooldown(resource);
+    if (budgetCooldown) throw createGithubCooldownError(budgetCooldown);
     const spacingWait = Math.max(0, githubNextRequestAt - Date.now());
     if (spacingWait) {
       await sleep(spacingWait);
@@ -950,13 +966,6 @@ async function waitForGithubRequestWindow(url = "") {
   } finally {
     release();
   }
-}
-
-function secondaryRateLimitDelay(attempt = 0) {
-  return Math.min(
-    GITHUB_SECONDARY_RATE_LIMIT_MAX_DELAY_MS,
-    GITHUB_SECONDARY_RATE_LIMIT_MIN_DELAY_MS * 2 ** Math.max(0, Number(attempt || 0))
-  );
 }
 
 async function githubRateLimitInfo(response) {
@@ -1000,37 +1009,53 @@ async function githubRateLimitInfo(response) {
   };
 }
 
-async function githubShouldRetry(response, error, attempt) {
-  if (error) return true; // network error / timeout
+function isGithubRateLimitedResponse(response, info = {}) {
   if (!response) return false;
   if (response.status === 429) return true;
+  if (response.status === 403 && (info.primary || info.secondary || info.retryAfterMs != null)) return true;
+  return false;
+}
+
+function githubCooldownPlanForResponse(info = {}) {
+  const retryAfterMs = Number.isFinite(info.retryAfterMs) ? info.retryAfterMs : null;
+  if (info.secondary) {
+    return {
+      reason: "secondary",
+      delayMs: retryAfterMs != null ? Math.max(retryAfterMs, 1000) : GITHUB_SECONDARY_RATE_LIMIT_MIN_DELAY_MS
+    };
+  }
+  if (info.primary) {
+    const resetMs = Number.isFinite(info.resetMs) ? info.resetMs : null;
+    const delayMs = retryAfterMs ?? resetMs ?? GITHUB_SECONDARY_RATE_LIMIT_MIN_DELAY_MS;
+    return { reason: "primary", delayMs: Math.max(delayMs, 1000) };
+  }
+  return {
+    reason: "blocked",
+    delayMs: Math.max(retryAfterMs ?? GITHUB_SECONDARY_RATE_LIMIT_MIN_DELAY_MS, 1000)
+  };
+}
+
+function githubRateLimitErrorForResponse(info = {}) {
+  const plan = githubCooldownPlanForResponse(info);
+  const cooldown = activateGithubCooldown({ delayMs: plan.delayMs, reason: plan.reason });
+  return createGithubCooldownError(cooldown);
+}
+
+async function githubShouldRetry(response, error) {
+  if (error) return !isGithubCooldownError(error); // network error / timeout
+  if (!response) return false;
+  // A rate-limited response never retries: hitting GitHub again while the
+  // account is in penalty is exactly what escalates into a real abuse block.
+  if (response.status === 429) return false;
   if (response.status >= 500 && response.status < 600) return true;
   if (response.status === 403) {
     const info = await githubRateLimitInfo(response);
-    if (info.primary || info.secondary || info.retryAfterMs != null) return true;
+    if (isGithubRateLimitedResponse(response, info)) return false;
   }
   return false;
 }
 
-async function githubRetryDelay(response, error, attempt, baseMs, maxMs) {
-  if (response) {
-    const info = await githubRateLimitInfo(response);
-    if (info.retryAfterMs != null) {
-      const delay = Math.max(info.retryAfterMs, baseMs);
-      setGithubCooldown(delay);
-      return delay;
-    }
-    if (info.secondary) {
-      const delay = secondaryRateLimitDelay(attempt);
-      setGithubCooldown(delay);
-      return delay;
-    }
-    if (info.primary && info.resetMs != null) {
-      const delay = Math.max(info.resetMs, baseMs);
-      setGithubCooldown(delay);
-      return delay;
-    }
-  }
+function githubRetryDelay(response, error, attempt, baseMs, maxMs) {
   return defaultRetryDelay(response, error, attempt, baseMs, maxMs);
 }
 
@@ -1071,7 +1096,7 @@ async function githubRequest(url, token, options = {}) {
       },
       {
         timeoutMs: 20_000,
-        retries: 4,
+        retries: 2,
         baseDelayMs: 1000,
         maxDelayMs: GITHUB_SECONDARY_RATE_LIMIT_MAX_DELAY_MS,
         shouldRetry: githubShouldRetry,
@@ -1079,10 +1104,15 @@ async function githubRequest(url, token, options = {}) {
       }
     );
   } catch (error) {
+    if (isGithubCooldownError(error)) throw error;
     const cause = error?.cause?.code || error?.cause?.message || "";
     throw new Error(`GitHub network request failed: ${error.message}${cause ? ` (${cause})` : ""}`);
   }
   updateGithubRateBudgetFromHeaders(response, url);
+  const rateLimitInfo = await githubRateLimitInfo(response);
+  if (isGithubRateLimitedResponse(response, rateLimitInfo)) {
+    throw githubRateLimitErrorForResponse(rateLimitInfo);
+  }
   if (!response.ok) {
     const text = await response.text();
     throw new Error(githubResponseErrorMessage(response.status, text));
@@ -1119,6 +1149,7 @@ function isGithubAuthError(error) {
 }
 
 function isGithubRateLimitError(error) {
+  if (isGithubCooldownError(error)) return true;
   return /api rate limit exceeded|secondary rate limit|rate limit|too many requests|abuse detection|限流|频率限制/i.test(String(error?.message || ""));
 }
 
@@ -1126,27 +1157,27 @@ async function githubGraphqlRequest(query, variables, token) {
   if (!token) {
     throw new Error("GitHub token is required for GraphQL trend lookup");
   }
-  for (let attempt = 0; attempt <= 4; attempt += 1) {
-    const response = await githubRequest("https://api.github.com/graphql", token, {
-      method: "POST",
-      body: JSON.stringify({ query, variables }),
-      headers: {
-        "Content-Type": "application/json"
-      }
-    });
-    if (!response?.errors?.length) {
-      return response?.data || {};
+  const response = await githubRequest("https://api.github.com/graphql", token, {
+    method: "POST",
+    body: JSON.stringify({ query, variables }),
+    headers: {
+      "Content-Type": "application/json"
     }
-    const message = response.errors.map((error) => error.message).join("; ");
-    if (isGithubRateLimitError({ message }) && attempt < 4) {
-      const delay = secondaryRateLimitDelay(attempt);
-      setGithubCooldown(delay);
-      await sleep(delay);
-      continue;
-    }
-    throw new Error(message);
+  });
+  if (!response?.errors?.length) {
+    return response?.data || {};
   }
-  return {};
+  const rateLimited = response.errors.some((error) =>
+    /rate limit|RATE_LIMITED|secondary|too many requests|abuse/i.test(`${error?.type || ""} ${error?.message || ""}`)
+  );
+  if (rateLimited) {
+    const cooldown = activateGithubCooldown({
+      delayMs: GITHUB_SECONDARY_RATE_LIMIT_MIN_DELAY_MS,
+      reason: "secondary"
+    });
+    throw createGithubCooldownError(cooldown);
+  }
+  throw new Error(response.errors.map((error) => error.message).join("; "));
 }
 
 async function fetchJson(url, token) {
@@ -1197,6 +1228,7 @@ async function sampleRepositorySearchResults(token, query = "", limit = 8) {
 }
 
 function normalizeRepo(item, profile) {
+  const evidence = profileEvidence(profile);
   return {
     id: item.id,
     fullName: item.full_name,
@@ -1228,7 +1260,8 @@ function normalizeRepo(item, profile) {
     disabled: Boolean(item.disabled),
     fork: Boolean(item.fork),
     profileKey: profile.key,
-    profileLabel: profile.label
+    profileLabel: profile.label,
+    profileMatches: evidence ? [evidence] : []
   };
 }
 
@@ -1316,15 +1349,24 @@ function parseTrendingRepositories(html = "", period = "daily") {
 async function fetchTrendingHtml(period = "daily", token = "", options = {}) {
   const url = new URL("https://github.com/trending");
   url.searchParams.set("since", normalizeTrendingPeriod(period));
+  const target = url.toString();
+  // Trending is a plain HTML page but still counts against the account's
+  // request footprint, so it goes through the same gate, spacing and breaker.
+  await waitForGithubRequestWindow(target);
   const timeoutMs = Math.max(3000, Math.min(Number(options.timeoutMs || 12000), 30000));
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), timeoutMs);
 
   try {
-    const response = await fetch(url.toString(), {
+    const response = await fetch(target, {
       headers: htmlHeaders(token),
       signal: controller.signal
     });
+    updateGithubRateBudgetFromHeaders(response, target);
+    const rateLimitInfo = await githubRateLimitInfo(response);
+    if (isGithubRateLimitedResponse(response, rateLimitInfo)) {
+      throw githubRateLimitErrorForResponse(rateLimitInfo);
+    }
     if (!response.ok) {
       const text = await response.text();
       throw new Error(`GitHub Trending request failed ${response.status}: ${text.slice(0, 180)}`);
@@ -1476,13 +1518,14 @@ async function searchCandidateRepositories(options) {
   const errors = [];
   const usedProfiles = [];
   const profileCounts = new Map();
-  const totalSteps = profiles.length * pagesPerProfile;
+  const profileTotals = new Map();
+  const relaxations = [];
+  let totalSteps = profiles.length * pagesPerProfile;
   let completedSteps = 0;
 
-  for (const profile of profiles) {
-    const profileCap = candidateCapForProfile(maxRepos, profiles.length, profile);
-    usedProfiles.push(profile.key);
-    for (let page = 1; page <= pagesPerProfile; page += 1) {
+  async function searchProfileQuery(profile, query, pages, profileCap) {
+    let accepted = 0;
+    for (let page = 1; page <= pages; page += 1) {
       if (deduped.size >= maxRepos) {
         break;
       }
@@ -1491,7 +1534,7 @@ async function searchCandidateRepositories(options) {
       }
 
       const url = new URL("https://api.github.com/search/repositories");
-      url.searchParams.set("q", profile.q);
+      url.searchParams.set("q", query);
       url.searchParams.set("sort", "stars");
       url.searchParams.set("order", "desc");
       url.searchParams.set("per_page", "50");
@@ -1499,17 +1542,24 @@ async function searchCandidateRepositories(options) {
 
       try {
         const json = await fetchJson(url.toString(), token);
+        const reportedTotal = Number(json?.total_count || 0);
+        profileTotals.set(profile.key, Math.max(Number(profileTotals.get(profile.key) || 0), reportedTotal));
         for (const item of json.items || []) {
           const normalized = normalizeRepo(item, profile);
           if (!repositoryMatchesPlanProfile(normalized, profile)) {
             continue;
           }
-          if (!deduped.has(normalized.fullName.toLowerCase())) {
-            deduped.set(normalized.fullName.toLowerCase(), normalized);
+          accepted += 1;
+          const repositoryKey = normalized.fullName.toLowerCase();
+          if (!deduped.has(repositoryKey)) {
+            deduped.set(repositoryKey, normalized);
             profileCounts.set(profile.key, (profileCounts.get(profile.key) || 0) + 1);
             if ((profileCounts.get(profile.key) || 0) >= profileCap) {
               break;
             }
+          } else {
+            const previous = deduped.get(repositoryKey);
+            previous.profileMatches = mergeProfileMatches(previous.profileMatches, normalized.profileMatches);
           }
         }
       } catch (error) {
@@ -1535,13 +1585,57 @@ async function searchCandidateRepositories(options) {
         }
       }
     }
+    return accepted;
+  }
+
+  for (const profile of profiles) {
+    const profileCap = candidateCapForProfile(maxRepos, profiles.length, profile);
+    usedProfiles.push(profile.key);
+    const accepted = await searchProfileQuery(profile, profile.q, pagesPerProfile, profileCap);
+    if (deduped.size >= maxRepos) {
+      continue;
+    }
+    const originalTotalCount = Number(profileTotals.get(profile.key) || 0);
+    if (!shouldRelaxPlanProfile(profile, { accepted, totalCount: originalTotalCount, profileCap })) {
+      continue;
+    }
+    const relaxedQuery = relaxPlanQuery(profile.q);
+    if (!relaxedQuery || relaxedQuery === profile.q) {
+      continue;
+    }
+    // Niche domains get exactly one controlled second look per profile. Only
+    // stars/recency limiters are dropped; the query core, scope qualifiers and
+    // every anti-noise exclusion stay in place.
+    totalSteps += 1;
+    const relaxedAccepted = await searchProfileQuery(profile, relaxedQuery, 1, profileCap);
+    relaxations.push({
+      profile: profile.key,
+      query: profile.q,
+      executedQuery: relaxedQuery,
+      reportedTotalCount: originalTotalCount,
+      matchedBeforeRelaxation: accepted,
+      matchedAfterRelaxation: relaxedAccepted
+    });
   }
 
   return {
     repositories: Array.from(deduped.values()).slice(0, maxRepos),
     profiles: usedProfiles,
-    errors
+    errors,
+    relaxations
   };
+}
+
+function shouldRelaxPlanProfile(profile = {}, stats = {}) {
+  if (!profile.planGenerated) return false;
+  const query = String(profile.q || "");
+  if (!/\b(?:stars|pushed|created):/i.test(query)) return false;
+  if (relaxPlanQuery(query) === query) return false;
+  const accepted = Number(stats.accepted || 0);
+  const totalCount = Number(stats.totalCount || 0);
+  if (accepted <= 0) return true;
+  const minimumYield = Math.max(1, Math.min(3, Math.ceil(Number(stats.profileCap || 12) / 4)));
+  return totalCount > 0 && totalCount < 10 && accepted < minimumYield;
 }
 
 function candidateCapForProfile(maxRepos, profileCount, profile = {}) {
@@ -1883,18 +1977,25 @@ async function forkRepository(token, fullName) {
 }
 
 module.exports = {
+  activateGithubCooldown,
   applyMemoryToQueryProfiles,
   buildQueryProfiles,
   candidateCapForProfile,
+  clearGithubCooldown,
+  completePlanQuery,
+  createGithubCooldownError,
+  ensureGithubCooldownFresh,
   fetchTrendingRepositories,
   fetchJson,
   fetchRepositoryByFullName,
   forkRepository,
   getAuthenticatedUser,
+  githubCooldownSnapshot,
   githubRepositorySearchCount,
   githubRateLimitStatus,
   githubRequest,
   isGithubAuthError,
+  isGithubCooldownError,
   isGithubRateLimitError,
   normalizeGithubOrGroups,
   parseTrendingRepositories,
@@ -1902,8 +2003,11 @@ module.exports = {
   repositoryMatchesPlanProfile,
   listOwnRepositories,
   normalizeRepo,
+  restoreGithubCooldown,
   sampleRepositorySearchResults,
+  setGithubCooldownPersister,
   starRepository,
+  shouldRelaxPlanProfile,
   unstarRepository,
   searchCandidateRepositories
 };

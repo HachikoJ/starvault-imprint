@@ -1,6 +1,7 @@
 const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const path = require("node:path");
+const dns = require("node:dns").promises;
 const test = require("node:test");
 
 const { buildConfig } = require("../src/lib/config");
@@ -10,6 +11,7 @@ const {
   hostAllowed,
   originAllowed,
   privateIpAddress,
+  resolveSafeExternalUrl,
   securityHeaders,
   validateExternalUrl
 } = require("../src/lib/security");
@@ -59,6 +61,45 @@ test("provider targets require public HTTPS endpoints by default", () => {
   assert.equal(privateIpAddress("8.8.8.8"), false);
 });
 
+test("provider target checks cover encoded IPv4 and IPv6 private ranges", () => {
+  for (const address of [
+    "2130706433",
+    "0177.0.0.1",
+    "0x7f000001",
+    "::ffff:127.0.0.1",
+    "::ffff:7f00:1",
+    "0:0:0:0:0:ffff:7f00:1",
+    "::7f00:1",
+    "ff00::1",
+    "fe80::1",
+    "fd12:3456::1",
+    "::"
+  ]) {
+    assert.equal(privateIpAddress(address), true, address);
+  }
+  assert.equal(privateIpAddress("2001:4860:4860::8888"), false);
+});
+
+test("safe DNS resolution caches the same host and port and returns copies", async () => {
+  const originalLookup = dns.lookup;
+  let calls = 0;
+  dns.lookup = async () => {
+    calls += 1;
+    return [{ address: "8.8.8.8", family: 4 }];
+  };
+  try {
+    const first = await resolveSafeExternalUrl("https://cache-key-regression.example:9443");
+    first.addresses[0].address = "127.0.0.1";
+    const second = await resolveSafeExternalUrl("https://cache-key-regression.example:9443");
+    assert.equal(calls, 1);
+    assert.equal(second.addresses[0].address, "8.8.8.8");
+    await resolveSafeExternalUrl("https://cache-key-regression.example:9444");
+    assert.equal(calls, 2);
+  } finally {
+    dns.lookup = originalLookup;
+  }
+});
+
 test("non-loopback Node binding fails closed without an access token", () => {
   const previous = {
     HOST: process.env.HOST,
@@ -72,6 +113,29 @@ test("non-loopback Node binding fails closed without an access token", () => {
     assert.throws(() => buildConfig(), /AUTH_TOKEN is required/);
     process.env.AUTH_TOKEN = "strong-test-secret";
     assert.equal(buildConfig().authToken, "strong-test-secret");
+  } finally {
+    for (const [key, value] of Object.entries(previous)) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+  }
+});
+
+test("Node service redirects explicit legacy JSON paths to a sibling SQLite database", () => {
+  const previous = {
+    STORE_PATH: process.env.STORE_PATH,
+    ALLOW_LEGACY_JSON_STORE: process.env.ALLOW_LEGACY_JSON_STORE,
+    HOST: process.env.HOST,
+    AUTH_TOKEN: process.env.AUTH_TOKEN
+  };
+  process.env.HOST = "127.0.0.1";
+  process.env.AUTH_TOKEN = "";
+  process.env.STORE_PATH = "/tmp/starvault-custom-store.json";
+  delete process.env.ALLOW_LEGACY_JSON_STORE;
+  try {
+    assert.equal(buildConfig().storePath, "/tmp/starvault-custom-store.db");
+    process.env.ALLOW_LEGACY_JSON_STORE = "1";
+    assert.equal(buildConfig().storePath, "/tmp/starvault-custom-store.json");
   } finally {
     for (const [key, value] of Object.entries(previous)) {
       if (value === undefined) delete process.env[key];

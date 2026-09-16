@@ -2,6 +2,7 @@
 
 const fs = require("node:fs");
 const { buildQueryProfiles } = require("../src/lib/github");
+const { observationPlanDraftQualityIssues } = require("../src/lib/llm");
 
 const DEFAULT_BASE_URL = process.env.STARVAULT_AUDIT_BASE_URL || "http://127.0.0.1:4173";
 
@@ -108,6 +109,7 @@ const GENERIC_QUERY_CORES = new Set([
 
 function parseArgs(argv) {
   const args = {
+    offline: false,
     live: false,
     counts: false,
     baseUrl: DEFAULT_BASE_URL,
@@ -117,7 +119,8 @@ function parseArgs(argv) {
   };
   for (let index = 0; index < argv.length; index += 1) {
     const arg = argv[index];
-    if (arg === "--live") args.live = true;
+    if (arg === "--offline") args.offline = true;
+    else if (arg === "--live") args.live = true;
     else if (arg === "--counts") args.counts = true;
     else if (arg === "--base-url") args.baseUrl = argv[(index += 1)] || args.baseUrl;
     else if (arg === "--limit") args.limit = Number(argv[(index += 1)] || args.limit);
@@ -132,11 +135,13 @@ function printHelp() {
   console.log(`Observation plan quality audit
 
 Usage:
+  node scripts/observation-plan-quality-audit.js --offline
   node scripts/observation-plan-quality-audit.js --live [--limit 8]
   node scripts/observation-plan-quality-audit.js --live --case "FHIR 临床互操作"
   node scripts/observation-plan-quality-audit.js --live --cases-file ./my-audit-cases.json
 
 Options:
+  --offline       Run the repeatable domain-independent quality matrix without network calls.
   --live          Call the local /api/observation-plans/generate endpoint.
   --base-url URL Local StarVault server URL. Default: ${DEFAULT_BASE_URL}
   --limit N      Number of built-in cases to run when --case is omitted.
@@ -144,6 +149,92 @@ Options:
   --cases-file   Read an arbitrary-domain JSON case array instead of the built-in matrix.
 
 The script does not save or switch plans. The local server may retain durable task audit records in its configured store.`);
+}
+
+function offlineDraftForCase(testCase) {
+  const anchor = testCase.anchors[0];
+  const surfaces = [
+    "server",
+    "client",
+    "SDK API",
+    "plugin extension",
+    "parser converter",
+    "viewer editor",
+    "automation workflow",
+    "self-hosted dashboard",
+    "data integration",
+    "testing tooling"
+  ];
+  const keywords = Array.from(new Set([...testCase.anchors, ...surfaces.map((surface) => `${anchor} ${surface}`)])).slice(0, 18);
+  const customQueries = surfaces.map((surface, index) => ({
+    key: `offline-${index + 1}`,
+    label: `${anchor} ${surface}`,
+    labelZh: `${anchor} ${surface}`,
+    labelEn: `${anchor} ${surface}`,
+    query: `${anchor} ${surface} in:name,description,readme archived:false mirror:false`,
+    stars: 0
+  }));
+  const strategy = {
+    baseMode: "only",
+    keywords,
+    excludeTerms: [],
+    customQueries,
+    preferredLanguages: [],
+    preferredCategories: [],
+    preferredShapes: [],
+    minStars: 0,
+    notes: "离线质量矩阵样本"
+  };
+  return {
+    name: testCase.name,
+    nameEn: testCase.name,
+    coreKeyword: anchor,
+    detailedNeed: testCase.detailedNeed,
+    researchContext: {
+      githubActivity: { activityLevel: "medium", maxTotalCount: 900 },
+      domainModel: {
+        aliases: testCase.anchors,
+        formats: [],
+        standards: [],
+        software: [],
+        libraries: [],
+        workflows: [],
+        productSurfaces: surfaces
+      }
+    },
+    strategy,
+    searchLogic: strategy
+  };
+}
+
+function runOfflineAudit() {
+  const results = CASES.map((testCase) => {
+    const draft = offlineDraftForCase(testCase);
+    const issues = observationPlanDraftQualityIssues(draft, draft);
+    const analyzed = analyzePlan(testCase, { plan: draft });
+    return { name: testCase.name, issues, analyzed };
+  });
+  const adversarial = offlineDraftForCase(CASES[0]);
+  adversarial.searchLogic = {
+    ...adversarial.searchLogic,
+    customQueries: adversarial.searchLogic.customQueries.map((item, index) => index === 0
+      ? { ...item, query: "stock market dashboard in:name,description,readme archived:false mirror:false" }
+      : item),
+    excludeTerms: ["stocks"]
+  };
+  adversarial.strategy = adversarial.searchLogic;
+  const adversarialIssues = observationPlanDraftQualityIssues(adversarial, adversarial);
+  const failures = results.filter((item) => item.issues.length || item.analyzed.status === "FAIL");
+  const guards = adversarialIssues.some((issue) => /core anchor|negative terms|excludeTerms/i.test(issue));
+  console.log("# Offline Observation Plan Quality Matrix");
+  console.log(`Cases: ${results.length} · PASS: ${results.length - failures.length} · FAIL: ${failures.length}`);
+  results.forEach((item) => console.log(`- ${item.issues.length || item.analyzed.status === "FAIL" ? "FAIL" : "PASS"} ${item.name}`));
+  console.log(`- ${guards ? "PASS" : "FAIL"} adversarial unrelated query/exclusion guard`);
+  if (failures.length || !guards) {
+    failures.forEach((item) => console.log(`  ${item.name}: ${item.issues.join("; ") || item.analyzed.hardFailures.join("; ")}`));
+    if (!guards) console.log(`  adversarial: ${adversarialIssues.join("; ") || "guard did not fire"}`);
+    process.exitCode = 2;
+  }
 }
 
 function normalizeText(value = "") {
@@ -338,9 +429,17 @@ function printReport(results) {
 
 async function main() {
   const args = parseArgs(process.argv.slice(2));
-  if (args.help || !args.live) {
+  if (args.help) {
     printHelp();
-    if (!args.live) process.exitCode = 1;
+    return;
+  }
+  if (args.offline) {
+    runOfflineAudit();
+    return;
+  }
+  if (!args.live) {
+    printHelp();
+    process.exitCode = 1;
     return;
   }
 

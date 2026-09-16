@@ -201,12 +201,16 @@ function writeSqliteStore(filePath, store, options = {}) {
   const changedProjects = [];
   const changedPlans = [];
   const changedScans = [];
+  const dirtyProjectKeys = Array.isArray(options.dirtyProjectKeys) ? new Set(options.dirtyProjectKeys.map(String)) : null;
 
   for (const [key, project] of Object.entries(projects)) {
-    const signature = projectSignature(project);
     const previous = state.projectState.get(key);
+    const canTrustUnchangedReference = !force && dirtyProjectKeys && previous && !dirtyProjectKeys.has(key);
+    const signature = canTrustUnchangedReference ? previous.signature : projectSignature(project);
     nextProjectState.set(key, { ref: project, signature });
-    if (force || !previous || previous.signature !== signature) changedProjects.push([key, project, signature]);
+    if (force || !previous || (!canTrustUnchangedReference && previous.signature !== signature) || dirtyProjectKeys?.has(key)) {
+      changedProjects.push([key, project, signature]);
+    }
   }
   for (const [id, plan] of Object.entries(plans)) {
     const value = json(plan);
@@ -224,8 +228,9 @@ function writeSqliteStore(filePath, store, options = {}) {
   const deletedProjects = force ? [] : [...state.projectState.keys()].filter((key) => !nextProjectState.has(key));
   const deletedPlans = force ? [] : [...state.planHashes.keys()].filter((id) => !nextPlanHashes.has(id));
   const deletedScans = force ? [] : [...state.scanHashes.keys()].filter((id) => !nextScanHashes.has(id));
-  const nextLeaderboardSignature = leaderboardSignature(leaderboards);
-  const leaderboardsChanged = force || state.leaderboardsRef !== leaderboards || state.leaderboardsSignature !== nextLeaderboardSignature;
+  const skipLeaderboardCheck = options.leaderboardsChanged === false && !force;
+  const nextLeaderboardSignature = skipLeaderboardCheck ? state.leaderboardsSignature : leaderboardSignature(leaderboards);
+  const leaderboardsChanged = !skipLeaderboardCheck && (force || state.leaderboardsRef !== leaderboards || state.leaderboardsSignature !== nextLeaderboardSignature);
   const leaderboardsJson = leaderboardsChanged ? json(leaderboards) : state.leaderboardsHash;
   const upsertState = state.db.prepare(
     "INSERT INTO app_state(key, json, updated_at) VALUES (?, ?, ?) ON CONFLICT(key) DO UPDATE SET json = excluded.json, updated_at = excluded.updated_at"

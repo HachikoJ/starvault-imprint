@@ -1,6 +1,6 @@
 # 星仓印记验收清单
 
-更新日期：2026-07-10
+更新日期：2026-09-16
 使用方式：每次完成一个功能迭代后，按本清单做最小必要验收。
 
 状态口径：
@@ -11,7 +11,7 @@
 - `Fail`：当前状态明确不满足验收要求。
 - `N/A`：当前阶段不适用。
 
-本轮门禁基线：Git 初始提交 `bedb953`；Node 测试与语法检查由 `npm run ci` 执行；中英文 4 视口视觉矩阵由 `npm run visual:check` 执行；CI 使用 `npm run perf:storage:fixture` 运行不含用户数据的 6K 合成性能门禁，本机再用 `npm run perf:storage` 复验真实规模。真实 GitHub 和 AI Provider 仍按 `Verify` 管理，不把本地密钥放入 CI。
+本轮门禁基线：Git 初始提交 `bedb953`；Node 测试与语法检查由 `npm run ci` 执行；中英文 4 视口视觉矩阵由 `npm run visual:check` 执行；CI 使用 `npm run perf:storage:fixture` 运行不含用户数据的 6K 合成性能门禁，本机再用 `npm run perf:storage` 复验真实规模；密钥扫描由 `npm run audit:secrets` 覆盖工作树与全部 Git 提交。真实 GitHub 和 AI Provider 仍按 `Verify` 管理，不把本地密钥放入 CI。
 
 ## 1. 基础验证
 
@@ -22,9 +22,9 @@
 | A-003 | `.env`、本地数据和密钥文件不会被提交 | 检查 `.gitignore`、`git status --short` 和 Git 历史 | Pass - 已有 Git 基线；`.env`、`data/`、`output/` 等保持忽略，本轮提交前继续执行密钥扫描。 |
 | A-004 | API 响应不直接返回未请求展示的密钥明文 | 调用 `/api/settings`，未带 `reveal` 时 Key 为空且有 preview | Pass - `settingsResponse()` 默认隐藏 GitHub/Tavily/Exa/AI Key。 |
 | A-005 | 对外文档没有过时的功利化传播口径 | 使用旧口径词表扫描 README、PRD、Taxonomy、Risk 和 License 文档 | Pass - 对外主文档统一使用学习、理解、跟踪、实践启发和机会研判口径。 |
-| A-006 | Node 主存储不再依赖整包 JSON | 运行 SQLite 测试并检查 `data/starvault.db` 表结构 | Pass - SQLite WAL 按项目、方案、扫描和归属关系增量持久化；旧 JSON 只读迁移。 |
-| A-007 | Web IndexedDB 不再保存完整项目池与榜单整包 | 运行 IndexedDB/HTTP 集成测试 | Pass - IndexedDB v4 分对象仓库，Node 同步使用核心、项目分页和榜单分页。 |
-| A-008 | 扫描、AI 分析、方案生成刷新后可恢复且不跨方案写入 | 运行 `tests/durable-tasks.test.js` 和浏览器本地任务测试 | Pass - 任务持久化、重启重新排队、最多重试 3 次，并绑定创建时方案。 |
+| A-006 | Node 主存储不再依赖整包项目 JSON | 运行 SQLite 测试并检查 `data/starvault.db` 表结构 | Pass - SQLite WAL 按项目、方案、扫描和归属关系增量持久化；设置、任务等小体量核心状态保留为 `app_state` JSON；旧 JSON 只读迁移。 |
+| A-007 | Web IndexedDB 不再保存完整项目池与榜单整包 | 运行 IndexedDB/HTTP 集成测试 | Pass - IndexedDB v5 分对象仓库，项目、榜单和扫描临时结果记录级保存，Node 同步使用核心、项目分页和榜单分页。 |
+| A-008 | 扫描、AI 分析、方案生成刷新后可恢复且不跨方案写入 | 运行 `tests/durable-tasks.test.js` 和浏览器本地任务测试 | Pass - 任务持久化；浏览器扫描按 profile 恢复，其他外部请求从中断处重试；进程重启重新排队，最多重试 3 次，并绑定创建时方案。 |
 
 ## 2. 设置与集成
 
@@ -200,9 +200,11 @@
 - 项目没有 Git 版本基线，导致变更无法追踪和回滚。
 - 默认方案出现只属于其他方案的项目，或任务结果写入错误方案。
 - Web 同步退回完整项目池/榜单 JSON，或 SQLite 写入退回每次重写整库文件。
-- 长任务只显示刷新警告而没有持久化任务记录和恢复路径。
+- 长任务只显示刷新警告而没有持久化任务记录和恢复路径，或扫描 profile 检查点未能恢复。
 - 非本机 Node 服务在没有认证网关、TLS 和边缘防护时直接公开。
 - `npm run ci` 或 `npm run visual:check` 未通过。
+- 静态在线版把用户 Key、本地扫描结果或行为记录写入随站点发布的文件，或示例快照包含凭据字段。
+- 静态在线版在访客已有项目、方案、收藏、笔记或 Key 时覆盖其数据。
 
 ## 15. 建议验证顺序
 
@@ -213,8 +215,21 @@
 5. 启动 `npm run dev`，检查顶部布局和配置状态。
 6. 用有效和无效 GitHub Token 分别验证保存、测试、扫描阻断和完整扫描。
 7. 用真实 AI Key 验证模型拉取、连接测试、项目分析和方案生成。
-8. 使用陌生领域 cases 文件运行 `npm run audit:plans:live -- --cases-file <file>`。
+8. 先运行 `npm run audit:plans:offline`，再使用陌生领域 cases 文件运行 `npm run audit:plans:live -- --cases-file <file>`。
 9. 项目池执行搜索、标签、排序、分页、收藏、隐藏和导出。
 10. 打开详情执行 Star、Unstar、Fork、研判、AI 分析与更多数据检查。
 11. 查看榜单、结构看板、学习中枢和我的仓库，并切换英文复核。
 12. 公网部署时单独验收 TLS、认证网关、CDN/WAF、Secret Manager、审计和恢复演练。
+
+## 16. 静态在线体验（GitHub Pages）
+
+| ID | 验收项 | 检查方式 | 状态 |
+|---|---|---|---|
+| D-001 | 空浏览器首次打开即可看到示例方案、项目池、扫描记录和榜单 | 清空站点数据后打开静态版 | Pass - `tests/local-api.test.js` 覆盖空库首次装载：`demo-content` 方案、25 个真实公开仓库、1 条完成扫描和 1 份日榜归档。 |
+| D-002 | 刷新不会重复装载或覆盖已有数据 | 刷新页面；再在已有项目、方案、收藏、笔记或 Key 的浏览器打开 | Pass - 种子标记与阻断检查覆盖 secrets、projects、scans、tasks、leaderboards、plans、user-data、memory。 |
+| D-003 | 示例快照不含任何凭据字段 | 检查 `public/demo-snapshot.json` 与快照校验逻辑 | Pass - 快照 schema 校验会拒绝含凭据字段的文件，测试遍历全部键名比对凭据模式。 |
+| D-004 | 静态站可在无后端、无 Key 的情况下加载并导航 | `npm run check:static` | Pass - Chromium 直接访问静态服务器，无后端和 Key 时加载 25 个项目、方案、扫描与榜单；桌面和移动端均无 console、网络错误或水平溢出。 |
+| D-005 | Pages 子路径（`/<repo>/`）下资源与示例快照都能解析 | `npm run check:static` | Pass - 验收服务器使用 `/starvault-imprint/` 子路径，并逐项确认 HTML、运行时脚本、示例快照、OG 图和 favicon 返回 200。 |
+| D-006 | 静态版不承担账号、租户隔离与密钥托管 | 阅读 README、SECURITY 与页面说明 | Pass - 文档明确静态版无账号、无租户隔离，Key 只留在访客浏览器 IndexedDB。 |
+| D-007 | Git 历史与工作树都不含密钥或本地数据 | `npm run audit:secrets` | Pass - 同时扫描工作树与全部提交 patch，测试覆盖仅存在于历史的 Token、`data/`、`output/` 与本地快照。 |
+| D-008 | 真实 Pages 地址可访问且部署产物与本地验收一致 | 部署后打开 `https://hachikoj.github.io/starvault-imprint/` | Verify - 依赖仓库 Pages 设置、线上部署和真实域名复核。 |

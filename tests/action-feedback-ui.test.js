@@ -97,9 +97,30 @@ test("manual unfavorite of the last visible favorite clears filters", () => {
 });
 
 test("a first-run empty project pool uses scan guidance instead of filter recovery copy", () => {
-  assert.match(appSource, /const isNewProjectPool =\s*!hasActiveFilters\(\).*state\.projectPool\.total.*state\.summary\?\.lastScan/s);
+  assert.match(appSource, /const poolEmptyWithoutFilters =\s*!hasActiveFilters\(\) && Number\(state\.projectPool\.total \|\| 0\) === 0/);
+  assert.match(appSource, /const isNewProjectPool =\s*\n?\s*poolEmptyWithoutFilters &&\s*\n?\s*!state\.summary\?\.lastScan/);
   assert.match(appSource, /noProjectsYetHint: "配置 GitHub Token 后点击扫描/);
   assert.match(appSource, /noProjectsYetHint: "Configure a GitHub Token and scan/);
+});
+
+test("a plan that never scanned its own pool gets plan-specific empty copy", () => {
+  assert.match(appSource, /const planNeverScanned = poolEmptyWithoutFilters && Boolean\(state\.summary\) && state\.summary\.hasScan === false/);
+  assert.match(appSource, /planNeverScanned\s*\?\s*\{ title: "noPlanScanYet", hint: "noPlanScanYetHint" \}/);
+  assert.match(appSource, /noPlanScanYet: "该方案尚未扫描"/);
+  assert.match(appSource, /noPlanScanYet: "This plan has not been scanned"/);
+});
+
+test("saving a draft under an existing plan name reports the merge instead of a plain save", () => {
+  const save = functionBody("saveObservationPlan");
+
+  assert.match(save, /const previousPlans = Array\.isArray\(state\.observationPlans\?\.plans\) \? state\.observationPlans\.plans : \[\]/);
+  assert.match(
+    save,
+    /const adoptedSameNamePlan =\s*!plan\.id && Boolean\(result\.plan\?\.id\) && previousPlans\.some\(\(item\) => item\?\.id === result\.plan\.id\)/
+  );
+  assert.match(save, /t\("observationPlanMergedIntoSameName"\)\.replace\("\{name\}", result\.plan\.name \|\| ""\)/);
+  assert.match(appSource, /observationPlanMergedIntoSameName: "已并入同名方案/);
+  assert.match(appSource, /observationPlanMergedIntoSameName: "Merged into the existing plan/);
 });
 
 test("favorite and filter actions render local previews before network refresh", () => {
@@ -371,6 +392,54 @@ test("scan button uses local loading and completion feedback", () => {
   assert.match(css, /\.primary-button\.local-action-loading,\s*\.primary-button\.local-action-loading:disabled\s*{[^}]*cursor:\s*wait/s);
 });
 
+test("scan cooldown surfaces a live countdown instead of a failure retry", () => {
+  const statusRenderer = functionBody("renderScanStatus");
+  const buttonRenderer = functionBody("renderScanButtonState");
+  const notificationView = functionBody("taskNotificationView");
+  const card = functionBody("renderTaskNotificationCard");
+  const startTicker = functionBody("ensureCooldownTicker");
+  const countdownUpdater = functionBody("updateCooldownCountdownNodes");
+  const tick = functionBody("tickCooldownSurfaces");
+
+  assert.match(statusRenderer, /elements\.scanStatus\.classList\.add\("is-cooling"\)/);
+  assert.match(statusRenderer, /elements\.scanStatus\.dataset\.cooldownUntil = normalized\.cooldown\.until/);
+  assert.match(statusRenderer, /delete elements\.scanStatus\.dataset\.cooldownUntil/);
+  assert.match(statusRenderer, /cooldownCountdownLabel\(normalized\.cooldown \|\| \{\}\)/);
+  assert.match(statusRenderer, /ensureCooldownTicker\(\)/);
+
+  assert.match(buttonRenderer, /elements\.scanButton\.classList\.toggle\("local-action-cooling",\s*isCooling\)/);
+  assert.match(buttonRenderer, /elements\.scanButton\.disabled = isRunning \|\| isCooling/);
+  assert.match(buttonRenderer, /t\("scanCoolingButton"\)/);
+
+  // A cooling account keeps the durable notice and its countdown, and it must
+  // not offer the ordinary failure retry while GitHub has asked us to pause.
+  assert.match(notificationView, /t\("taskNotificationCooldownTitle"\)/);
+  assert.match(notificationView, /cooldown,\s*actions:\s*\[\]/);
+  assert.match(notificationView, /actions:\s*\["retry"\]/);
+  assert.match(card, /task-notification-cooldown/);
+  assert.match(card, /data-cooldown-until/);
+  assert.match(css, /#view-projects\s+#scan-status\.is-cooling\s*{/);
+
+  assert.match(startTicker, /setInterval\(tickCooldownSurfaces,\s*COOLDOWN_TICK_MS\)/);
+  assert.match(tick, /updateCooldownCountdownNodes\(\)/);
+  assert.match(countdownUpdater, /node\.textContent = cooldownCountdownLabel\(cooldown\)/);
+});
+
+test("runScan never reports a cooling account as a fresh running scan", () => {
+  const runScan = functionBody("runScan");
+  const switcher = functionBody("switchObservationPlan");
+
+  assert.match(runScan, /const knownCooldown = activeCooldown\(state\.scanProgress\)/);
+  assert.match(runScan, /return \{ status: "cooling", cooldown: knownCooldown \}/);
+  assert.ok(
+    runScan.indexOf("knownCooldown") < runScan.indexOf('status: "running"'),
+    "the cooldown gate has to run before the optimistic running state"
+  );
+  assert.match(switcher, /scanResult = await runScan\(\{ source: "plan-switch" \}\)/);
+  assert.match(switcher, /scanResult\?\.status === "cooling"/);
+  assert.match(switcher, /showObservationPlanInlineStatus\("saved", t\("observationPlanSwitchCooldown"\)\)/);
+});
+
 test("scan loading animations keep spinner DOM stable during progress polling", () => {
   const button = functionBody("renderScanButtonState");
   const status = functionBody("renderScanStatus");
@@ -502,6 +571,11 @@ test("provider setup actions use button-local loading and completion feedback", 
   assert.match(refresh, /withProviderActionFeedback\(providerId,\s*"refresh-provider-catalog",\s*"actionCompleted"/);
   assert.match(models, /withProviderActionFeedback\(providerId,\s*"fetch-provider-models",\s*"modelsLoaded"/);
   assert.match(tester, /withProviderActionFeedback\(providerId,\s*"test-provider",\s*"providerReady"/);
+  for (const action of [refresh, models, tester]) {
+    const saveIndex = action.indexOf("await saveSettings({ silent: true });");
+    const feedbackIndex = action.indexOf("return withProviderActionFeedback(");
+    assert.equal(saveIndex !== -1 && saveIndex < feedbackIndex, true);
+  }
   assert.doesNotMatch(refresh, /showSettingsInlineStatus\("saved",\s*t\("saved"\)\)/);
   assert.doesNotMatch(models, /showSettingsInlineStatus\("saved",\s*t\("modelsLoaded"\)\)/);
   assert.doesNotMatch(tester, /showSettingsInlineStatus\("saved",\s*t\("providerReady"\)\)/);

@@ -137,10 +137,62 @@ function clientIp(req, trustProxy = false) {
   return (req.socket && req.socket.remoteAddress) || "unknown";
 }
 
+function parseIpv4Number(value) {
+  const raw = String(value || "").trim().toLowerCase();
+  if (!raw) return null;
+  if (net.isIPv4(raw)) return raw.split(".").map(Number);
+  const parsePart = (part, radix = 10) => {
+    if (!part || !/^(?:0x[0-9a-f]+|\d+)$/.test(part)) return null;
+    const base = /^0x/.test(part) ? 16 : (/^0[0-7]+$/.test(part) && part.length > 1 ? 8 : radix);
+    const parsed = Number.parseInt(part.replace(/^0x/, ""), base);
+    return Number.isFinite(parsed) ? parsed : null;
+  };
+  if (/^(?:0x[0-9a-f]+|\d+)$/.test(raw)) {
+    const number = parsePart(raw);
+    if (number !== null && number >= 0 && number <= 0xffffffff) {
+      return [number >>> 24, (number >>> 16) & 255, (number >>> 8) & 255, number & 255];
+    }
+  }
+  const parts = raw.split(".");
+  if (parts.length < 1 || parts.length > 4) return null;
+  const values = parts.map((part) => parsePart(part));
+  if (values.some((part) => part === null)) return null;
+  const limits = [0xffffffff, 0xffffff, 0xffff, 0xff];
+  const lastLimit = limits[values.length - 1];
+  if (values.at(-1) > lastLimit || values.slice(0, -1).some((part) => part > 255)) return null;
+  let number = values.at(-1);
+  for (let index = 0; index < values.length - 1; index += 1) {
+    number += values[index] * 2 ** (8 * (3 - index));
+  }
+  return [number >>> 24, (number >>> 16) & 255, (number >>> 8) & 255, number & 255];
+}
+
+function expandIpv6(value) {
+  let raw = String(value || "").toLowerCase().split("%")[0].replace(/^\[|\]$/g, "");
+  if (!net.isIPv6(raw)) return null;
+  if (raw.includes(".")) {
+    const separator = raw.lastIndexOf(":");
+    const ipv4 = parseIpv4Number(raw.slice(separator + 1));
+    if (!ipv4) return null;
+    const first = ((ipv4[0] << 8) | ipv4[1]).toString(16);
+    const second = ((ipv4[2] << 8) | ipv4[3]).toString(16);
+    raw = `${raw.slice(0, separator)}:${first}:${second}`;
+  }
+  const halves = raw.split("::");
+  if (halves.length > 2) return null;
+  const left = halves[0] ? halves[0].split(":").filter(Boolean) : [];
+  const right = halves.length === 2 && halves[1] ? halves[1].split(":").filter(Boolean) : [];
+  if ([...left, ...right].some((part) => !/^[0-9a-f]{1,4}$/.test(part))) return null;
+  const missing = halves.length === 2 ? 8 - left.length - right.length : 0;
+  if (missing < 0 || (halves.length === 1 && left.length !== 8)) return null;
+  return [...left, ...Array.from({ length: missing }, () => "0"), ...right].map((part) => Number.parseInt(part, 16));
+}
+
 function privateIpAddress(address = "") {
-  const value = String(address || "").toLowerCase().split("%")[0];
-  if (net.isIPv4(value)) {
-    const [a, b] = value.split(".").map(Number);
+  const value = String(address || "").toLowerCase().split("%")[0].replace(/^\[|\]$/g, "");
+  const ipv4 = parseIpv4Number(value);
+  if (ipv4) {
+    const [a, b] = ipv4;
     return (
       a === 0 ||
       a === 10 ||
@@ -148,14 +200,26 @@ function privateIpAddress(address = "") {
       (a === 100 && b >= 64 && b <= 127) ||
       (a === 169 && b === 254) ||
       (a === 172 && b >= 16 && b <= 31) ||
-      (a === 192 && b === 168) ||
+      (a === 192 && (b === 168 || b === 18 || b === 19)) ||
       a >= 224
     );
   }
-  if (net.isIPv6(value)) {
-    return value === "::" || value === "::1" || value.startsWith("fc") || value.startsWith("fd") || value.startsWith("fe8") || value.startsWith("fe9") || value.startsWith("fea") || value.startsWith("feb");
+
+  const words = expandIpv6(value);
+  if (!words) return false;
+  const isIpv4Mapped = words.slice(0, 5).every((word) => word === 0) && words[5] === 0xffff;
+  const isIpv4Compatible = words.slice(0, 6).every((word) => word === 0);
+  if (isIpv4Mapped || (isIpv4Compatible && (words[6] !== 0 || words[7] !== 0))) {
+    const mapped = `${words[6] >>> 8}.${words[6] & 255}.${words[7] >>> 8}.${words[7] & 255}`;
+    return privateIpAddress(mapped);
   }
-  return false;
+  const first = words[0];
+  const isUnspecified = words.every((word) => word === 0);
+  const isLoopback = words.slice(0, 7).every((word) => word === 0) && words[7] === 1;
+  const isUniqueLocal = (first & 0xfe00) === 0xfc00;
+  const isLinkLocal = (first & 0xffc0) === 0xfe80;
+  const isMulticast = (first & 0xff00) === 0xff00;
+  return isUnspecified || isLoopback || isUniqueLocal || isLinkLocal || isMulticast;
 }
 
 function validateExternalUrl(value, options = {}) {
@@ -178,17 +242,36 @@ function validateExternalUrl(value, options = {}) {
 
 const safeHostCache = new Map();
 
-async function assertSafeExternalUrl(value, options = {}) {
+function safeHostCacheKey(url) {
+  return `${url.hostname.toLowerCase()}:${url.port || 443}`;
+}
+
+async function resolveSafeExternalUrl(value, options = {}) {
   const url = validateExternalUrl(value, options);
-  if (options.allowPrivate) return url;
-  const cached = safeHostCache.get(url.hostname);
-  if (cached && cached.expiresAt > Date.now()) return url;
+  if (options.allowPrivate) return { url, addresses: [] };
+  const cacheKey = safeHostCacheKey(url);
+  const cached = safeHostCache.get(cacheKey);
+  if (cached && cached.expiresAt > Date.now()) {
+    return { url, addresses: cached.addresses.map((entry) => ({ ...entry })) };
+  }
   const addresses = await dns.lookup(url.hostname, { all: true, verbatim: true });
-  if (!addresses.length || addresses.some((entry) => privateIpAddress(entry.address))) {
+  if (!addresses.length || addresses.some((entry) => privateIpAddress(entry?.address || entry))) {
     throw new Error("Provider base URL resolves to a private or unavailable network address");
   }
-  safeHostCache.set(url.hostname, { expiresAt: Date.now() + 5 * 60_000 });
-  return url;
+  const normalizedAddresses = addresses.map((entry) => {
+    const address = typeof entry === "string" ? entry : entry?.address;
+    return { address: String(address || ""), family: Number(entry?.family || net.isIP(address || "")) };
+  });
+  if (normalizedAddresses.some((entry) => !entry.address || !entry.family)) {
+    throw new Error("Provider base URL resolves to an invalid network address");
+  }
+  safeHostCache.set(cacheKey, { expiresAt: Date.now() + 5 * 60_000, addresses: normalizedAddresses });
+  return { url, addresses: normalizedAddresses.map((entry) => ({ ...entry })) };
+}
+
+async function assertSafeExternalUrl(value, options = {}) {
+  await resolveSafeExternalUrl(value, options);
+  return validateExternalUrl(value, options);
 }
 
 function normalizeHost(host = "") {
@@ -373,6 +456,7 @@ module.exports = {
   clientIp,
   requestOrigin,
   validateExternalUrl,
+  resolveSafeExternalUrl,
   assertSafeExternalUrl,
   privateIpAddress,
   hostAllowed,

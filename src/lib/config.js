@@ -54,6 +54,16 @@ function asBoolean(value, fallback = false) {
   return ["1", "true", "yes", "on"].includes(String(value).toLowerCase());
 }
 
+function resolveStorePath(rawPath, env = {}) {
+  const requested = String(rawPath || "").trim();
+  if (!requested) return path.join(process.cwd(), "data", "starvault.db");
+  const isLegacyJson = path.extname(requested).toLowerCase() === ".json";
+  if (isLegacyJson && !asBoolean(env.ALLOW_LEGACY_JSON_STORE, false)) {
+    return `${requested.slice(0, -path.extname(requested).length)}.db`;
+  }
+  return requested;
+}
+
 function buildConfig() {
   const env = getEnv();
   const systemTimeZone = Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC";
@@ -90,7 +100,7 @@ function buildConfig() {
     githubTrendingMaxRepos: Math.max(0, Math.min(120, asNumber(env.GITHUB_TRENDING_MAX_REPOS, 60))),
     githubTrendingPerPeriod: Math.max(5, Math.min(50, asNumber(env.GITHUB_TRENDING_PER_PERIOD, 25))),
     runScanOnBoot: asBoolean(env.RUN_SCAN_ON_BOOT, false),
-    storePath: env.STORE_PATH || path.join(process.cwd(), "data", "starvault.db"),
+    storePath: resolveStorePath(env.STORE_PATH || path.join(process.cwd(), "data", "starvault.db"), env),
     publicDir: path.join(process.cwd(), "public")
   };
 }

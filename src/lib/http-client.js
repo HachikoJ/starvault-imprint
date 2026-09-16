@@ -1,6 +1,10 @@
 // Shared HTTP client: timeout, retry with exponential backoff + jitter, and
-// Retry-After handling. Wraps global fetch; preserves the Response API so each
-// lib keeps its own response-parsing logic.
+// Retry-After handling. Provider calls can opt into a pinned HTTPS transport so
+// DNS validation and the actual socket connection use the same public address.
+
+const https = require("node:https");
+const net = require("node:net");
+const { resolveSafeExternalUrl } = require("./security");
 
 const DEFAULT_TIMEOUT_MS = 20_000;
 const DEFAULT_RETRIES = 2;
@@ -33,6 +37,12 @@ function jitter() {
   return 0.5 + Math.random(); // 0.5..1.5
 }
 
+function isAbortError(error) {
+  const name = String(error?.name || "");
+  const code = String(error?.code || "");
+  return name === "AbortError" || code === "ABORT_ERR" || code === "ERR_ABORTED";
+}
+
 // Parse a Retry-After header (seconds or HTTP-date). Returns ms, or null if absent/invalid.
 function parseRetryAfter(value, now = Date.now()) {
   if (!value) return null;
@@ -49,10 +59,9 @@ function parseRetryAfter(value, now = Date.now()) {
 
 function defaultShouldRetry(response, error) {
   if (error) {
-    // Retry network errors / timeouts. Caller-aborted requests won't reach here
-    // because they reject and we don't catch AbortError specially — callers that
-    // pass their own signal are responsible for not enabling retries on it.
-    return true;
+    // A caller cancelling a request is an explicit control-flow decision, not a
+    // transient network failure. Internal timeout errors remain retryable.
+    return !isAbortError(error);
   }
   if (!response) return false;
   if (response.status === 408 || response.status === 429) return true;
@@ -78,6 +87,119 @@ function mergeSignal(userSignal, internalSignal) {
   internalSignal.addEventListener("abort", () => onAbort(internalSignal.reason), { once: true });
   userSignal.addEventListener("abort", () => onAbort(userSignal.reason), { once: true });
   return controller.signal;
+}
+
+function headersToObject(headers) {
+  if (!headers) return {};
+  if (typeof headers[Symbol.iterator] === "function") return Object.fromEntries(headers);
+  return { ...headers };
+}
+
+function normalizePinnedAddresses(addresses) {
+  if (!Array.isArray(addresses)) return [];
+  return addresses
+    .map((entry) => {
+      const address = typeof entry === "string" ? entry : entry?.address;
+      const family = Number(typeof entry === "string" ? net.isIP(entry) : entry?.family || net.isIP(address || ""));
+      return { address: String(address || ""), family };
+    })
+    .filter((entry) => entry.address && [4, 6].includes(entry.family) && net.isIP(entry.address) === entry.family);
+}
+
+function pinnedLookupResult(addresses, lookupOptions = {}) {
+  const compatible = addresses.filter((entry) => !lookupOptions?.family || entry.family === lookupOptions.family);
+  if (!compatible.length) return null;
+  return lookupOptions?.all ? compatible.map((entry) => ({ ...entry })) : compatible[0];
+}
+
+async function fetchPinnedHttps(urlValue, init = {}, policy = {}) {
+  const resolved = await resolveSafeExternalUrl(urlValue, policy);
+  if (!resolved.addresses.length) return fetch(urlValue, { ...init, redirect: "manual" });
+  const url = resolved.url;
+  const addresses = normalizePinnedAddresses(resolved.addresses);
+  if (!addresses.length) {
+    throw new Error("Provider hostname did not resolve to a valid IP address");
+  }
+  const headers = headersToObject(init.headers);
+  if (!Object.keys(headers).some((key) => key.toLowerCase() === "accept-encoding")) headers["accept-encoding"] = "identity";
+  const body = init.body === undefined || init.body === null ? null : init.body;
+  const maxResponseBytes = Math.max(64 * 1024, Number(policy.maxResponseBytes || 16 * 1024 * 1024));
+
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    let request;
+    const finish = (error, response) => {
+      if (settled) return;
+      settled = true;
+      if (error) reject(error);
+      else resolve(response);
+    };
+    const signal = init.signal;
+    const onAbort = () => {
+      const reason = signal?.reason instanceof Error ? signal.reason : new Error("Request aborted");
+      request?.destroy(reason);
+      finish(reason);
+    };
+    if (signal?.aborted) {
+      onAbort();
+      return;
+    }
+
+    const hostname = String(url.hostname || "").replace(/^\[|\]$/g, "");
+    const requestedHost = url.host;
+    request = https.request(
+      {
+        protocol: "https:",
+        hostname,
+        port: url.port || 443,
+        path: `${url.pathname || "/"}${url.search || ""}`,
+        method: String(init.method || "GET").toUpperCase(),
+        headers: { ...headers, Host: headers.Host || headers.host || requestedHost },
+        servername: hostname,
+        rejectUnauthorized: true,
+        lookup: (_host, lookupOptions, callback) => {
+          const result = pinnedLookupResult(addresses, lookupOptions);
+          if (!result) {
+            callback(new Error("Provider hostname did not resolve to a compatible IP address"));
+            return;
+          }
+          if (lookupOptions?.all) {
+            callback(null, result);
+            return;
+          }
+          callback(null, result.address, result.family);
+        }
+      },
+      (response) => {
+        const chunks = [];
+        let bytesRead = 0;
+        response.on("data", (chunk) => {
+          bytesRead += chunk.length;
+          if (bytesRead > maxResponseBytes) {
+            request.destroy(new Error("Provider response is too large"));
+            return;
+          }
+          chunks.push(chunk);
+        });
+        response.on("end", () => {
+          const payload = Buffer.concat(chunks);
+          const bodyValue = payload.length ? payload : null;
+          finish(null, new Response(bodyValue, {
+            status: response.statusCode || 502,
+            statusText: response.statusMessage || "",
+            headers: response.headers
+          }));
+        });
+        response.on("error", finish);
+      }
+    );
+    request.once("error", finish);
+    request.setTimeout(Number(policy.timeoutMs || DEFAULT_TIMEOUT_MS), () => request.destroy(new Error("Request timed out")));
+    if (signal) signal.addEventListener("abort", onAbort, { once: true });
+    request.once("close", () => signal?.removeEventListener?.("abort", onAbort));
+    if (body !== null) request.write(typeof body === "string" || Buffer.isBuffer(body) ? body : Buffer.from(body));
+    request.end();
+  });
 }
 
 /**
@@ -108,7 +230,10 @@ async function fetchWithRetries(url, init = {}, opts = {}) {
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(new Error("Request timed out")), timeoutMs);
     try {
-      const response = await fetch(url, { ...init, signal: mergeSignal(init.signal, controller.signal) });
+      const requestInit = { ...init, signal: mergeSignal(init.signal, controller.signal) };
+      const response = opts.externalUrlPolicy
+        ? await fetchPinnedHttps(url, requestInit, { ...opts.externalUrlPolicy, timeoutMs })
+        : await fetch(url, requestInit);
       clearTimeout(timer);
       if (attempt < retries && (await shouldRetry(response, null, attempt))) {
         const delay = await retryDelay(response, null, attempt, baseDelayMs, maxDelayMs);
@@ -119,7 +244,10 @@ async function fetchWithRetries(url, init = {}, opts = {}) {
       return response;
     } catch (error) {
       clearTimeout(timer);
-      if (attempt < retries && (await shouldRetry(null, error, attempt))) {
+      // The merged signal can preserve a caller's arbitrary abort reason (which
+      // is not necessarily named AbortError), so check the original signal too.
+      const callerAborted = Boolean(init.signal?.aborted);
+      if (!callerAborted && attempt < retries && (await shouldRetry(null, error, attempt))) {
         const delay = await retryDelay(null, error, attempt, baseDelayMs, maxDelayMs);
         await sleep(delay);
         attempt += 1;
@@ -133,7 +261,11 @@ async function fetchWithRetries(url, init = {}, opts = {}) {
 module.exports = {
   fetchWithRetries,
   parseRetryAfter,
+  isAbortError,
   defaultShouldRetry,
   defaultRetryDelay,
-  mapWithConcurrency
+  mapWithConcurrency,
+  fetchPinnedHttps,
+  normalizePinnedAddresses,
+  pinnedLookupResult
 };

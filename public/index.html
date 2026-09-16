@@ -3,17 +3,37 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <meta name="robots" content="noindex,nofollow,noarchive,nosnippet,noimageindex" />
-    <title>星仓印记</title>
-    <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
-    <link rel="stylesheet" href="/styles.css" />
+    <title>星仓印记 · 从 GitHub 发现值得学习与跟踪的项目</title>
+    <meta
+      name="description"
+      content="星仓印记按观察方案检索、研判并持续跟踪 GitHub 上值得学习与落地的开源项目。在线体验为纯浏览器本地模式，示例数据开箱可看，填入的密钥只保存在本机浏览器。"
+    />
+    <meta name="theme-color" content="#0f1117" />
+    <link rel="canonical" href="https://hachikoj.github.io/starvault-imprint/" />
+    <meta property="og:type" content="website" />
+    <meta property="og:url" content="https://hachikoj.github.io/starvault-imprint/" />
+    <meta property="og:site_name" content="星仓印记 StarVault Imprint" />
+    <meta property="og:title" content="星仓印记 · 从 GitHub 发现值得学习与跟踪的项目" />
+    <meta
+      property="og:description"
+      content="按观察方案检索、研判并持续跟踪 GitHub 项目。在线体验为纯浏览器本地模式，示例数据开箱可看，密钥只存本机。"
+    />
+    <meta property="og:image" content="https://hachikoj.github.io/starvault-imprint/og-cover.png" />
+    <meta property="og:image:width" content="1200" />
+    <meta property="og:image:height" content="630" />
+    <meta name="twitter:card" content="summary_large_image" />
+    <meta name="twitter:title" content="星仓印记 · 从 GitHub 发现值得学习与跟踪的项目" />
+    <meta name="twitter:description" content="按观察方案检索、研判并持续跟踪 GitHub 项目。在线体验为纯浏览器本地模式。" />
+    <meta name="twitter:image" content="https://hachikoj.github.io/starvault-imprint/og-cover.png" />
+    <link rel="icon" href="favicon.svg" type="image/svg+xml" />
+    <link rel="stylesheet" href="styles.css" />
   </head>
   <body>
     <div class="app-shell">
       <aside class="sidebar" aria-label="Workspace navigation">
         <a class="brand-block" href="#projects" data-action="go-home" data-i18n-aria-label="homeLinkLabel" aria-label="返回首页">
           <div class="brand-mark" aria-hidden="true">
-            <img src="/brand-mark.svg" alt="" />
+              <img src="brand-mark.svg" alt="" />
           </div>
           <div>
             <h1 data-i18n="brand">星仓印记</h1>
@@ -463,6 +483,7 @@
                           <button class="ghost-button" type="button" data-action="export-portable-data" data-i18n="exportPortableData">导出配置</button>
                           <button class="ghost-button" type="button" data-action="import-portable-data" data-i18n="importPortableData">导入配置</button>
                         </div>
+                        <small id="local-backup-status" class="field-hint local-backup-status" hidden></small>
                       </section>
                     </div>
                     <section class="observation-plan-module observation-plan-generate-module">
@@ -553,6 +574,18 @@
       </main>
     </div>
 
+    <div id="observation-plan-confirm-dialog"></div>
+
+    <div
+      id="task-notifications"
+      class="task-notifications"
+      role="region"
+      aria-label="任务提醒"
+      data-i18n-aria-label="taskNotificationsLabel"
+      aria-live="polite"
+      hidden
+    ></div>
+
     <div class="guide-tour" id="guide-tour" hidden aria-hidden="true">
       <div class="guide-tour-mask" data-guide-tour-mask="top" aria-hidden="true"></div>
       <div class="guide-tour-mask" data-guide-tour-mask="right" aria-hidden="true"></div>
@@ -575,6 +608,7 @@
       </section>
     </div>
 
-    <script src="/bootstrap.js" defer></script>
+    <script src="runtime-config.js" defer></script>
+    <script src="bootstrap.js" defer></script>
   </body>
 </html>

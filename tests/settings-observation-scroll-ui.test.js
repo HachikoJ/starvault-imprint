@@ -146,7 +146,8 @@ test("observation plan draft actions preserve inputs until save", () => {
   assert.doesNotMatch(generator, /recordLatestRequirement/);
   assert.match(generator, /const resultRequirements = Array\.isArray\(result\.plan\?\.requirements\) \? result\.plan\.requirements : \[\]/);
   assert.match(generator, /const draftRequirements = resultRequirements\.length \? resultRequirements : \[\]/);
-  assert.match(generator, /id:\s*editingPlanId \|\| result\.plan\?\.id/);
+  assert.match(generator, /id:\s*editingPlanId,/);
+  assert.doesNotMatch(generator, /id:\s*editingPlanId \|\| result\.plan\?\.id/);
   assert.match(generator, /requirements:\s*draftRequirements/);
   assert.doesNotMatch(generator, /requirements:\s*refreshedPlan\.requirements \|\| currentPlan\?\.requirements \|\| \[\]/);
   assert.match(collector, /const ideaRequirements = state\.observationPlanEditMode === "edit" \? observationPlanRequirementDraftsFromText\(idea\) : \[\]/);
@@ -160,7 +161,10 @@ test("observation plan draft actions preserve inputs until save", () => {
   assert.match(outsideClick, /clearObservationPlanFormValues\(\)/);
   assert.match(outsideClick, /renderObservationPlans\(\)/);
   assert.match(appSource, /collapseObservationPlanEditOnOutsideClick\(event\)/);
-  assert.match(saver, /showObservationPlanInlineStatus\("saved",\s*t\("observationPlanSavedInline"\),\s*\{\s*clearInputs:\s*true\s*\}\)/);
+  assert.match(
+    saver,
+    /showObservationPlanInlineStatus\(\s*"saved",\s*adoptedSameNamePlan\s*\?\s*t\("observationPlanMergedIntoSameName"\)\.replace\("\{name\}",\s*result\.plan\.name \|\| ""\)\s*:\s*t\("observationPlanSavedInline"\),\s*\{\s*clearInputs:\s*true\s*\}\s*\)/
+  );
   assert.match(saver, /const previousActive = state\.observationPlans\?\.active \|\| null/);
   assert.match(saver, /active:\s*previousActive \|\| state\.observationPlans\?\.active/);
   assert.match(saver, /state\.observationPlanPreviewId = result\.plan\.id/);
@@ -177,6 +181,30 @@ test("observation plan draft actions preserve inputs until save", () => {
   assert.match(appSource, /state\.observationPlanPreviewId = elements\.observationPlanSelect\?\.value \|\| ""/);
   assert.match(appSource, /function clearObservationPlanFormValues\(\)/);
   assert.match(status, /if\s*\(options\.clearInputs\)\s*{\s*clearObservationPlanFormValues\(\);/);
+});
+
+test("switching an observation plan requires a prominent blocking confirmation", () => {
+  const renderer = functionBody("renderObservationPlanPendingConfirm");
+  const queue = functionBody("queueObservationPlanSwitchConfirm");
+  const confirmer = functionBody("confirmObservationPlanPendingAction");
+  const switcher = functionBody("switchObservationPlan");
+  const revealer = functionBody("revealObservationPlanConfirmStart");
+
+  assert.match(renderer, /class="observation-plan-confirm-layer"/);
+  assert.match(renderer, /role="alertdialog" aria-modal="true"/);
+  assert.match(renderer, /observationPlanSwitchConfirmKicker/);
+  assert.match(renderer, /observationPlanSwitchConfirmTitle/);
+  assert.match(renderer, /data-action="cancel-observation-plan-confirm"/);
+  assert.match(renderer, /data-action="confirm-observation-plan-action"/);
+  assert.match(queue, /state\.observationPlanPendingConfirm = \{[\s\S]*type:\s*"switch"[\s\S]*message:\s*t\("observationPlanSwitchConfirm"\)/);
+  assert.doesNotMatch(queue, /api\(/);
+  assert.match(confirmer, /switchObservationPlan\(pending\.planId,\s*\{\s*confirmed:\s*true\s*\}\)/);
+  assert.match(switcher, /if\s*\(!options\.silent && !options\.confirmed\)\s*\{\s*queueObservationPlanSwitchConfirm\(id\);\s*return;\s*\}/);
+  assert.match(revealer, /confirmButton\?\.focus\?\.\(\{\s*preventScroll:\s*true\s*\}\)/);
+  assert.match(appSource, /observationPlanSwitchConfirm:\s*"当前仅选中了「\{name\}」，方案尚未切换/);
+  assert.match(cssSource, /\.observation-plan-confirm-layer\s*{[^}]*position:\s*fixed[^}]*z-index:\s*1100/s);
+  assert.match(cssSource, /\.observation-plan-confirm-message\s*{[^}]*font-weight:\s*800/s);
+  assert.match(cssSource, /\.observation-plan-confirm-actions\s+\.observation-plan-confirm-button\s*{[^}]*min-block-size:\s*42px/s);
 });
 
 test("observation plan form is grouped into selection generation and transfer modules", () => {

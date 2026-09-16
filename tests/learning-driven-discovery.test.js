@@ -122,11 +122,11 @@ test("custom-plan learning changes in-domain profile order and candidate budget"
   for (let index = 0; index < 10; index += 1) {
     storage.recordMemoryEvent("acme/fhir-server", "select_project");
   }
-  storage.setWatch("acme/smart-app", true);
+  storage.recordMemoryEvent("acme/smart-app", "favorite", { observationPlanId: plan.id });
 
   const memory = storage.getMemory();
   const learnedProfiles = applyMemoryToQueryProfiles(profiles, memory);
-  assert.ok(memory.discoveryProfiles[profiles[1].key] > memory.discoveryProfiles[profiles[0].key]);
+  assert.ok((memory.discoveryProfiles[profiles[1].key] || 0) > (memory.discoveryProfiles[profiles[0].key] || 0));
   assert.equal(learnedProfiles[0].key, profiles[1].key);
   assert.ok(learnedProfiles[0].profileCapMultiplier > learnedProfiles.find((profile) => profile.key === profiles[0].key).profileCapMultiplier);
   assert.equal(learnedProfiles.some((profile) => profile.memoryGenerated), false);
@@ -216,7 +216,7 @@ test("project pool default ranking uses learned preferences", () => {
   assert.equal(personalized[0].fullName, "acme/design-board");
 });
 
-test("passive project views stay below explicit preference actions", () => {
+test("passive project views do not create preference signals", () => {
   const storage = tempStore();
   const now = new Date().toISOString();
   storage.upsertProjects(
@@ -274,13 +274,89 @@ test("passive project views stay below explicit preference actions", () => {
   const viewEvent = memory.events.find((event) => event.fullName === "acme/design-board");
   const favoriteEvent = memory.events.find((event) => event.fullName === "acme/finance-terminal");
 
-  assert.equal(viewEvent.weight, 0.03);
+  assert.equal(viewEvent.weight, 0);
   assert.equal(favoriteEvent.weight, 2.6);
   assert.notEqual(viewEvent.category, favoriteEvent.category);
+  assert.equal(memory.preferences.categories[viewEvent.category] || 0, 0);
+  assert.equal(memory.discoveryProfiles[viewEvent.profileKey] || 0, 0);
   assert.ok(
-    memory.preferences.categories[favoriteEvent.category] > memory.preferences.categories[viewEvent.category],
-    "one explicit favorite should outweigh repeated passive detail views"
+    (memory.preferences.categories[favoriteEvent.category] || 0) > (memory.preferences.categories[viewEvent.category] || 0),
+    "an explicit favorite should be the only signal affecting preference"
   );
+});
+
+test("reopening the selected project after clearing memory does not recreate preference", () => {
+  const storage = tempStore();
+  const now = new Date().toISOString();
+  storage.upsertProjects([
+    {
+      fullName: "acme/selected-project",
+      owner: "acme",
+      name: "selected-project",
+      description: "A selected project",
+      language: "TypeScript",
+      topics: ["workflow"],
+      pushedAt: now,
+      scores: { opportunity: 80, risk: 5 }
+    }
+  ]);
+
+  storage.recordMemoryEvent("acme/selected-project", "favorite");
+  assert.ok(Object.keys(storage.getMemory().preferences.categories).length > 0);
+
+  storage.clearMemoryEvents("all");
+  storage.recordMemoryEvent("acme/selected-project", "select_project", { weight: 9 });
+
+  const memory = storage.getMemory();
+  assert.equal(Object.keys(memory.preferences.categories).length, 0);
+  assert.equal(memory.events[0].type, "select_project");
+  assert.equal(memory.events[0].weight, 0);
+});
+
+test("local harness reports explicit yields and negative rate as proxy metrics", () => {
+  const storage = tempStore();
+  const now = new Date().toISOString();
+  storage.upsertProjects(
+    [
+      {
+        fullName: "acme/positive-signal",
+        owner: "acme",
+        name: "positive-signal",
+        description: "A focused workflow tool",
+        language: "TypeScript",
+        topics: ["workflow"],
+        stars: 100,
+        forks: 10,
+        pushedAt: now,
+        scores: { opportunity: 80, quality: 75, actionability: 72, momentum: 50, community: 60, risk: 5 }
+      },
+      {
+        fullName: "acme/negative-signal",
+        owner: "acme",
+        name: "negative-signal",
+        description: "A noisy workflow tool",
+        language: "Python",
+        topics: ["workflow"],
+        stars: 90,
+        forks: 8,
+        pushedAt: now,
+        scores: { opportunity: 78, quality: 70, actionability: 68, momentum: 45, community: 55, risk: 5 }
+      }
+    ],
+    { observationPlanId: "default" }
+  );
+  storage.buildLeaderboard("daily", { limit: 20 });
+  storage.setWatch("acme/positive-signal", true);
+  storage.setProjectDismissed("acme/negative-signal", true);
+
+  const harness = storage.evaluateMemoryHarness();
+  assert.equal(harness.mode, "local-rules");
+  assert.equal(harness.scorecard.proxyOnly, true);
+  assert.equal(typeof harness.scorecard.metrics.positiveYield, "number");
+  assert.equal(typeof harness.scorecard.metrics.negativeRate, "number");
+  assert.equal(harness.scorecard.metrics.positiveYield, 50);
+  assert.equal(harness.scorecard.metrics.negativeRate, 50);
+  assert.equal("relevanceHitRate" in harness.scorecard.metrics, false);
 });
 
 test("plugin-shaped projects do not inherit the NX shape prefix", () => {
@@ -336,6 +412,6 @@ test("plugin-shaped projects do not inherit the NX shape prefix", () => {
   assert.equal(vscode.semantic.shape.key, "shape-plugin-extension-tool");
   assert.equal(vscode.semantic.shape.labelZh, "插件/扩展工具");
   assert.equal(chrome.semantic.shape.key, "shape-browser-plugin");
-  assert.equal(nx.semantic.shape.key, "shape-cad-nx-plugin");
+  assert.equal(nx.semantic.shape.key, "shape-engineering-plugin");
   assert.equal(nx.semantic.shape.labelZh, "工程插件/自动化工具");
 });

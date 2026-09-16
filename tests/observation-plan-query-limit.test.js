@@ -195,6 +195,42 @@ test("confirmed adjacent query terms can match without repeating the plan title"
   assert.equal(repositoryMatchesPlanProfile(repo, profile), true);
 });
 
+test("custom plan profiles require their shared domain anchor instead of generic profile words", () => {
+  const profiles = buildQueryProfiles(
+    plan("cad", "CAD", ["CAD", "CAD web", "CAD data exchange"], [
+      query("CAD 网页应用", "CAD web"),
+      query("CAD 数据交换", "CAD data exchange")
+    ])
+  );
+  const webProfile = profiles.find((profile) => profile.labelZh.includes("网页应用"));
+  const dataProfile = profiles.find((profile) => profile.labelZh.includes("数据交换"));
+  const cadRepo = {
+    fullName: "acme/cad-web-viewer",
+    name: "cad-web-viewer",
+    owner: "acme",
+    description: "Web CAD viewer with DWG and DXF support",
+    topics: ["cad", "web", "dwg"]
+  };
+  const genericWebRepo = {
+    fullName: "acme/http-server",
+    name: "http-server",
+    owner: "acme",
+    description: "Fast web server with automatic HTTPS",
+    topics: ["web", "server"]
+  };
+  const financeRepo = {
+    fullName: "acme/market-database",
+    name: "market-database",
+    owner: "acme",
+    description: "Financial market data exchange and symbol database",
+    topics: ["finance", "data", "exchange"]
+  };
+
+  assert.equal(repositoryMatchesPlanProfile(cadRepo, webProfile), true);
+  assert.equal(repositoryMatchesPlanProfile(genericWebRepo, webProfile), false);
+  assert.equal(repositoryMatchesPlanProfile(financeRepo, dataProfile), false);
+});
+
 test("low-value resource containers are rejected after GitHub search", () => {
   const [profile] = buildQueryProfiles(plan("fonts", "OpenType 字体", ["OpenType", "fontTools"], [query("OpenType", "OpenType font") ]));
   assert.equal(
@@ -233,7 +269,7 @@ test("default observation exposes the complete built-in execution matrix", () =>
   assert.equal(defaultPlan.searchLogic.customQueries.length, profiles.length);
 });
 
-test("saved plans cap visible and executable queries at thirty", () => {
+test("saved plans cap visible and executable queries at thirty without requiring thirty", () => {
   const storage = tempStore();
   const saved = storage.saveObservationPlan({
     name: "LoRaWAN 观察",
@@ -247,6 +283,25 @@ test("saved plans cap visible and executable queries at thirty", () => {
   assert.equal(saved.searchLogic.customQueries.length, 30);
   assert.equal(saved.summary.searchLogicItems, 30);
   assert.equal(buildQueryProfiles(saved).length, 30);
+});
+
+test("quality gate rejects unanchored queries and unsupported exclusion vocabulary", () => {
+  const payload = {
+    name: "Photoshop 插件",
+    coreKeyword: "Photoshop",
+    detailedNeed: "关注 Photoshop 插件、PSD 文件处理和图像工作流",
+    researchContext: {
+      githubActivity: { activityLevel: "medium", maxTotalCount: 800 },
+      domainModel: { aliases: ["Photoshop", "PSD"], formats: ["PSD"] }
+    }
+  };
+  const draft = generatedDraft("Photoshop 插件", 10, 12);
+  draft.searchLogic.keywords = ["Photoshop", "PSD", "Photoshop plugin", "image workflow", "Photoshop SDK", "Photoshop automation", "Photoshop action", "Photoshop panel", "Photoshop UXP", "Photoshop JSX", "Photoshop script", "Photoshop converter"];
+  draft.strategy = draft.searchLogic;
+  draft.searchLogic.customQueries[0].query = "stock market dashboard in:name,description,readme archived:false mirror:false";
+  draft.searchLogic.excludeTerms = ["stocks"];
+  const issues = observationPlanDraftQualityIssues(draft, payload);
+  assert.ok(issues.some((issue) => /core anchor|negative terms|excludeTerms/i.test(issue)), issues.join("; "));
 });
 
 test("plan prompt applies one generic metacognitive method without named-domain dictionaries", () => {
@@ -268,6 +323,8 @@ test("plan prompt applies one generic metacognitive method without named-domain 
   assert.match(prompt, /官方名称、别名、翻译、标准、格式、API\/SDK/);
   assert.match(prompt, /GitHub 活跃度是松紧度旋钮/);
   assert.match(prompt, /最多生成 30 条最相关 customQueries/);
+  assert.match(prompt, /只输出一次 strategy 检索逻辑/);
+  assert.doesNotMatch(prompt, /searchLogic 可以重复 strategy/);
   assert.match(prompt, /OpenType variable fonts/);
   assert.doesNotMatch(prompt, /UGNX|Photoshop|剪映|CapCut|CAD ->|CRM ->|AI 硬件/);
 });
@@ -312,7 +369,7 @@ test("generation fails closed when two AI repairs still miss the quality gate", 
         payload: { name: "LoRaWAN 现场遥测", coreKeyword: "LoRaWAN", detailedNeed: "现场遥测" },
         language: "zh"
       }),
-      /did not pass the quality gate/
+      /AI 返回的方案未通过完整性校验/
     );
     assert.equal(calls, 3);
   } finally {
@@ -338,6 +395,320 @@ test("generation preserves the user plan name and valid AI vocabulary", async ()
     assert.equal(result.plan.name, draft.name);
     assert.deepEqual(result.plan.searchLogic.keywords, draft.searchLogic.keywords);
     assert.equal(result.plan.searchLogic.customQueries.length, 8);
+  } finally {
+    global.fetch = originalFetch;
+  }
+});
+
+test("plan generation accepts segmented and object message content", async () => {
+  const originalFetch = global.fetch;
+  const draft = generatedDraft("LoRaWAN 现场遥测", 8, 12);
+  let call = 0;
+  global.fetch = async () => {
+    call += 1;
+    const content = call === 1
+      ? [{ type: "text", text: JSON.stringify(draft) }]
+      : { text: JSON.stringify(draft) };
+    return {
+      ok: true,
+      status: 200,
+      json: async () => ({ choices: [{ message: { content } }] })
+    };
+  };
+
+  try {
+    const first = await generateObservationPlanWithProvider({
+      provider: { protocol: "openai-compatible", baseUrl: "https://api.example.test", apiKey: "test", model: "test-model" },
+      payload: { name: draft.name, coreKeyword: "LoRaWAN", detailedNeed: "现场遥测" },
+      language: "zh"
+    });
+    assert.equal(first.plan.searchLogic.customQueries.length, 8);
+
+    const second = await generateObservationPlanWithProvider({
+      provider: { protocol: "openai-compatible", baseUrl: "https://api.example.test", apiKey: "test", model: "test-model" },
+      payload: { name: draft.name, coreKeyword: "LoRaWAN", detailedNeed: "现场遥测" },
+      language: "zh"
+    });
+    assert.equal(second.plan.searchLogic.customQueries.length, 8);
+  } finally {
+    global.fetch = originalFetch;
+  }
+});
+
+test("plan generation retries a truncated response with a compact prompt", async () => {
+  const originalFetch = global.fetch;
+  const draft = generatedDraft("LoRaWAN 现场遥测", 8, 12);
+  const bodies = [];
+  global.fetch = async (_url, options) => {
+    const body = JSON.parse(options.body);
+    bodies.push(body);
+    return {
+      ok: true,
+      status: 200,
+      json: async () => ({
+        choices: [bodies.length === 1
+          ? { message: { content: '{"name":"LoRaWAN 现场遥测"' }, finish_reason: "length" }
+          : { message: { content: JSON.stringify(draft) }, finish_reason: "stop" }]
+      })
+    };
+  };
+
+  try {
+    const result = await generateObservationPlanWithProvider({
+      provider: { protocol: "openai-compatible", baseUrl: "https://api.example.test", apiKey: "test", model: "test-model" },
+      payload: { name: draft.name, coreKeyword: "LoRaWAN", detailedNeed: "现场遥测", researchContext: { signals: [{ title: "large research context", content: "x".repeat(1000) }] } },
+      language: "zh"
+    });
+    assert.equal(result.plan.name, draft.name);
+    assert.equal(bodies.length, 2);
+    assert.match(bodies[1].messages.at(-1).content, /上一次观察方案输出被截断/);
+    assert.equal(bodies[1].messages.at(-1).content.includes("x".repeat(500)), false);
+    assert.equal(bodies[0].max_tokens, 16000);
+    assert.equal(bodies[1].max_tokens, 16000);
+  } finally {
+    global.fetch = originalFetch;
+  }
+});
+
+test("plan generation keeps a complete JSON body that the provider flagged as truncated", async () => {
+  const originalFetch = global.fetch;
+  const draft = generatedDraft("LoRaWAN 现场遥测", 8, 12);
+  let calls = 0;
+  global.fetch = async () => {
+    calls += 1;
+    return {
+      ok: true,
+      status: 200,
+      json: async () => ({
+        choices: [{ message: { content: `${JSON.stringify(draft)}\n\n补充说明：以上方案覆盖 LoRaWAN 场` }, finish_reason: "length" }]
+      })
+    };
+  };
+
+  try {
+    const result = await generateObservationPlanWithProvider({
+      provider: { protocol: "openai-compatible", baseUrl: "https://api.example.test", apiKey: "test", model: "test-model" },
+      payload: { name: draft.name, coreKeyword: "LoRaWAN", detailedNeed: "现场遥测" },
+      language: "zh"
+    });
+    assert.equal(result.plan.name, draft.name);
+    assert.equal(result.plan.searchLogic.customQueries.length, 8);
+    assert.equal(calls, 1);
+  } finally {
+    global.fetch = originalFetch;
+  }
+});
+
+test("plan generation recovers when two consecutive responses are truncated", async () => {
+  const originalFetch = global.fetch;
+  const draft = generatedDraft("LoRaWAN 现场遥测", 8, 12);
+  const bodies = [];
+  global.fetch = async (_url, options) => {
+    const body = JSON.parse(options.body);
+    bodies.push(body);
+    const content = bodies.length <= 2 ? '{"name":"LoRaWAN 现场遥测","strategy":{"keywords":["LoRaW' : JSON.stringify(draft);
+    return {
+      ok: true,
+      status: 200,
+      json: async () => ({
+        choices: [{
+          message: { content },
+          finish_reason: bodies.length <= 2 ? "length" : "stop"
+        }]
+      })
+    };
+  };
+
+  try {
+    const result = await generateObservationPlanWithProvider({
+      provider: { protocol: "openai-compatible", baseUrl: "https://api.example.test", apiKey: "test", model: "test-model" },
+      payload: { name: draft.name, coreKeyword: "LoRaWAN", detailedNeed: "现场遥测" },
+      language: "zh"
+    });
+    assert.equal(result.plan.name, draft.name);
+    assert.equal(bodies.length, 3);
+    assert.match(bodies[1].messages.at(-1).content, /上一次观察方案输出被截断/);
+    assert.match(bodies[2].messages.at(-1).content, /前两次输出都被截断/);
+    assert.equal(bodies[2].max_tokens, 16000);
+  } finally {
+    global.fetch = originalFetch;
+  }
+});
+
+test("plan generation steps down when a provider rejects the larger max_tokens", async () => {
+  const originalFetch = global.fetch;
+  const draft = generatedDraft("LoRaWAN 现场遥测", 8, 12);
+  const bodies = [];
+  global.fetch = async (_url, options) => {
+    const body = JSON.parse(options.body);
+    bodies.push(body);
+    if (body.max_tokens > 7000) {
+      return {
+        ok: false,
+        status: 400,
+        text: async () => JSON.stringify({
+          error: {
+            message: "This model's maximum context length is 8192 tokens. However, you requested more tokens (6144 in the messages). Please reduce the length of the messages or completion."
+          }
+        })
+      };
+    }
+    if (body.max_tokens > 4000) {
+      return {
+        ok: false,
+        status: 400,
+        text: async () => JSON.stringify({ error: { message: "Invalid max_tokens: value must be in [1, 6000]" } })
+      };
+    }
+    return {
+      ok: true,
+      status: 200,
+      json: async () => ({ choices: [{ message: { content: JSON.stringify(draft) }, finish_reason: "stop" }] })
+    };
+  };
+
+  try {
+    const result = await generateObservationPlanWithProvider({
+      provider: { protocol: "openai-compatible", baseUrl: "https://api.example.test", apiKey: "test", model: "test-model" },
+      payload: { name: draft.name, coreKeyword: "LoRaWAN", detailedNeed: "现场遥测" },
+      language: "zh"
+    });
+    assert.equal(result.plan.name, draft.name);
+    assert.deepEqual(bodies.map((body) => body.max_tokens), [16000, 7000, 4000]);
+  } finally {
+    global.fetch = originalFetch;
+  }
+});
+
+test("plan generation identifies empty and truncated provider output", async () => {
+  const originalFetch = global.fetch;
+  let mode = "empty";
+  global.fetch = async () => ({
+    ok: true,
+    status: 200,
+    json: async () => ({
+      choices: [{ message: { content: "" }, finish_reason: mode === "truncated" ? "length" : "stop" }]
+    })
+  });
+
+  try {
+    await assert.rejects(
+      generateObservationPlanWithProvider({
+        provider: { protocol: "openai-compatible", baseUrl: "https://api.example.test", apiKey: "test", model: "test-model" },
+        payload: { name: "LoRaWAN 现场遥测", coreKeyword: "LoRaWAN", detailedNeed: "现场遥测" },
+        language: "zh"
+      }),
+      /AI 返回内容为空/
+    );
+    mode = "truncated";
+    await assert.rejects(
+      generateObservationPlanWithProvider({
+        provider: { protocol: "openai-compatible", baseUrl: "https://api.example.test", apiKey: "test", model: "test-model" },
+        payload: { name: "LoRaWAN 现场遥测", coreKeyword: "LoRaWAN", detailedNeed: "现场遥测" },
+        language: "zh"
+      }),
+      /仍被截断/
+    );
+    await assert.rejects(
+      generateObservationPlanWithProvider({
+        provider: { protocol: "openai-compatible", baseUrl: "https://api.example.test", apiKey: "test", model: "test-model" },
+        payload: { name: "抖音", coreKeyword: "抖音", detailedNeed: "抖音相关" },
+        language: "zh"
+      }),
+      (error) => {
+        // A four-character brief must not be blamed for a provider-side cut-off.
+        assert.doesNotMatch(error.message, /缩短详细需求/);
+        assert.match(error.message, /稍后重试/);
+        return true;
+      }
+    );
+  } finally {
+    global.fetch = originalFetch;
+  }
+});
+
+test("plan generation falls back when provider rejects JSON mode", async () => {
+  const originalFetch = global.fetch;
+  const draft = generatedDraft("LoRaWAN 现场遥测", 8, 12);
+  const bodies = [];
+  global.fetch = async (_url, options) => {
+    const body = JSON.parse(options.body);
+    bodies.push(body);
+    if (bodies.length === 1) {
+      return {
+        ok: false,
+        status: 400,
+        text: async () => JSON.stringify({ error: { message: "response_format json_object is unsupported" } })
+      };
+    }
+    return {
+      ok: true,
+      status: 200,
+      json: async () => ({ choices: [{ message: { content: JSON.stringify(draft) } }] })
+    };
+  };
+
+  try {
+    const result = await generateObservationPlanWithProvider({
+      provider: { protocol: "openai-compatible", baseUrl: "https://api.example.test", apiKey: "test", model: "test-model" },
+      payload: { name: draft.name, coreKeyword: "LoRaWAN", detailedNeed: "现场遥测" },
+      language: "zh"
+    });
+    assert.equal(result.plan.name, draft.name);
+    assert.deepEqual(bodies[0].response_format, { type: "json_object" });
+    assert.equal("response_format" in bodies[1], false);
+  } finally {
+    global.fetch = originalFetch;
+  }
+});
+
+test("plan generation does not retry an expensive model request after a timeout", async () => {
+  const originalFetch = global.fetch;
+  let calls = 0;
+  global.fetch = async (_url, options) => {
+    calls += 1;
+    const body = JSON.parse(options.body);
+    assert.equal(body.max_tokens, 16000);
+    assert.deepEqual(body.response_format, { type: "json_object" });
+    throw new Error("Request timed out");
+  };
+
+  try {
+    await assert.rejects(
+      generateObservationPlanWithProvider({
+        provider: { protocol: "openai-compatible", baseUrl: "https://api.example.test", apiKey: "test", model: "test-model" },
+        payload: { name: "LoRaWAN 现场遥测", coreKeyword: "LoRaWAN", detailedNeed: "现场遥测" },
+        language: "zh"
+      }),
+      /AI 生成方案请求超时：模型未能在 75 秒内返回结果/
+    );
+    assert.equal(calls, 1);
+  } finally {
+    global.fetch = originalFetch;
+  }
+});
+
+test("plan generation keeps invalid model output out of the user-facing error", async () => {
+  const originalFetch = global.fetch;
+  global.fetch = async () => ({
+    ok: true,
+    status: 200,
+    json: async () => ({ choices: [{ message: { content: "\uFFFD\uFFFD\uFFFD raw model fragment" } }] })
+  });
+
+  try {
+    await assert.rejects(
+      generateObservationPlanWithProvider({
+        provider: { protocol: "openai-compatible", baseUrl: "https://api.example.test", apiKey: "test", model: "test-model" },
+        payload: { name: "LoRaWAN 现场遥测", coreKeyword: "LoRaWAN", detailedNeed: "现场遥测" },
+        language: "zh"
+      }),
+      (error) => {
+        assert.match(error.message, /AI 返回的方案结构不完整/);
+        assert.doesNotMatch(error.message, /raw model fragment/);
+        return true;
+      }
+    );
   } finally {
     global.fetch = originalFetch;
   }
@@ -380,6 +751,82 @@ test("plan scans replace stale matches for that plan", () => {
   });
 
   assert.deepEqual(storage.listProjects({ limit: "all" }).items.map((item) => item.fullName), ["acme/current-fhir"]);
+});
+
+test("re-scanning a custom plan cannot promote its stale projects into the default pool", () => {
+  const storage = tempStore();
+  const repo = (fullName) => ({
+    fullName,
+    owner: fullName.split("/")[0],
+    name: fullName.split("/")[1],
+    description: "FHIR server",
+    language: "TypeScript",
+    topics: ["fhir"],
+    stars: 80,
+    forks: 8,
+    pushedAt: new Date().toISOString(),
+    scores: { opportunity: 70, quality: 70, actionability: 70, risk: 5 }
+  });
+  const custom = storage.saveObservationPlan(plan("fhir", "FHIR 观察", ["FHIR"], [query("FHIR", "FHIR server")]));
+
+  storage.upsertProjects([repo("acme/shared")], {
+    observationPlanId: "default",
+    replaceObservationPlanMatches: true
+  });
+  storage.upsertProjects([repo("acme/shared"), repo("acme/custom-only")], {
+    observationPlanId: custom.id,
+    replaceObservationPlanMatches: true
+  });
+  storage.upsertProjects([], {
+    observationPlanId: custom.id,
+    replaceObservationPlanMatches: true
+  });
+
+  assert.deepEqual(storage.listProjects({ observationPlanId: "default", limit: "all" }).items.map((item) => item.fullName), ["acme/shared"]);
+  assert.deepEqual(storage.listProjects({ observationPlanId: custom.id, limit: "all" }).items, []);
+  assert.equal(storage.load().projects["acme/custom-only"], undefined);
+});
+
+test("plan-owned learning records and scan ranking stay isolated between plans", () => {
+  const storage = tempStore();
+  const repo = (fullName) => ({
+    fullName,
+    owner: fullName.split("/")[0],
+    name: fullName.split("/")[1],
+    description: "FHIR server",
+    language: "TypeScript",
+    topics: ["fhir"],
+    stars: 80,
+    forks: 8,
+    pushedAt: new Date().toISOString(),
+    scores: { opportunity: 70, quality: 70, actionability: 70, risk: 5 }
+  });
+  const custom = storage.saveObservationPlan(plan("fhir", "FHIR 观察", ["FHIR"], [query("FHIR", "FHIR server")]));
+  storage.upsertProjects([repo("acme/shared")], { observationPlanId: "default", replaceObservationPlanMatches: true });
+  storage.upsertProjects([repo("acme/shared")], { observationPlanId: custom.id, replaceObservationPlanMatches: true });
+
+  storage.setActiveObservationPlan("default");
+  storage.setWatch("acme/shared", true);
+  storage.recordMemoryEvent("acme/shared", "favorite");
+  const defaultBefore = storage.getObservationPlan("default", { includeMemory: true });
+
+  storage.setActiveObservationPlan(custom.id);
+  storage.setWatch("acme/shared", false);
+  storage.setNote("acme/shared", "只在 FHIR 方案里记录", "watch");
+  storage.recordMemoryEvent("acme/shared", "dismiss_project");
+  const customView = storage.getProject("acme/shared", { observationPlanId: custom.id });
+  assert.equal(customView.watched, false);
+  assert.equal(customView.note, "只在 FHIR 方案里记录");
+
+  const defaultView = storage.getProject("acme/shared", { observationPlanId: "default" });
+  assert.equal(defaultView.watched, true);
+  assert.equal(defaultView.note, "");
+  assert.ok(storage.getObservationPlan(custom.id, { includeMemory: true }).memory.events.length > 0);
+
+  storage.clearMemoryEvents("all");
+  assert.equal(storage.getObservationPlan(custom.id, { includeMemory: true }).memory.events.length, 0);
+  assert.ok(storage.getObservationPlan("default", { includeMemory: true }).memory.events.length > 0);
+  assert.equal(storage.getProject("acme/shared", { observationPlanId: "default" }).watched, true);
 });
 
 test("default plan excludes custom-only projects and preserves legacy default data", () => {

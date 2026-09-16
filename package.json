@@ -8,14 +8,18 @@
     "dev": "node src/server.js",
     "start": "node src/server.js",
     "scan": "node scripts/run-scan.js",
-    "check": "node --check src/server.js && node --check src/lib/config.js && node --check src/lib/domain-relevance.js && node --check src/lib/github.js && node --check src/lib/http-client.js && node --check src/lib/scoring.js && node --check src/lib/security.js && node --check src/lib/sqlite-store.js && node --check src/lib/storage.js && node --check src/lib/tavily.js && node --check src/lib/exa.js && node --check src/lib/scheduler.js && node --check src/lib/llm.js && node --check public/bootstrap.js && node --check public/indexeddb-storage.js && node --check public/local-api.js && node --check public/app.js && node --check scripts/run-scan.js && node --check scripts/visual-regression-check.js && node --check scripts/observation-plan-quality-audit.js && node --check scripts/storage-performance-benchmark.js",
+    "check": "node --check src/server.js && node --check src/lib/config.js && node --check src/lib/github.js && node --check src/lib/http-client.js && node --check src/lib/provider-response.js && node --check src/lib/scoring.js && node --check src/lib/security.js && node --check src/lib/sqlite-store.js && node --check src/lib/storage.js && node --check src/lib/tavily.js && node --check src/lib/exa.js && node --check src/lib/scheduler.js && node --check src/lib/llm.js && node --check public/runtime-config.js && node --check public/domain-core.js && node --check public/bootstrap.js && node --check public/indexeddb-storage.js && node --check public/local-api.js && node --check public/app.js && node --check scripts/run-scan.js && node --check scripts/visual-regression-check.js && node --check scripts/observation-plan-quality-audit.js && node --check scripts/storage-performance-benchmark.js && node --check scripts/build-demo-snapshot.js && node --check scripts/security-audit.js && node --check scripts/static-pages-check.js",
     "test": "node --test tests/*.test.js",
-    "ci": "npm run check && npm test",
+    "test:coverage": "node --test --experimental-test-coverage --test-coverage-lines=45 --test-coverage-branches=40 --test-coverage-functions=45 --test-coverage-include='src/lib/*.js' tests/*.test.js",
+    "audit:secrets": "node scripts/security-audit.js",
+    "audit:plans:offline": "node scripts/observation-plan-quality-audit.js --offline",
+    "ci": "npm run check && npm run test:coverage && npm run audit:secrets && npm run audit:plans:offline && git diff --check",
     "visual:check": "node scripts/visual-regression-check.js",
+    "check:static": "node scripts/static-pages-check.js",
     "perf:storage": "node scripts/storage-performance-benchmark.js --assert",
     "perf:storage:fixture": "node scripts/storage-performance-benchmark.js --fixture --assert",
     "audit:plans:live": "node scripts/observation-plan-quality-audit.js --live",
-    "release:check": "npm run ci && npm run visual:check && npm run perf:storage:fixture"
+    "release:check": "npm run ci && npm run visual:check && npm run check:static && npm run perf:storage:fixture"
   },
   "engines": {
     "node": ">=22.5"

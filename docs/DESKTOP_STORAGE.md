@@ -1,12 +1,12 @@
 # 星仓印记桌面端本地存储方案
 
-本文档描述面向本地桌面应用的存储方案，并区分已经落地的数据层与桌面壳仍需完成的能力。当前 Node 运行时已经使用 SQLite WAL，Web 静态模式已经使用 IndexedDB v4；Mac 应用仍需补 Keychain、签名、公证和沙盒适配。
+本文档描述面向本地桌面应用的存储方案，并区分已经落地的数据层与桌面壳仍需完成的能力。当前 Node 运行时已经使用 SQLite WAL，Web 静态模式已经使用 IndexedDB v5；Mac 应用仍需补 Keychain、签名、公证和沙盒适配。
 
 ## 目标
 
 - 桌面端支持长期、本地、离线优先保存项目池、观察方案、学习中枢、研判、AI 分析、隐藏项目、榜单归档和扫描记录。
 - 密钥不落入业务数据库，GitHub Token、Tavily Key、Exa Key、AI Provider Key 统一进入系统安全存储。
-- Web 端继续使用 IndexedDB v4，Node 与桌面端共享 SQLite 数据模型，桌面端密钥迁移到 Keychain。
+- Web 端继续使用 IndexedDB v5，Node 与桌面端共享 SQLite 数据模型，桌面端密钥迁移到 Keychain。
 - 导入导出继续使用不含密钥的 JSON，保证 Web、Node 本地、桌面端之间可以迁移用户数据。
 
 ## 推荐组合
@@ -14,7 +14,7 @@
 | 场景 | 存储 | 密钥 | 说明 |
 |---|---|---|---|
 | Node 本地服务 | SQLite WAL | 当前在 SQLite 本机明文状态中 | 已实现，旧 JSON 只做迁移备份 |
-| Web 静态部署 | IndexedDB v4 | 浏览器 IndexedDB 独立记录，导出时排除 | 已实现，适合无账号、纯本地保存 |
+| Web 静态部署 | IndexedDB v5 | 浏览器 IndexedDB 独立记录，导出时排除 | 已实现，适合无账号、纯本地保存 |
 | Mac 桌面应用 | SQLite WAL | macOS Keychain | 数据层已实现，Keychain 和桌面壳待接入 |
 
 桌面端不建议使用 MySQL、SQL Server、Supabase 作为默认存储。星仓印记是本地优先工具，没有账号系统时把用户行为、项目研判、AI 分析和偏好记忆放到远端数据库，会增加隐私、权限、合规和运维成本。SQLite 更适合单用户桌面应用。
@@ -178,7 +178,7 @@ StorageAdapter
   importPortableData(snapshot)
 ```
 
-当前 Node 版由 `src/lib/storage.js` 和 `src/lib/sqlite-store.js` 提供；桌面壳应复用同一能力边界，避免前端业务逻辑分叉。
+当前 Node 版由 `src/lib/storage.js` 和 `src/lib/sqlite-store.js` 提供；桌面壳应复用同一能力边界，避免前端业务逻辑分叉。Node 的项目、方案、扫描和方案关系是记录级 SQLite 数据，小体量设置、任务和运行状态仍可作为 JSON 字段保存；这不是把大型项目池重新整包写入 JSON。
 
 ## 备份与恢复
 
@@ -201,7 +201,7 @@ StorageAdapter
 
 ## 当前落地状态
 
-- 已完成：Node SQLite WAL、旧 JSON 一次性迁移、项目/方案/扫描记录增量写入、方案归属索引、持久化任务、Web IndexedDB v4 记录级存储与分页同步。
+- 已完成：Node SQLite WAL、旧 JSON 一次性迁移、项目/方案/扫描记录增量写入、方案归属索引、持久化任务、Web IndexedDB v5 记录级存储、分页同步和扫描 profile 临时恢复。
 - 已完成：portable export、核心快照、项目分页和榜单分页排除密钥。
 - 待完成：macOS Keychain、桌面 IPC 权限边界、应用签名、公证、沙盒 entitlement、自动更新和 SQLite 在线备份界面。
 - 当前 SQLite runtime schema 位于 `src/lib/sqlite-store.js`；`desktop/desktop-storage-schema.sql` 是更细粒度桌面长期演进草案，不应误认为已经全部启用。

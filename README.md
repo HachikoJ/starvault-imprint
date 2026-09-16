@@ -10,18 +10,41 @@
 
 <p align="center">
   <a href="LICENSE"><img alt="License" src="https://img.shields.io/badge/license-source--available%20non--commercial-black"></a>
-  <a href="package.json"><img alt="Node" src="https://img.shields.io/badge/node-%3E%3D18-2f855a"></a>
+  <a href="package.json"><img alt="Node" src="https://img.shields.io/badge/node-%3E%3D22.5-2f855a"></a>
   <a href="PRD.md"><img alt="PRD" src="https://img.shields.io/badge/PRD-aligned-2563eb"></a>
   <a href="VISUAL_REGRESSION.md"><img alt="Visual checks" src="https://img.shields.io/badge/visual-regression-7c3aed"></a>
 </p>
 
-> 发布到 GitHub 前，请把 README 中的 `OWNER/REPO` 替换成你的真实仓库路径，例如 `yourname/starvault-imprint`。
+<p align="center">
+  <strong>中文</strong> · <a href="README_EN.md">English</a>
+</p>
+
+<p align="center">
+  <a href="#在线体验">在线体验</a> ·
+  <a href="#项目简介">项目简介</a> ·
+  <a href="#核心能力">核心能力</a> ·
+  <a href="#产品截图">产品截图</a> ·
+  <a href="#快速开始">快速开始</a> ·
+  <a href="#安全与隐私">安全与隐私</a> ·
+  <a href="#源码授权与商业合作">授权合作</a> ·
+  <a href="#联系作者">联系作者</a>
+</p>
+
+## 在线体验
+
+- 在线地址：<https://hachikoj.github.io/starvault-imprint/>
+- 打开即可看到一份示例方案，用真实 GitHub 公开仓库元数据演示“方案生成 → 扫描检索 → 项目池 → 榜单”的完整链路，不需要任何 Key。
+- 在线版是 GitHub Pages 静态部署，**没有账号体系，也没有服务端数据隔离**：方案、项目池、收藏、笔记、AI 分析和你填写的 Key 都只保存在当前浏览器的 IndexedDB，不上传到任何星仓印记服务器，也不进入 Git。
+- 静态部署会在启动时直接进入 IndexedDB 模式，不再探测不存在的后端接口；`npm run check:static` 会用 Chromium 在 `/starvault-imprint/` 子路径下验证无后端、无 Key、桌面与移动端均可正常加载。
+- 示例数据只在空工作区首次进入时写入一次。一旦你有了自己的项目、方案、收藏、笔记、扫描记录或 Key，页面刷新不会覆盖或重复写入这些内容。
+- 想用自己的账号扫描真实项目，在设置页填入 GitHub Token、AI Key 即可；频率预算、GitHub 风控冷却和长任务恢复逻辑与本地版一致。
+- 静态部署只是“能在线打开、能在浏览器里自己跑”，不等同于带登录、计费、内容审核和租户隔离的 SaaS 服务。多账号、多租户与服务器端数据隔离仍不在当前范围。
 
 ## 项目简介
 
 星仓印记用于从海量 GitHub 项目中发现值得学习、理解、持续跟踪和启发实践的开源项目。它不是简单的 Trending 列表，也不只按 Star 数排序，而是把每个仓库转化为可研判的机会单元：这个项目解决什么问题、给谁用、能形成什么实践形态、热度和质量是否匹配、许可边界是否清楚、是否符合你的长期偏好。
 
-平台会记录用户的收藏、查看、Star、Fork、研判记录、AI 分析和榜单反馈，通过短期行为、长期偏好、负向偏好和反信息茧房策略持续调优后续扫描与排序，让项目池越来越贴近你的判断方式，同时保留必要的探索空间。
+平台会记录用户的收藏、隐藏、Star、Fork、研判记录、AI 分析和榜单反馈；项目详情浏览仅作为近期行为留痕，不参与偏好学习。系统通过长期偏好、负向偏好和反信息茧房策略持续调优后续扫描与排序，让项目池越来越贴近你的判断方式，同时保留必要的探索空间。
 
 ## 诞生故事
 
@@ -97,7 +120,7 @@ flowchart TB
   end
 
   subgraph MEMORY["自进化学习中枢"]
-    EVENT["近期行为<br/>查看、收藏、Star、Fork、笔记、AI 分析、榜单反馈"]
+    EVENT["近期行为<br/>浏览留痕、收藏、隐藏、Star、Fork、笔记、AI 分析、榜单反馈"]
     PREF["长期偏好<br/>喜欢的方向、语言、场景、许可边界"]
     NEG["负向偏好<br/>减少重复和不相关方向"]
     COMPACT["上下文压缩<br/>短期行为沉淀为长期记忆"]
@@ -169,7 +192,7 @@ flowchart LR
   C["Tavily / Exa 可选信号"] --> B
   B --> D["分类、评分、许可与风险研判"]
   D --> E["项目池 / 榜单 / 结构看板"]
-  E --> F["用户行为：查看、收藏、Star、Fork、笔记、AI 分析"]
+  E --> F["用户行为：收藏、隐藏、Star、Fork、笔记、AI 分析"]
   F --> G["短期记忆 / 长期偏好 / 负向偏好"]
   G --> H["反信息茧房与扫描画像调优"]
   H --> B
@@ -180,7 +203,7 @@ flowchart LR
 - Runtime: Node.js 22.5+
 - Server: 原生 `node:http`
 - Frontend: 原生 HTML/CSS/JavaScript，无前端构建链
-- Storage: Node 使用 SQLite WAL；Web 静态模式使用 IndexedDB v4 记录级存储；桌面端沿用 SQLite 并规划 Keychain
+- Storage: Node 使用 SQLite WAL；Web 静态模式使用 IndexedDB v5 记录级存储；桌面端沿用 SQLite 并规划 Keychain
 - Discovery: GitHub Search API、GitHub Trending 辅助、可选 Tavily/Exa
 - AI: 默认适配 DeepSeek 的 OpenAI-compatible API，可按 Provider 结构继续扩展
 - Scheduler: 内置每日定时扫描、手动扫描和持久化任务恢复
@@ -195,15 +218,25 @@ flowchart LR
 | 形态 | 存储 | 密钥处理 | 状态 |
 |---|---|---|---|
 | Node 本地服务 | SQLite WAL，项目/方案/扫描按记录写入 | SQLite 本机明文，导出与同步排除密钥 | 当前默认运行路径 |
-| Web 静态部署 | IndexedDB v4，项目与榜单分页同步 | IndexedDB 独立密钥记录，portable export 排除密钥 | 已实现 |
+| Web 静态部署（含 GitHub Pages 在线体验） | IndexedDB v5，项目、榜单和扫描临时结果按记录保存 | IndexedDB 独立密钥记录，portable export 排除密钥 | 已实现 |
 | Mac 桌面应用 | SQLite WAL | macOS Keychain | 数据层已就绪，Keychain 尚待打包阶段接入 |
 
-旧 `data/store.json` 只在首次启动时导入 SQLite，之后保持不变，便于人工回退；它不再是运行时主库。浏览器同步不会下载完整项目池 JSON，而是读取约束后的核心快照、每页 250 个项目和每页 10 份榜单归档。桌面端详细设计见 [桌面端本地存储方案](docs/DESKTOP_STORAGE.md)。
+旧 `data/store.json` 只在首次启动时导入 SQLite，之后保持不变，便于人工回退；它不再是运行时主库。即使把 `STORE_PATH` 指向旧 `.json`，服务也会默认迁移到同名 `.db`，只有显式设置 `ALLOW_LEGACY_JSON_STORE=1` 才保留整包 JSON 运行模式。浏览器同步不会下载完整项目池 JSON，而是读取约束后的核心快照、每页 250 个项目和每页 10 份榜单归档；扫描中断时已完成的 profile 可从 IndexedDB 临时记录恢复。桌面端详细设计见 [桌面端本地存储方案](docs/DESKTOP_STORAGE.md)。
+
+### 在线体验的示例数据
+
+静态部署不带后端，所以 `public/demo-snapshot.json` 会随站点一起发布，只包含真实 GitHub 公开仓库的元数据（名称、简介、Star/Fork、许可、最近提交时间等），不含任何用户数据或凭据。页面在空 IndexedDB 上首次读取时把它写成一份 `demo-content` 示例方案、25 个项目的项目池、一条已完成扫描和一份日榜归档，用来展示完整链路；检测到已有项目、方案、收藏、笔记、扫描记录、榜单、任务或 Key 时会跳过写入。快照可由匿名 GitHub API 重新生成：
+
+```bash
+node scripts/build-demo-snapshot.js
+```
+
+该脚本只读取公开元数据；即使本地设置了 `GITHUB_TOKEN`，它也只作为请求头提高配额，不会写进快照或日志。
 
 ## 快速开始
 
 ```bash
-git clone https://github.com/OWNER/starvault-imprint.git
+git clone https://github.com/HachikoJ/starvault-imprint.git
 cd starvault-imprint
 cp .env.example .env
 npm install
@@ -215,6 +248,14 @@ npm run dev
 ```text
 http://127.0.0.1:4173
 ```
+
+只想看前端静态版（不启动 Node 服务、不配置任何 Key）：
+
+```bash
+python3 -m http.server 4173 --directory public
+```
+
+然后打开 `http://127.0.0.1:4173/`，看到的就是 GitHub Pages 上线的同一份产物。`.github/workflows/pages.yml` 会在 `main` 分支推送后自动跑 `npm run ci` 并发布 `public/`。
 
 运行语法检查：
 
@@ -246,11 +287,21 @@ npm run perf:storage
 npm run perf:storage:fixture
 ```
 
+模拟 GitHub Pages 子路径，在无后端、无 Key 环境下验收静态站：
+
+```bash
+npm run check:static
+```
+
 发布前总门禁：
 
 ```bash
 npm run release:check
 ```
+
+运行不调用外部服务的观察方案质量矩阵：
+
+    npm run audit:plans:offline
 
 ## 环境变量
 
@@ -268,20 +319,9 @@ npm run release:check
 | `GITHUB_TRENDING_MAX_REPOS` | `60` | GitHub Trending 辅助读取的项目总量 |
 | `GITHUB_TRENDING_PER_PERIOD` | `25` | 每个 Trending 周期读取的项目数量 |
 | `RUN_SCAN_ON_BOOT` | `0` | 是否启动后自动扫描 |
+| `ALLOW_LEGACY_JSON_STORE` | 空 | 仅迁移排障时允许旧整包 JSON 运行；正常部署不要开启 |
 
-也可以在设置页面中配置 GitHub、Tavily、Exa 和 AI Key。设置页写入的是本地 `data/store.json`，请勿提交。
-
-## Star 趋势
-
-发布仓库后，将下面的 `OWNER/REPO` 替换为真实路径。
-
-<a href="https://star-history.com/#OWNER/REPO&Date">
-  <picture>
-    <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/svg?repos=OWNER/REPO&type=Date&theme=dark" />
-    <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/svg?repos=OWNER/REPO&type=Date" />
-    <img alt="Star History Chart" src="https://api.star-history.com/svg?repos=OWNER/REPO&type=Date" />
-  </picture>
-</a>
+也可以在设置页面中配置 GitHub、Tavily、Exa 和 AI Key。Node 模式写入本机 `data/starvault.db`，Web 静态模式写入当前浏览器 IndexedDB；旧 JSON 只作为迁移来源和人工备份，请勿提交任何本地数据。
 
 ## 文档
 
@@ -300,6 +340,8 @@ npm run release:check
 
 星仓印记当前是本地优先工具，不建议直接暴露到公网。
 
+- 在线体验版是纯静态页面，没有账号、登录、租户隔离和服务端数据库。所有方案、项目池、收藏、笔记、AI 分析和 Key 都留在访问者自己的浏览器里；换个浏览器或清空站点数据就等于换了一份空工作区。
+- `public/demo-snapshot.json` 是唯一随站点发布的业务数据，内容为真实 GitHub 公开仓库元数据，不含 Key、Token、用户行为或本地扫描结果；构建脚本和自动化测试都会拒绝带凭据字段的快照。
 - `.env` 存放本地环境变量，绝不能提交。
 - `data/` 可能包含 SQLite、迁移备份、API Key、GitHub 操作状态、项目笔记、AI 分析、用户行为和长期记忆，绝不能提交。
 - Node UI 中配置的 Key 以本机明文形式保存在 SQLite；Web 静态模式的 Key 以独立记录保存在 IndexedDB。设备失守或同源脚本被攻破时不能视为加密密钥库。
@@ -320,8 +362,11 @@ git status --ignored --short
 npm run check
 npm test
 npm run visual:check
+npm run check:static
 npm run perf:storage
 ```
+
+`npm run audit:secrets` 会同时扫描工作树和 Git 历史（含每个提交的 patch），检查 `.env`、`data/`、`output/`、旧快照与 GitHub/Tavily/Exa/AI 凭据痕迹。
 
 确认以下内容没有进入 Git：
 
@@ -334,35 +379,40 @@ npm run perf:storage
 - `lark-auth-qrcode.png`
 - 任何真实 API Key、Token、账号二维码、私有截图或本地扫描快照
 
-## 许可与使用限制
+## 源码授权与商业合作
 
 本项目源码采用 [StarVault Imprint Source-Available Non-Commercial License](LICENSE)。
 
-允许个人学习、研究、评估和非商业修改。禁止任何未经授权的商业使用、SaaS 托管、付费交付、白标包装、商业集成、复制抄袭、移除署名或冒名发布。任何抄袭盗用或未经授权的商业行为将被追责。
+项目源码托管在 GitHub 仓库 [HachikoJ/starvault-imprint](https://github.com/HachikoJ/starvault-imprint)，采用自定义的源码可获取许可发布，尚未使用 MIT、Apache-2.0 或 GPL 等 OSI 认可的开源许可证。许可证仅允许个人学习、研究、评估和非商业修改，不授予商业使用权。
+
+未经作者书面授权，禁止任何商业使用、SaaS 托管、付费交付、白标包装、商业集成、复制抄袭、移除署名或冒名发布。任何抄袭盗用或未经授权的商业行为将被追责。
 
 注意：这里的“非商业源码许可”约束的是星仓印记本项目代码，不代表被监控 GitHub 仓库的许可状态。第三方仓库仍需按其自身许可证和条款使用。
 
+需要商业授权、私有部署、联合开发、品牌合作或其他未明确授予的使用权，请先联系作者取得书面许可。
+
 ## 联系作者
 
+交流产品思路、反馈问题或咨询授权合作，请通过以下方式联系：
+
+- GitHub：[HachikoJ](https://github.com/HachikoJ)
 - 微信：`hostrow`，添加时请备注“星仓印记”
 - 邮箱：`946106011@qq.com`
 
-<p>
-  <img src="docs/assets/wechat-contact.png" width="240" alt="微信联系二维码" />
-</p>
-
-## 请作者喝杯咖啡
-
-如果这个项目对你有帮助，可以请作者喝杯咖啡。感谢支持，但捐赠不授予任何商业使用权。
-
 <table>
   <tr>
-    <th>微信</th>
-    <th>支付宝</th>
-  </tr>
-  <tr>
-    <td><img src="docs/assets/donate-wechat.png" width="220" alt="微信收款码" /></td>
-    <td><img src="docs/assets/donate-alipay.png" width="220" alt="支付宝收款码" /></td>
+    <td align="center">
+      <strong>微信联系</strong><br>
+      <img src="docs/assets/wechat-contact.png" alt="星仓印记微信联系二维码" width="220">
+    </td>
+    <td align="center">
+      <strong>微信赞赏</strong><br>
+      <img src="docs/assets/donate-wechat.png" alt="微信赞赏码" width="220">
+    </td>
+    <td align="center">
+      <strong>支付宝赞赏</strong><br>
+      <img src="docs/assets/donate-alipay.png" alt="支付宝赞赏码" width="220">
+    </td>
   </tr>
 </table>
 

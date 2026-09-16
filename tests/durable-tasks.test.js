@@ -33,6 +33,25 @@ test("durable tasks survive storage reopen and running tasks recover as queued",
   assert.deepEqual(reopened.getTask(task.id).result, { ok: true });
 });
 
+test("durable task checkpoints survive reopen without being exposed in the public task view", () => {
+  const filePath = tempPath();
+  const first = createStorage(filePath);
+  const task = first.createTask({ type: "scan", key: "scan", input: { observationPlanId: "default" } });
+  const checkpoint = {
+    version: 1,
+    planId: "default",
+    stage: "github-search",
+    github: { repositories: [{ fullName: "acme/example" }], errors: [], profiles: ["profile-1"] }
+  };
+  first.updateTask(task.id, { status: "running", attempts: 1, checkpoint });
+
+  const reopened = createStorage(filePath);
+  assert.deepEqual(reopened.getTask(task.id).checkpoint, checkpoint);
+  const serverSource = fs.readFileSync(path.join(__dirname, "../src/server.js"), "utf8");
+  assert.match(serverSource, /stage: "github-search"/);
+  assert.doesNotMatch(JSON.stringify({ id: task.id, status: "running", checkpoint }), /githubToken|apiKey|tavilyKey|exaKey/i);
+});
+
 test("task records do not contain provider credentials unless a caller explicitly violates the contract", () => {
   const storage = createStorage(tempPath(".json"));
   const task = storage.createTask({
@@ -73,6 +92,7 @@ test("browser and Node routes expose the same durable task protocol", () => {
   }
   assert.match(appSource, /waitForDurableTaskResponse/);
   assert.match(appSource, /restoreDurableTasks/);
+  assert.doesNotMatch(serverSource, /status: "already-running"/);
 });
 
 test("analysis results and learning stay with the plan captured by a durable task", () => {
@@ -116,4 +136,16 @@ test("analysis results and learning stay with the plan captured by a durable tas
   const specialized = storage.getObservationPlan("specialized", { includeMemory: true });
   assert.equal(specialized.memory.events[0].type, "ai_analyze");
   assert.equal(specialized.userData.analysis["acme/specialized"].result.recommendation, "validate");
+});
+
+test("a plan with a queued or running task cannot be deleted", () => {
+  const storage = createStorage(tempPath());
+  storage.saveObservationPlan({
+    id: "busy-plan",
+    name: "Busy",
+    searchLogic: { baseMode: "only", keywords: ["busy"], customQueries: [{ key: "busy", query: "busy in:name,description,readme" }] }
+  });
+  storage.createTask({ type: "scan", key: "scan", status: "running", input: { observationPlanId: "busy-plan" } });
+
+  assert.throws(() => storage.deleteObservationPlan("busy-plan"), /running task/i);
 });

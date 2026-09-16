@@ -5,13 +5,21 @@
   window.__STARVAULT_BOOTSTRAPPED__ = true;
 
   const runtimeScripts = [
+    ["domain", "core"],
     ["indexeddb", "storage"],
     ["local", "api"],
     ["app"]
   ];
 
+  // GitHub Pages serves the app from /<repository>/ instead of the domain
+  // root, so runtime assets must resolve against the document base URL.
   function runtimePath(parts) {
-    return `/${parts.join("-")}.js`;
+    const fileName = `${parts.join("-")}.js`;
+    try {
+      return new URL(fileName, document.baseURI).href;
+    } catch {
+      return fileName;
+    }
   }
 
   function showBootFailure(error) {

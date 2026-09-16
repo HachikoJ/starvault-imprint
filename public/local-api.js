@@ -1,12 +1,25 @@
 (function () {
+  const domainCore = window.StarVaultDomainCore;
+  if (!domainCore) throw new Error("StarVault domain core is unavailable");
   const SECRETS_KEY = "localSecrets";
+  const LAST_PORTABLE_EXPORT_KEY = "lastPortableExportAt";
+  const GITHUB_COOLDOWN_KEY = "githubCooldown";
   const STORAGE_MODE_KEY = "starvault.storageMode";
+  const DEMO_SNAPSHOT_SCHEMA = "starvault-demo-snapshot/v1";
+  const DEMO_SNAPSHOT_FILE = "demo-snapshot.json";
+  const DEMO_SEED_KEY = "starvault.demoSeed";
+  // Any field that would carry a credential. Repository metadata keeps its own
+  // `license.key`, which is a license identifier rather than a secret.
+  const CREDENTIAL_FIELD = /(?:token|api[_-]?key|secret|password|authorization|credential)/i;
+  const DEFAULT_DEEPSEEK_MODEL = "deepseek-flash";
+  const DEFAULT_DEEPSEEK_MODELS = [DEFAULT_DEEPSEEK_MODEL, "deepseek-v4-pro"];
+  const LEGACY_DEEPSEEK_FLASH_MODELS = new Set(["deepseek-chat", "deepseek-v4-flash", "deepseek-v4.1-flash"]);
   const DEFAULT_PROVIDER = {
     id: "deepseek",
     name: "DeepSeek",
     baseUrl: "https://api.deepseek.com",
-    models: ["deepseek-chat"],
-    model: "deepseek-chat",
+    models: [...DEFAULT_DEEPSEEK_MODELS],
+    model: DEFAULT_DEEPSEEK_MODEL,
     enabled: true
   };
   const DEFAULT_OBSERVATION_REQUIREMENTS = [
@@ -17,11 +30,11 @@
     "数据、知识和业务系统也要保留在默认观察里，包括数据看板、ETL/数据管道、知识库/RAG、文档搜索、CRM/客服、电商、内容管理、支付发票和增长运营。",
     "AI 相关不要泛泛搜概念，尽量找能落地的 AI 聊天产品、AI 工作台、RAG 产品、AI 设计/媒体工具、具体 Agent 产品和模型服务相关项目。",
     "入池项目要优先考虑近期有更新、有一定 Star/Fork 热度、许可边界更清楚、可维护性更好的项目；风险只在确实需要警觉时提醒。",
-    "学习中枢要根据我的收藏、Star/Fork、研判、AI 分析、不合适/隐藏这些明确行为调整项目池和榜单，普通点开看看不要给太高权重。",
+    "学习中枢要根据我的收藏、Star/Fork、研判、AI 分析、不合适/隐藏这些明确行为调整项目池和榜单，普通点开看看不参与偏好学习。",
     "默认观察就当作通用起步方案，先保持只读；如果我要看 CAD、PS、CRM、AI 硬件这类具体领域，再单独新建观察方案。"
   ];
   const MEMORY_EVENT_WEIGHTS = {
-    select_project: 0.03,
+    select_project: 0,
     open_github: 0.12,
     copy_url: 0.16,
     ai_analyze: 1,
@@ -37,6 +50,22 @@
     dismiss_project: -0.35
   };
   const localTaskPromises = new Map();
+  const githubRateBudgets = new Map();
+  let demoSeedPromise = null;
+  let demoSeedAttempts = 0;
+  let githubRequestGate = Promise.resolve();
+  let githubNextRequestAt = 0;
+  let githubCooldownUntil = 0;
+  let githubCooldownReason = "";
+  let githubCooldownMessage = "";
+  let githubCooldownLoaded = false;
+  const GITHUB_COOLDOWN_MESSAGES = {
+    secondary: "GitHub 已触发二级限流，账号进入冷却期。冷却期间不会再发出任何扫描请求，请等倒计时结束后再扫描。",
+    primary: "GitHub 接口额度已用尽，账号进入冷却期，额度重置后会自动恢复扫描。",
+    budget: "GitHub 剩余额度已接近安全线，为避免账号被风控，扫描已提前熔断并进入冷却期。",
+    blocked: "GitHub 暂时拒绝了本次请求，账号进入冷却期，请等倒计时结束后再扫描。"
+  };
+  const GITHUB_RATE_RESOURCE_RESERVE = { core: 10, search: 2, graphql: 50 };
   const DEFAULT_BROWSER_QUERY_GROUPS = [
     ["自托管应用", "self hosted app stars:>100 pushed:>=2024-01-01"],
     ["开源替代", "open source alternative stars:>100 pushed:>=2024-01-01"],
@@ -101,11 +130,34 @@
   }
 
   function localModeForced() {
+    if (isStaticDeployment()) return true;
     try {
       return window.localStorage.getItem(STORAGE_MODE_KEY) === "indexeddb";
     } catch {
       return false;
     }
+  }
+
+  function isStaticDeployment() {
+    return window.__STARVAULT_DEPLOYMENT__ === "static";
+  }
+
+  function activateLocalMode() {
+    try {
+      window.localStorage.setItem(STORAGE_MODE_KEY, "indexeddb");
+    } catch {
+      /* ignore */
+    }
+    return true;
+  }
+
+  function deactivateLocalMode() {
+    try {
+      window.localStorage.removeItem(STORAGE_MODE_KEY);
+    } catch {
+      /* ignore */
+    }
+    return true;
   }
 
   async function getSnapshot(options = {}) {
@@ -188,6 +240,30 @@
     }));
   }
 
+  // Saved custom queries are the contract the user reviews and the scan runs.
+  // Hand-written, imported, and older local plans may predate the GitHub
+  // qualifier requirement, so missing scope qualifiers are completed here and
+  // again on save instead of being swapped in silently during a scan.
+  function ensurePlanQueryQualifiers(plan = {}) {
+    if (!plan || plan.id === "default") return plan;
+    const logic = plan.searchLogic || plan.strategy || {};
+    if (!Array.isArray(logic.customQueries) || !logic.customQueries.length) return plan;
+    let changed = false;
+    const customQueries = logic.customQueries.map((item) => {
+      const source = typeof item === "string" ? { query: item } : item || {};
+      const raw = String(source.query || source.q || "").trim();
+      if (!raw) return item;
+      const query = domainCore.completePlanQuery(raw);
+      if (query === raw) return item;
+      changed = true;
+      return { ...source, query };
+    });
+    if (!changed) return plan;
+    plan.searchLogic = { ...logic, customQueries };
+    plan.strategy = plan.searchLogic;
+    return plan;
+  }
+
   function ensureDefaultObservationPlan(snapshot = {}) {
     snapshot.store = snapshot.store || {};
     snapshot.store.observationPlans = snapshot.store.observationPlans || {};
@@ -209,6 +285,10 @@
   }
 
   async function requireSnapshot() {
+    // The public static deployment has no server, so the review copy of the
+    // workspace is seeded from a snapshot of real GitHub metadata before any
+    // handler reads state. Concurrent first requests share one seeding promise.
+    await ensureDemoSnapshot();
     const snapshot = (await getSnapshot({ includeProjects: false })) || emptySnapshot();
     snapshot.store = snapshot.store || {};
     snapshot.store.projects = snapshot.store.projects || {};
@@ -217,8 +297,15 @@
     snapshot.store.leaderboards = snapshot.store.leaderboards || { daily: {} };
     snapshot.store.observationPlans = snapshot.store.observationPlans || {};
     ensureDefaultObservationPlan(snapshot);
+    Object.values(snapshot.store.observationPlans).forEach((plan) => ensurePlanQueryQualifiers(plan));
     snapshot.activeObservationPlanId = snapshot.activeObservationPlanId || snapshot.settings?.activeObservationPlanId || "default";
-    snapshot.settings = { ...defaultSettings(), ...(snapshot.settings || {}), activeObservationPlanId: snapshot.activeObservationPlanId };
+    const savedSettings = snapshot.settings || {};
+    snapshot.settings = {
+      ...defaultSettings(),
+      ...savedSettings,
+      activeObservationPlanId: snapshot.activeObservationPlanId,
+      llmProviders: (savedSettings.llmProviders || defaultSettings().llmProviders).map(normalizeProvider)
+    };
     const active = activePlan(snapshot);
     snapshot.store.memory = active.memory || snapshot.store.memory || defaultMemory();
     snapshot.counts = {
@@ -227,6 +314,259 @@
       observationPlans: Object.keys(snapshot.store.observationPlans || {}).length
     };
     return snapshot;
+  }
+
+  function demoSnapshotUrl() {
+    try {
+      const base = window.document?.baseURI || window.location?.href || window.location?.origin || "/";
+      return new URL(DEMO_SNAPSHOT_FILE, base).href;
+    } catch {
+      return DEMO_SNAPSHOT_FILE;
+    }
+  }
+
+  // Only the real application (bootstrapped by public/bootstrap.js) seeds the
+  // demo. Unit tests that drive the local API directly stay on empty storage.
+  function demoSeedingEnabled() {
+    return window.__STARVAULT_BOOTSTRAPPED__ === true;
+  }
+
+  function carriesCredentialField(value, depth = 0) {
+    if (!value || typeof value !== "object" || depth > 6) return false;
+    if (Array.isArray(value)) return value.some((entry) => carriesCredentialField(entry, depth + 1));
+    return Object.entries(value).some(([key, entry]) => CREDENTIAL_FIELD.test(String(key)) || carriesCredentialField(entry, depth + 1));
+  }
+
+  function validDemoSnapshot(demo) {
+    if (!demo || demo.schema !== DEMO_SNAPSHOT_SCHEMA) return false;
+    if (!demo.plan?.id || demo.plan.id === "default") return false;
+    if (!Array.isArray(demo.profiles) || !demo.profiles.length) return false;
+    if (!Array.isArray(demo.items) || !demo.items.length) return false;
+    // The demo file is public data. Refuse to seed anything that looks like it
+    // smuggled a credential into the published snapshot.
+    if (carriesCredentialField(demo)) return false;
+    return demo.items.every((item) => {
+      const repo = item?.repository || {};
+      return Number(repo.id) > 0 && String(repo.full_name || "").includes("/") && !repo.archived && !repo.disabled;
+    });
+  }
+
+  function hasStoredSecret(secrets = {}) {
+    return Object.values(secrets || {}).some((value) => {
+      if (typeof value === "string") return Boolean(value.trim());
+      if (value && typeof value === "object") return hasStoredSecret(value);
+      return false;
+    });
+  }
+
+  function countsByPlan(leaderboards = {}) {
+    const archived = Object.keys(leaderboards?.daily || {}).length;
+    return archived + Object.values(leaderboards?.byPlan || {}).reduce((total, entry) => total + Object.keys(entry?.daily || {}).length, 0);
+  }
+
+  // Seeding must never overwrite a workspace someone already created: any
+  // project, scan, task, archive, extra plan, preference or credential blocks it.
+  async function demoSeedBlocked(snapshot, storedProjectCount = 0) {
+    const secrets = await getSecrets();
+    if (hasStoredSecret(secrets)) return "secrets";
+    if (storedProjectCount > 0) return "projects";
+    if (!snapshot?.store) return "";
+    const store = snapshot.store;
+    const plans = Object.values(store.observationPlans || {});
+    const defaultPlan = plans.find((plan) => plan?.id === "default") || {};
+    const userData = defaultPlan.userData || {};
+    const userRecords = ["watchlist", "githubActions", "notes", "analysis", "dismissedProjects"]
+      .reduce((total, key) => total + Object.keys(userData[key] || {}).length, 0);
+    const memoryEvents = (defaultPlan.memory?.events || []).length + (defaultPlan.memory?.shortTerm || []).length;
+    if (Object.keys(store.projects || {}).length) return "projects";
+    if ((store.scans || []).length) return "scans";
+    if (Object.keys(store.tasks || {}).length) return "tasks";
+    if (countsByPlan(store.leaderboards)) return "leaderboards";
+    if (plans.some((plan) => plan?.id !== "default")) return "plans";
+    if (userRecords) return "user-data";
+    if (memoryEvents) return "memory";
+    return "";
+  }
+
+  function demoPlanRecord(demo, timestamp) {
+    const source = demo.plan || {};
+    const logic = clone(source.searchLogic || source.strategy || {}, {});
+    const requirements = (Array.isArray(source.requirements) ? source.requirements : [])
+      .map((item, index) => ({
+        id: String(item?.id || `${source.id}-requirement-${index + 1}`),
+        text: String(item?.text || item?.textZh || ""),
+        textEn: String(item?.textEn || item?.text || ""),
+        createdAt: timestamp,
+        updatedAt: timestamp
+      }))
+      .filter((item) => item.text || item.textEn);
+    return {
+      id: String(source.id),
+      name: source.name || source.nameEn || source.id,
+      nameEn: source.nameEn || source.name || source.id,
+      description: source.description || "",
+      descriptionEn: source.descriptionEn || "",
+      requirements,
+      builtIn: false,
+      sample: true,
+      active: false,
+      createdAt: timestamp,
+      updatedAt: timestamp,
+      strategy: logic,
+      searchLogic: logic,
+      summary: {},
+      memory: defaultMemory(),
+      userData: defaultUserData()
+    };
+  }
+
+  function demoProjectsFromSnapshot(demo, plan, timestamp) {
+    const profiles = new Map(
+      (demo.profiles || [])
+        .filter((profile) => profile?.key)
+        .map((profile) => [
+          String(profile.key),
+          {
+            key: String(profile.key),
+            label: String(profile.labelZh || profile.labelEn || profile.key),
+            labelZh: String(profile.labelZh || profile.label || ""),
+            labelEn: String(profile.labelEn || profile.label || "")
+          }
+        ])
+    );
+    const byProject = new Map();
+    for (const item of demo.items || []) {
+      const repository = item?.repository || {};
+      const key = projectKey(repository.full_name);
+      if (!key) continue;
+      const profile = profiles.get(String(item.profileKey || "")) || {
+        key: String(item.profileKey || "demo"),
+        label: String(item.profileLabelZh || item.profileLabelEn || ""),
+        labelZh: String(item.profileLabelZh || ""),
+        labelEn: String(item.profileLabelEn || "")
+      };
+      const project = githubRepoToProject(repository, plan, profile);
+      project.firstSeenAt = timestamp;
+      project.lastSeenAt = timestamp;
+      project.updatedInMonitorAt = timestamp;
+      const planMatch = project.observationPlanMatches?.[plan.id];
+      if (planMatch) {
+        planMatch.firstSeenAt = timestamp;
+        planMatch.lastSeenAt = timestamp;
+      }
+      const previous = byProject.get(key);
+      if (!previous) {
+        byProject.set(key, project);
+        continue;
+      }
+      // One repository can answer several profiles. Keep every match so the
+      // project pool and the leaderboard stay consistent with the plan.
+      previous.profileMatches = domainCore.mergeProfileMatches(previous.profileMatches, project.profileMatches);
+      const previousMatch = previous.observationPlanMatches?.[plan.id];
+      if (previousMatch) {
+        previousMatch.profileMatches = previous.profileMatches;
+        const labels = [previousMatch.profileLabel, item.profileLabelZh].filter(Boolean);
+        previousMatch.profileLabel = Array.from(new Set(labels)).join(" / ");
+      }
+      previous.reasons = Array.from(new Set([...(previous.reasons || []), ...(project.reasons || [])]));
+    }
+    return Object.fromEntries(byProject);
+  }
+
+  function demoSnapshotRecord(demo) {
+    const timestamp = String(demo.generatedAt || nowIso());
+    const archiveDate = timestamp.slice(0, 10);
+    const plan = demoPlanRecord(demo, timestamp);
+    const base = emptySnapshot();
+    const projects = demoProjectsFromSnapshot(demo, plan, timestamp);
+    const projectList = Object.values(projects);
+    const snapshot = {
+      ...base,
+      exportedAt: timestamp,
+      activeObservationPlanId: plan.id,
+      settings: { ...base.settings, activeObservationPlanId: plan.id },
+      store: {
+        ...base.store,
+        createdAt: timestamp,
+        updatedAt: timestamp,
+        projects,
+        observationPlans: { ...base.store.observationPlans, [plan.id]: plan },
+        scans: [
+          {
+            id: `demo-scan-${plan.id}`,
+            at: timestamp,
+            status: "completed",
+            mode: "static-demo-snapshot",
+            observationPlanId: plan.id,
+            observationPlanName: plan.name,
+            received: projectList.length,
+            insertedOrUpdated: projectList.length,
+            profiles: (demo.profiles || []).map((profile) => String(profile.key || "")).filter(Boolean),
+            errors: [],
+            relaxations: []
+          }
+        ],
+        tasks: {},
+        leaderboards: { daily: {}, byPlan: { [plan.id]: { daily: {} } } },
+        memory: plan.memory
+      },
+      counts: { projects: projectList.length, scans: 1, observationPlans: 2 }
+    };
+    const leaderboard = buildLeaderboard(snapshot, { period: "daily", limit: 20 }, projectList);
+    leaderboard.date = archiveDate;
+    leaderboard.generatedAt = timestamp;
+    leaderboard.source = "static-demo-snapshot";
+    snapshot.leaderboard = leaderboard;
+    snapshot.store.leaderboards.byPlan[plan.id].daily[archiveDate] = clone(leaderboard, leaderboard);
+    return snapshot;
+  }
+
+  async function fetchDemoSnapshot() {
+    const response = await fetch(demoSnapshotUrl(), { headers: { Accept: "application/json" } });
+    if (!response.ok) throw new Error(`Demo snapshot unavailable (${response.status})`);
+    return response.json();
+  }
+
+  async function ensureDemoSnapshot() {
+    if (!demoSeedingEnabled()) return false;
+    if (demoSeedPromise) return demoSeedPromise;
+    const db = storage();
+    if (!db?.getValue || !db?.putSnapshot) return false;
+    demoSeedAttempts += 1;
+    demoSeedPromise = (async () => {
+      const seeded = await db.getValue(DEMO_SEED_KEY);
+      if (seeded) return false;
+      // Check the existing workspace before downloading the snapshot: a
+      // returning user must not pay for a demo file that will be discarded.
+      const existing = await db.getSnapshot?.({ includeProjects: true, includeLeaderboards: true });
+      const storedProjectCount = Number((await db.countProjects?.()) || 0);
+      const blocked = await demoSeedBlocked(existing, storedProjectCount);
+      if (blocked) {
+        await db.putValue(DEMO_SEED_KEY, { seededAt: nowIso(), mode: "skipped", reason: blocked });
+        return false;
+      }
+      const demo = await fetchDemoSnapshot();
+      if (!validDemoSnapshot(demo)) {
+        await db.putValue(DEMO_SEED_KEY, { seededAt: nowIso(), mode: "rejected" });
+        return false;
+      }
+      const snapshot = demoSnapshotRecord(demo);
+      await db.putSnapshot(snapshot, { preserveProjects: false, preserveLeaderboards: false });
+      await db.putValue(DEMO_SEED_KEY, {
+        seededAt: nowIso(),
+        mode: "seeded",
+        generatedAt: String(demo.generatedAt || ""),
+        projects: Number(snapshot.counts?.projects || 0)
+      });
+      return true;
+    })().catch(() => {
+      // A static host that serves the app without the demo file must keep
+      // working as an empty local workspace. Retry once per page load, never in
+      // a loop, so a missing file cannot turn into repeated background fetches.
+      if (demoSeedAttempts < 2) demoSeedPromise = null;
+      return false;
+    });
+    return demoSeedPromise;
   }
 
   function defaultSettings() {
@@ -239,6 +579,20 @@
       providerCatalog: { updatedAt: "", endpoints: [] },
       llmProviders: [{ ...DEFAULT_PROVIDER }]
     };
+  }
+
+  function normalizeProvider(provider = {}) {
+    const next = provider.id === "deepseek" ? { ...DEFAULT_PROVIDER, ...provider } : { ...provider };
+    if (next.id !== "deepseek") return next;
+    if (!next.model || LEGACY_DEEPSEEK_FLASH_MODELS.has(next.model)) {
+      next.model = DEFAULT_DEEPSEEK_MODEL;
+    }
+    const models = Array.isArray(next.models) ? next.models.filter(Boolean) : [];
+    const normalizedModels = models.map((model) => LEGACY_DEEPSEEK_FLASH_MODELS.has(model) ? DEFAULT_DEEPSEEK_MODEL : model);
+    next.models = normalizedModels.length
+      ? Array.from(new Set([DEFAULT_DEEPSEEK_MODEL, ...normalizedModels]))
+      : [...DEFAULT_DEEPSEEK_MODELS];
+    return next;
   }
 
   function defaultUserData() {
@@ -442,11 +796,11 @@
     for (const tag of [params.semanticProblem, params.semanticAudience, params.semanticShape]) {
       if (tag && tag !== "all") items = items.filter((project) => tagMatches(project, tag));
     }
-    sortProjects(items, params.sort || snapshot.settings?.defaultSort || "opportunity");
+    sortProjects(items, params.sort || snapshot.settings?.defaultSort || "opportunity", memoryForPlan(snapshot));
     return items;
   }
 
-  function sortProjects(items, sort) {
+  function sortProjects(items, sort, memory = defaultMemory()) {
     const dateValue = (value) => new Date(value || 0).getTime() || 0;
     const score = (project, key) => Number(project.scores?.[key] || 0);
     items.sort((a, b) => {
@@ -457,7 +811,8 @@
       if (sort === "actionability") return score(b, "actionability") - score(a, "actionability");
       if (sort === "productization") return score(b, "productization") - score(a, "productization");
       if (sort === "quality") return score(b, "quality") - score(a, "quality");
-      return score(b, "opportunity") - score(a, "opportunity") || Number(b.stars || 0) - Number(a.stars || 0);
+      const personalized = (project) => score(project, "opportunity") + domainCore.memoryScore(project, memory);
+      return personalized(b) - personalized(a) || Number(b.stars || 0) - Number(a.stars || 0);
     });
   }
 
@@ -472,6 +827,7 @@
     const revealSet = new Set(String(reveal || "").split(",").map((item) => item.trim()).filter(Boolean));
     const settings = { ...defaultSettings(), ...(snapshot.settings || {}) };
     const providers = (settings.llmProviders || [DEFAULT_PROVIDER]).map((provider) => {
+      provider = normalizeProvider(provider);
       const secretProvider = (secrets.llmProviders || {})[provider.id] || {};
       const apiKey = secretProvider.apiKey || provider.apiKey || "";
       const revealProvider = revealSet.has(`provider:${provider.id}`);
@@ -503,7 +859,10 @@
     return {
       ...rest,
       activeProvider: "deepseek",
-      llmProviders: (settings.llmProviders || [DEFAULT_PROVIDER]).map(({ apiKey, clearApiKey, apiKeySet, apiKeyPreview, ...provider }) => provider)
+      llmProviders: (settings.llmProviders || [DEFAULT_PROVIDER]).map((rawProvider) => {
+        const { apiKey, clearApiKey, apiKeySet, apiKeyPreview, ...provider } = normalizeProvider(rawProvider);
+        return provider;
+      })
     };
   }
 
@@ -541,7 +900,12 @@
   }
 
   function summary(snapshot, params = {}, sourceProjects = null) {
-    const items = filterProjects(snapshot, { ...params, limit: "all" }, sourceProjects);
+    const planProjects = sourceProjects || Object.values(snapshot.store.projects || {}).filter((project) => projectMatchesPlan(project, snapshot));
+    const activePlanId = snapshot.activeObservationPlanId || "default";
+    // Scans are per observation plan; a plan that was never scanned must not
+    // inherit another plan's latest scan (or its "已完成" state).
+    const planScans = (snapshot.store.scans || []).filter((scan) => (scan.observationPlanId || "default") === activePlanId);
+    const items = filterProjects(snapshot, { ...params, limit: "all" }, planProjects);
     const counts = {};
     const languages = {};
     const licenses = {};
@@ -557,13 +921,14 @@
     const entries = (source, limit) => Object.entries(source).sort((a, b) => b[1] - a[1]).slice(0, limit).map(([key, count]) => ({ key, count, share: items.length ? count / items.length : 0 }));
     const top = items.slice(0, 120).map(compactProject);
     return {
-      totalProjects: Number(snapshot.counts?.projects || items.length),
+      totalProjects: planProjects.length,
       poolTotal: items.length,
       poolLimit: items.length,
       poolSort: params.sort || snapshot.settings?.defaultSort || "opportunity",
       watched: Object.keys(activeUserData(snapshot).watchlist || {}).length,
-      scans: (snapshot.store.scans || []).slice(0, 10),
-      lastScan: snapshot.store.scans?.[0] || null,
+      scans: planScans.slice(0, 10),
+      lastScan: planScans[0] || null,
+      hasScan: planScans.length > 0,
       byCategory: counts,
       byLicense: licenses,
       byRisk: {},
@@ -590,26 +955,61 @@
     };
   }
 
+  function projectPeriodDelta(project, field, days) {
+    const snapshots = (project.snapshots || []).slice().sort((a, b) => String(a.at || "").localeCompare(String(b.at || "")));
+    if (snapshots.length < 2) return Number(project.trend?.[field] || 0);
+    const cutoff = Date.now() - days * 86400000;
+    const latest = snapshots[snapshots.length - 1];
+    const baseline = snapshots.find((item) => new Date(item.at || 0).getTime() >= cutoff) || snapshots[0];
+    return Math.max(0, Number(latest?.[field] || 0) - Number(baseline?.[field] || 0));
+  }
+
+  function browserLeaderboardScore(project, period, memory) {
+    const memoryBoost = domainCore.memoryScore(project, memory);
+    const opportunity = Number(project.scores?.opportunity || 0);
+    const quality = Number(project.scores?.quality || 0);
+    const momentum = Number(project.scores?.momentum || 0);
+    const actionability = Number(project.scores?.actionability || 0);
+    const community = Number(project.scores?.community || 0);
+    const days = period === "daily" ? 1 : period === "weekly" ? 7 : period === "monthly" ? 30 : 3650;
+    const starDelta = projectPeriodDelta(project, "stars", days);
+    const forkDelta = projectPeriodDelta(project, "forks", days);
+    const trendBoost = Math.min(24, Math.log10(1 + starDelta) * 8 + Math.log10(1 + forkDelta) * 5);
+    const weights = {
+      daily: [0.34, 0.12, 0.26, 0.16, 0.12],
+      weekly: [0.36, 0.17, 0.2, 0.16, 0.11],
+      monthly: [0.38, 0.22, 0.14, 0.16, 0.1],
+      all: [0.34, 0.28, 0.08, 0.19, 0.11]
+    }[period] || [0.36, 0.2, 0.16, 0.17, 0.11];
+    const base = opportunity * weights[0] + quality * weights[1] + momentum * weights[2] + actionability * weights[3] + community * weights[4];
+    return { score: Number((base + trendBoost + memoryBoost).toFixed(2)), memoryBoost: Number(memoryBoost.toFixed(2)), starDelta, forkDelta };
+  }
+
   function buildLeaderboard(snapshot, params = {}, sourceProjects = null) {
     const limit = Math.max(5, Math.min(Number(params.limit || 20), 30));
-    const items = filterProjects(snapshot, { sort: "opportunity", limit: "all" }, sourceProjects)
-      .slice(0, limit)
-      .map((project, index) => ({
+    const period = ["daily", "weekly", "monthly", "all"].includes(params.period) ? params.period : "daily";
+    const memory = memoryForPlan(snapshot);
+    const ranked = filterProjects(snapshot, { sort: "opportunity", limit: "all" }, sourceProjects)
+      .map((project) => ({ project, parts: browserLeaderboardScore(project, period, memory) }))
+      .sort((a, b) => b.parts.score - a.parts.score || Number(b.project.stars || 0) - Number(a.project.stars || 0));
+    const items = ranked.slice(0, limit).map(({ project, parts }, index) => ({
         ...project,
         rank: index + 1,
-        leaderboardScore: Number(project.scores?.opportunity || 0),
+        leaderboardScore: parts.score,
         rankChange: null,
-        scoreParts: { memoryBoost: 0 }
+        scoreParts: parts
       }));
+    const planId = snapshot.activeObservationPlanId || "default";
+    const dailyArchive = planId === "default" ? snapshot.store.leaderboards?.daily || {} : snapshot.store.leaderboards?.byPlan?.[planId]?.daily || {};
     return {
-      period: params.period || "daily",
+      period,
       date: new Date().toISOString().slice(0, 10),
       generatedAt: nowIso(),
       limit,
-      memory: activePlan(snapshot).memory || snapshot.store.memory || defaultMemory(),
+      memory,
       observationPlan: publicPlan(activePlan(snapshot), snapshot.activeObservationPlanId, false),
       items,
-      archiveDates: Object.keys(snapshot.store.leaderboards?.daily || {}).sort().reverse()
+      archiveDates: Object.keys(dailyArchive).sort().reverse()
     };
   }
 
@@ -622,26 +1022,464 @@
     };
   }
 
-  async function githubFetch(path, options = {}) {
-    const secrets = await getSecrets();
-    const response = await fetch(`https://api.github.com${path}`, {
-      ...options,
-      headers: { ...githubHeaders(secrets.githubToken), ...(options.headers || {}) }
-    });
-    const text = await response.text();
-    const json = text ? JSON.parse(text) : {};
-    if (!response.ok) {
-      throw new Error(json.message || `GitHub request failed ${response.status}`);
-    }
-    return json;
+  const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, Math.max(0, Number(ms || 0))));
+
+  function githubHeader(response, name) {
+    return response?.headers?.get?.(name) || response?.headers?.get?.(name.toLowerCase()) || null;
   }
 
-  function githubRepoToProject(repo, planId, profile = {}) {
-    const pushedDays = Math.max(0, Math.floor((Date.now() - new Date(repo.pushed_at || repo.updated_at || Date.now()).getTime()) / 86400000));
-    const starScore = Math.min(45, Math.log10(Math.max(1, Number(repo.stargazers_count || 0))) * 16);
-    const momentum = Math.max(8, Math.min(100, 100 - pushedDays));
-    const opportunity = Math.round(Math.max(10, Math.min(100, starScore + momentum * 0.35 + Math.min(20, Number(repo.forks_count || 0) / 20))));
-    const licenseBucket = repo.license?.spdx_id && repo.license.spdx_id !== "NOASSERTION" ? "permissive-commercial" : "unknown-no-license";
+  function githubResource(path = "") {
+    return /\/search\//i.test(path) ? "search" : /\/graphql\b/i.test(path) ? "graphql" : "core";
+  }
+
+  function githubRequestSpacing(path = "") {
+    const override = Number(window.__STARVAULT_GITHUB_REQUEST_SPACING_MS__);
+    if (Number.isFinite(override) && override >= 0) return override;
+    if (/\/search\//i.test(path)) return 2200;
+    if (/\/graphql\b/i.test(path)) return 900;
+    return 350;
+  }
+
+  function parseRetryAfter(value) {
+    if (!value) return null;
+    const seconds = Number(value);
+    if (Number.isFinite(seconds)) return Math.max(0, seconds * 1000);
+    const time = Date.parse(value);
+    return Number.isFinite(time) ? Math.max(0, time - Date.now()) : null;
+  }
+
+  function updateGithubBudget(response, path) {
+    const remaining = Number(githubHeader(response, "x-ratelimit-remaining"));
+    const reset = Number(githubHeader(response, "x-ratelimit-reset"));
+    if (!Number.isFinite(remaining) && !Number.isFinite(reset)) return;
+    githubRateBudgets.set(githubHeader(response, "x-ratelimit-resource") || githubResource(path), {
+      remaining: Number.isFinite(remaining) ? remaining : null,
+      resetAt: Number.isFinite(reset) && reset > 0 ? reset * 1000 : null
+    });
+  }
+
+  function githubCooldownSnapshot(now = Date.now()) {
+    const untilMs = Number(githubCooldownUntil || 0);
+    const active = untilMs > now;
+    return {
+      active,
+      until: untilMs > 0 ? new Date(untilMs).toISOString() : "",
+      remainingSeconds: active ? Math.ceil((untilMs - now) / 1000) : 0,
+      reason: active ? githubCooldownReason : "",
+      message: active ? githubCooldownMessage : ""
+    };
+  }
+
+  function githubCooldownMessageFor(reason, fallback = "") {
+    const explicit = String(fallback || "").trim();
+    if (explicit) return explicit;
+    return GITHUB_COOLDOWN_MESSAGES[String(reason || "")] || GITHUB_COOLDOWN_MESSAGES.blocked;
+  }
+
+  function persistGithubCooldown(snapshot) {
+    try {
+      Promise.resolve(storage()?.putValue?.(GITHUB_COOLDOWN_KEY, snapshot)).catch(() => {});
+    } catch {
+      /* Persistence is best effort; the in-memory gate still applies. */
+    }
+  }
+
+  // Account-wide circuit breaker. While it is active the browser stops sending
+  // GitHub requests entirely, which is what keeps a rate-limited account from
+  // escalating into a real abuse block.
+  function activateGithubCooldown(options = {}) {
+    const now = Date.now();
+    const delayMs = Math.max(1000, Number(options.delayMs || 0));
+    const until = now + delayMs;
+    const reason = String(options.reason || "blocked");
+    const message = githubCooldownMessageFor(reason, options.message);
+    if (until >= githubCooldownUntil) {
+      githubCooldownUntil = until;
+      githubCooldownReason = reason;
+      githubCooldownMessage = message;
+    } else if (!githubCooldownReason) {
+      githubCooldownReason = reason;
+      githubCooldownMessage = message;
+    }
+    const snapshot = githubCooldownSnapshot(now);
+    persistGithubCooldown(snapshot);
+    return snapshot;
+  }
+
+  function clearGithubCooldown() {
+    const hadCooldown = Boolean(githubCooldownUntil || githubCooldownReason || githubCooldownMessage);
+    githubCooldownUntil = 0;
+    githubCooldownReason = "";
+    githubCooldownMessage = "";
+    const snapshot = githubCooldownSnapshot();
+    if (hadCooldown) persistGithubCooldown(snapshot);
+    return snapshot;
+  }
+
+  function ensureGithubCooldownFresh(now = Date.now()) {
+    if (githubCooldownUntil && githubCooldownUntil <= now) clearGithubCooldown();
+    return githubCooldownSnapshot(now);
+  }
+
+  function createGithubCooldownError(cooldown = githubCooldownSnapshot()) {
+    const error = new Error(cooldown?.message || GITHUB_COOLDOWN_MESSAGES.blocked);
+    error.name = "GithubCooldownError";
+    error.status = 429;
+    error.code = "GITHUB_COOLDOWN";
+    error.cooldown = cooldown;
+    return error;
+  }
+
+  function isGithubCooldownError(error) {
+    if (!error) return false;
+    if (String(error.code || "") === "GITHUB_COOLDOWN") return true;
+    if (String(error.name || "") === "GithubCooldownError") return true;
+    return Boolean(error.cooldown && error.cooldown.active !== false && error.cooldown.until);
+  }
+
+  // A browser refresh or a reopened tab must not hand the account straight back
+  // to GitHub, so the cooldown is restored from IndexedDB exactly once.
+  async function restoreGithubCooldownState() {
+    if (githubCooldownLoaded) return githubCooldownSnapshot();
+    githubCooldownLoaded = true;
+    try {
+      const stored = await storage()?.getValue?.(GITHUB_COOLDOWN_KEY);
+      const untilMs = Date.parse(String(stored?.until || ""));
+      if (Number.isFinite(untilMs) && untilMs > Date.now()) {
+        githubCooldownUntil = untilMs;
+        githubCooldownReason = String(stored.reason || "secondary");
+        githubCooldownMessage = githubCooldownMessageFor(githubCooldownReason, stored.message);
+      }
+    } catch {
+      /* An unreadable record simply means no cooldown is known yet. */
+    }
+    return githubCooldownSnapshot();
+  }
+
+  function githubCooldownState() {
+    return ensureGithubCooldownFresh();
+  }
+
+  // Stop scanning before the account burns its last requests: a soft budget
+  // must never be spent down to the point where GitHub enforces a pause.
+  function githubBudgetCooldown(resource) {
+    const budget = githubRateBudgets.get(resource);
+    if (!budget || budget.remaining === null || !budget.resetAt) return null;
+    const reserve = GITHUB_RATE_RESOURCE_RESERVE[resource] ?? 5;
+    if (budget.remaining > reserve) return null;
+    return activateGithubCooldown({
+      delayMs: Math.max(1000, budget.resetAt - Date.now() + 1000),
+      reason: "budget",
+      message: `GitHub ${resource} 剩余额度只有 ${budget.remaining} 次（安全线 ${reserve} 次），为避免账号被风控，扫描已提前熔断并进入冷却期。`
+    });
+  }
+
+  async function waitForGithubWindow(path) {
+    await restoreGithubCooldownState();
+    const entryCooldown = ensureGithubCooldownFresh();
+    if (entryCooldown.active) throw createGithubCooldownError(entryCooldown);
+    const previous = githubRequestGate;
+    let release = () => {};
+    githubRequestGate = new Promise((resolve) => {
+      release = resolve;
+    });
+    await previous;
+    try {
+      const queueCooldown = ensureGithubCooldownFresh();
+      if (queueCooldown.active) throw createGithubCooldownError(queueCooldown);
+      const budgetCooldown = githubBudgetCooldown(githubResource(path));
+      if (budgetCooldown) throw createGithubCooldownError(budgetCooldown);
+      const wait = Math.max(0, githubNextRequestAt - Date.now());
+      if (wait) await sleep(wait);
+      githubNextRequestAt = Date.now() + githubRequestSpacing(path);
+    } finally {
+      release();
+    }
+  }
+
+  function githubError(message, status, code = "github-request") {
+    const error = new Error(message);
+    error.status = status;
+    error.code = code;
+    return error;
+  }
+
+  async function githubFetch(path, options = {}, requestOptions = {}) {
+    const secrets = await getSecrets();
+    const retries = Math.max(0, Number(requestOptions.retries ?? 2));
+    for (let attempt = 0; attempt <= retries; attempt += 1) {
+      await waitForGithubWindow(path);
+      const response = await fetch(`https://api.github.com${path}`, {
+        ...options,
+        headers: { ...githubHeaders(secrets.githubToken), ...(options.headers || {}) }
+      });
+      updateGithubBudget(response, path);
+      const text = await response.text();
+      let json = {};
+      try {
+        json = text ? JSON.parse(text) : {};
+      } catch {
+        json = { message: text };
+      }
+      if (response.ok) return json;
+      const message = String(json.message || `GitHub request failed ${response.status}`);
+      if (response.status === 401 || /bad credentials|requires authentication/i.test(message)) {
+        throw githubError("GitHub Token 无效或已过期，请重新配置后再扫描。", response.status, "github-auth");
+      }
+      const secondary = response.status === 429 || /secondary rate limit|abuse detection|too many requests|temporarily blocked/i.test(message);
+      const remaining = githubHeader(response, "x-ratelimit-remaining");
+      const primary = remaining === "0" || /API rate limit exceeded/i.test(message);
+      if (secondary || primary) {
+        // Never retry a rate-limited response. GitHub escalates repeated calls
+        // during a penalty window, so the breaker trips on the first hit.
+        const reset = Number(githubHeader(response, "x-ratelimit-reset"));
+        const resetWait = Number.isFinite(reset) && reset > 0 ? Math.max(0, reset * 1000 - Date.now()) : 0;
+        const retryAfter = parseRetryAfter(githubHeader(response, "retry-after"));
+        const delay = secondary
+          ? Math.max(1000, retryAfter ?? 60000)
+          : Math.max(1000, retryAfter ?? resetWait ?? 60000);
+        throw createGithubCooldownError(
+          activateGithubCooldown({ delayMs: delay, reason: secondary ? "secondary" : "primary" })
+        );
+      }
+      throw githubError(`GitHub request failed ${response.status}: ${message.slice(0, 240)}`, response.status);
+    }
+    throw githubError("GitHub request failed", 500);
+  }
+
+  async function validateGithubScanToken() {
+    const status = await githubFetch("/rate_limit", {}, { retries: 0 });
+    for (const [resource, budget] of Object.entries(status.resources || {})) {
+      const remaining = Number(budget?.remaining);
+      const reset = Number(budget?.reset);
+      githubRateBudgets.set(resource, {
+        remaining: Number.isFinite(remaining) ? remaining : null,
+        resetAt: Number.isFinite(reset) && reset > 0 ? reset * 1000 : null
+      });
+    }
+    return status;
+  }
+
+  function keyValidationResult(configured, valid, message = "") {
+    return { configured: Boolean(configured), valid: configured ? Boolean(valid) : null, message };
+  }
+
+  async function fetchWithTimeout(url, options = {}, timeoutMs = 10000) {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), timeoutMs);
+    try {
+      return await fetch(url, { ...options, signal: controller.signal });
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
+  async function exaErrorFromResponse(response) {
+    let text = "";
+    let payload = null;
+    try {
+      text = await response.text();
+    } catch {
+      /* use the status-only message below */
+    }
+    if (text) {
+      try {
+        payload = JSON.parse(text);
+      } catch {
+        payload = null;
+      }
+    }
+    const status = Number(response.status || 0);
+    const tag = String(payload?.tag || "").toUpperCase();
+    const detail = String(payload?.error || payload?.message || payload?.detail || text || "")
+      .replace(/\s+/g, " ")
+      .trim()
+      .slice(0, 240);
+    const paymentTags = ["NO_MORE_CREDITS", "API_KEY_BUDGET_EXCEEDED", "TEAM_BUDGET_EXCEEDED"];
+    const permissionTags = ["TEAM_BLOCKED", "INSUFFICIENT_SCOPE", "FEATURE_DISABLED"];
+    let message = "";
+    if (status === 401 || tag === "INVALID_API_KEY") {
+      message = "Exa Key 无效或已过期，请重新获取。";
+    } else if (status === 402 || paymentTags.includes(tag)) {
+      message = "Exa 额度不足或已超出预算，请前往 Exa 控制台检查余额和用量。";
+    } else if (status === 429 || tag === "RATE_LIMIT_EXCEEDED") {
+      message = "Exa 请求过于频繁，已触发限流，请稍后重试。";
+    } else if (status === 403 || permissionTags.includes(tag)) {
+      message = "Exa Key 权限不足或团队不可用，请检查 Key 权限和团队状态。";
+    } else if (status === 400 || status === 422 || tag.startsWith("INVALID_") || tag === "NUM_RESULTS_EXCEEDED") {
+      message = `Exa 请求参数错误${detail ? `：${detail}` : ""}`;
+    } else if (status >= 500) {
+      message = `Exa 服务暂时不可用（HTTP ${status}），请稍后重试。`;
+    } else {
+      message = `Exa 请求失败（HTTP ${status || "未知"}）${detail ? `：${detail}` : ""}`;
+    }
+    const error = new Error(message);
+    error.status = status;
+    error.tag = tag;
+    error.exaResponseFailure = true;
+    return error;
+  }
+
+  function isProviderAuthError(error) {
+    const status = Number(error?.status || error?.statusCode || 0);
+    const message = String(error?.message || "");
+    return (
+      Boolean(error?.providerAuthFailure) ||
+      status === 401 ||
+      /invalid[_\s-]*api[_\s-]*key|api key.*(?:invalid|expired)|unauthori[sz]ed|authentication|permission denied|bad credentials/i.test(message)
+    );
+  }
+
+  function providerFailureStatus(provider = {}, error) {
+    const message = isProviderAuthError(error)
+      ? `${provider.name || "AI"} API Key 无效或已过期，请重新配置。`
+      : String(error?.message || "Provider request failed").slice(0, 300);
+    return `${isProviderAuthError(error) ? "auth-failed" : "failed"}: ${message}`;
+  }
+
+  function updateProviderStatus(snapshot, providerId, patch = {}) {
+    const providers = (snapshot.settings?.llmProviders || [DEFAULT_PROVIDER]).map((provider) =>
+      provider.id === providerId ? { ...provider, ...patch } : provider
+    );
+    snapshot.settings = {
+      ...snapshot.settings,
+      activeProvider: "deepseek",
+      llmProviders: providers
+    };
+    return providers.find((provider) => provider.id === providerId) || null;
+  }
+
+  async function validateBrowserProviderStatus(snapshot, secrets, providerId = "deepseek") {
+    const provider = activeProvider(snapshot, secrets);
+    if (!provider || provider.id !== providerId || provider.enabled === false || !provider.apiKey) {
+      updateProviderStatus(snapshot, providerId, { testStatus: "", lastTestAt: "" });
+      return { providerId, configured: false, valid: null, authFailure: false };
+    }
+    try {
+      const response = await fetchWithTimeout(`${String(provider.baseUrl || DEFAULT_PROVIDER.baseUrl).replace(/\/+$/, "")}/models`, {
+        headers: {
+          Authorization: `Bearer ${provider.apiKey}`,
+          "Content-Type": "application/json"
+        }
+      });
+      if (!response.ok) {
+        const text = await response.text().catch(() => "");
+        const error = new Error(text.slice(0, 300) || `Provider request failed with ${response.status}`);
+        error.status = response.status;
+        error.providerAuthFailure = response.status === 401;
+        throw error;
+      }
+      const payload = await response.json().catch(() => ({}));
+      const models = Array.isArray(payload.data) ? payload.data.map((item) => item.id).filter(Boolean) : provider.models || [];
+      updateProviderStatus(snapshot, providerId, {
+        models,
+        lastTestAt: nowIso(),
+        testStatus: "ok"
+      });
+      return { providerId, configured: true, valid: true, authFailure: false };
+    } catch (error) {
+      updateProviderStatus(snapshot, providerId, {
+        lastTestAt: nowIso(),
+        testStatus: providerFailureStatus(provider, error)
+      });
+      return {
+        providerId,
+        configured: true,
+        valid: false,
+        authFailure: isProviderAuthError(error),
+        error: String(error?.message || "Provider request failed").slice(0, 300)
+      };
+    }
+  }
+
+  async function validateBrowserServiceKeys(secrets = {}) {
+    const github = secrets.githubToken
+      ? await validateGithubScanToken().then(() => keyValidationResult(true, true)).catch(() => keyValidationResult(true, false, "GitHub Token 无效或已过期"))
+      : keyValidationResult(false, null);
+    const tavily = secrets.tavilyKey
+      ? await fetchWithTimeout("https://api.tavily.com/search", {
+          method: "POST",
+          headers: { "Content-Type": "application/json", Authorization: `Bearer ${secrets.tavilyKey}` },
+          body: JSON.stringify({ query: "GitHub open source", search_depth: "basic", max_results: 1, include_answer: false, include_raw_content: false })
+        }).then((response) => keyValidationResult(true, response.ok, response.ok ? "" : "Tavily Key 无效")).catch(() => keyValidationResult(true, false, "Tavily Key 无效或浏览器无法直连"))
+      : keyValidationResult(false, null);
+    const exa = secrets.exaKey
+      ? await fetchWithTimeout("https://api.exa.ai/search", {
+          method: "POST",
+          headers: { "Content-Type": "application/json", "x-api-key": secrets.exaKey },
+          body: JSON.stringify({ query: "GitHub open source", type: "auto", numResults: 1 })
+        })
+          .then(async (response) => {
+            if (response.ok) return keyValidationResult(true, true);
+            const error = await exaErrorFromResponse(response);
+            return keyValidationResult(true, false, error.message);
+          })
+          .catch((error) =>
+            keyValidationResult(
+              true,
+              false,
+              error?.exaResponseFailure ? error.message : "无法连接 Exa API，请检查网络或浏览器限制后重试。"
+            )
+          )
+      : keyValidationResult(false, null);
+    return { checkedAt: nowIso(), github, tavily, exa };
+  }
+
+  function browserProjectShape(repo = {}) {
+    const text = [repo.name, repo.description, repo.language, ...(repo.topics || [])].filter(Boolean).join(" ").toLowerCase();
+    const rules = [
+      ["plugin-extension", "插件/扩展工具", "Plugin or extension", /\bplugin\b|\bextension\b|\baddon\b|\bworkbench\b/],
+      ["desktop-mobile-app", "桌面/移动应用", "Desktop or mobile app", /desktop app|mobile app|electron|tauri|flutter|react native/],
+      ["web-application", "Web 应用", "Web application", /web app|dashboard|admin panel|workspace|studio|portal|frontend/],
+      ["cli-automation", "CLI/自动化工具", "CLI or automation tool", /\bcli\b|command[- ]line|terminal|automation|workflow|pipeline/],
+      ["api-service", "API/服务", "API or service", /\bapi\b|server|service|gateway|backend/],
+      ["library-sdk", "库/SDK", "Library or SDK", /\blibrary\b|\bsdk\b|framework|package|component|engine/],
+      ["data-format-tool", "格式/数据工具", "Format or data tool", /converter|parser|viewer|editor|format|protocol|database/]
+    ];
+    const match = rules.find(([, , , pattern]) => pattern.test(text));
+    const [key, labelZh, labelEn] = match || ["project-tool", "项目工具", "Project tool"];
+    return { key, label: labelEn, labelZh, labelEn, summaryZh: labelZh, summaryEn: labelEn };
+  }
+
+  function browserProjectScores(repo = {}, licensePolicy = {}) {
+    const now = Date.now();
+    const createdAt = new Date(repo.created_at || repo.createdAt || now).getTime();
+    const pushedAt = new Date(repo.pushed_at || repo.updated_at || repo.pushedAt || now).getTime();
+    const ageDays = Math.max(1, (now - createdAt) / 86400000);
+    const pushedDays = Math.max(0, (now - pushedAt) / 86400000);
+    const stars = Number(repo.stargazers_count ?? repo.stars ?? 0);
+    const forks = Number(repo.forks_count ?? repo.forks ?? 0);
+    const starScale = Math.min(100, Math.log10(Math.max(1, stars)) * 24);
+    const forkScale = Math.min(100, Math.log10(Math.max(1, forks)) * 28);
+    const recency = Math.max(0, 100 - Math.min(100, pushedDays * 0.8));
+    const velocity = Math.min(100, Math.log10(1 + stars / ageDays) * 42);
+    const clarity = Math.min(100, 28 + Math.min(30, String(repo.description || "").length / 4) + Math.min(24, (repo.topics || []).length * 4) + (repo.homepage ? 12 : 0));
+    const licenseRisk = Number(licensePolicy.risk || 58);
+    const quality = Math.max(0, Math.min(100, clarity * 0.38 + recency * 0.34 + starScale * 0.28 - (repo.archived ? 38 : 0)));
+    const community = Math.max(0, Math.min(100, starScale * 0.68 + forkScale * 0.32));
+    const momentum = Math.max(0, Math.min(100, recency * 0.58 + velocity * 0.42));
+    const actionability = Math.max(0, Math.min(100, clarity * 0.55 + quality * 0.25 + (100 - licenseRisk) * 0.2));
+    const productization = Math.max(0, Math.min(100, clarity * 0.64 + community * 0.16 + actionability * 0.2));
+    const risk = Math.max(0, Math.min(100, licenseRisk * 0.62 + (repo.archived ? 28 : 0) + (pushedDays > 730 ? 18 : 0)));
+    const opportunity = Math.max(
+      0,
+      Math.min(100, quality * 0.22 + community * 0.16 + momentum * 0.2 + actionability * 0.24 + productization * 0.18 - risk * 0.12)
+    );
+    return Object.fromEntries(
+      Object.entries({ opportunity, momentum, quality, community, productization, novelty: velocity, risk, licenseRisk, overallRisk: risk, actionability }).map(
+        ([key, value]) => [key, Math.round(value)]
+      )
+    );
+  }
+
+  function githubRepoToProject(repo, plan, profile = {}) {
+    const planId = plan.id;
+    const licensePolicy = domainCore.classifyLicensePolicy(repo.license || null);
+    const categoryLabel = String(profile.labelZh || profile.label || profile.labelEn || plan.name || "扫描发现");
+    const categoryKey = `profile-${domainCore.normalizedId(profile.key || categoryLabel) || domainCore.stableHash(categoryLabel)}`;
+    const shape = browserProjectShape(repo);
+    const evidence = domainCore.profileEvidence(profile);
+    const scores = browserProjectScores(repo, licensePolicy);
     return {
       id: repo.id,
       fullName: repo.full_name,
@@ -665,12 +1503,22 @@
       archived: Boolean(repo.archived),
       disabled: Boolean(repo.disabled),
       fork: Boolean(repo.fork),
-      category: { key: "discovered-project", label: "Discovered Projects", labelZh: "扫描发现项目", labelEn: "Discovered Projects" },
-      useCase: { key: "github-discovery", label: "GitHub discovery", labelZh: "GitHub 项目发现", labelEn: "GitHub discovery" },
-      licensePolicy: { bucket: licenseBucket, label: repo.license?.spdx_id || "Unknown", labelZh: repo.license?.spdx_id || "未知许可", labelEn: repo.license?.spdx_id || "Unknown" },
-      scores: { opportunity, momentum, quality: repo.archived ? 20 : 55, community: Math.min(100, Math.round(starScore * 2)), productization: 50, novelty: 50, risk: repo.archived ? 45 : 10, licenseRisk: licenseBucket === "unknown-no-license" ? 28 : 8, overallRisk: repo.archived ? 45 : 14, actionability: repo.archived ? 25 : 58 },
+      category: { key: categoryKey, label: categoryLabel, labelZh: categoryLabel, labelEn: profile.labelEn || categoryLabel },
+      useCase: shape,
+      semantic: {
+        problem: { key: categoryKey, label: categoryLabel, labelZh: categoryLabel, labelEn: profile.labelEn || categoryLabel },
+        audience: {
+          key: `audience-${domainCore.normalizedId(planId) || "default"}`,
+          label: `${plan.nameEn || plan.name || "Observation"} users`,
+          labelZh: `${plan.name || "当前方案"}关注用户`,
+          labelEn: `${plan.nameEn || plan.name || "Observation"} users`
+        },
+        shape
+      },
+      licensePolicy,
+      scores,
       signals: {},
-      reasons: ["Browser IndexedDB scan result"],
+      reasons: [`命中检索画像：${categoryLabel}`, `许可边界：${licensePolicy.labelZh}`],
       actions: [],
       source: "github-browser",
       firstSeenAt: nowIso(),
@@ -678,86 +1526,462 @@
       updatedInMonitorAt: nowIso(),
       profileKey: profile.key || "",
       profileLabel: profile.label || "",
+      profileMatches: evidence ? [evidence] : [],
       observationPlanMatches: {
         [planId]: {
           planId,
           firstSeenAt: nowIso(),
           lastSeenAt: nowIso(),
           profileKey: profile.key || "",
-          profileLabel: profile.label || ""
+          profileLabel: profile.label || "",
+          profileMatches: evidence ? [evidence] : []
         }
       }
     };
   }
 
+  const BROWSER_QUERY_LIMIT = 30;
+
+  // The default matrix shown by the built-in plan. Reusing the same builder
+  // keeps the mixed-in profiles byte-identical to the visible default queries.
+  function browserDefaultProfiles() {
+    return defaultBrowserSearchLogic().customQueries.map((item) => ({
+      key: item.key,
+      profileId: item.key,
+      label: item.labelZh,
+      labelEn: item.labelEn,
+      labelZh: item.labelZh,
+      query: item.query
+    }));
+  }
+
+  function browserCustomQueryProfiles(plan, logic, assignedQueries) {
+    const fromItem = (item, index) => {
+      const query = String(item?.query || item?.q || "").trim();
+      if (!query) return null;
+      const key = String(item?.profileId || item?.key || `local-${plan.id}-${index + 1}`);
+      return {
+        key,
+        profileId: key,
+        label: String(item?.labelZh || item?.label || item?.labelEn || query),
+        labelEn: String(item?.labelEn || item?.label || ""),
+        labelZh: String(item?.labelZh || item?.label || ""),
+        query
+      };
+    };
+    const profiles = (Array.isArray(assignedQueries) ? assignedQueries : []).map(fromItem).filter(Boolean);
+    if (profiles.length) return profiles.slice(0, BROWSER_QUERY_LIMIT);
+    return (Array.isArray(logic.keywords) ? logic.keywords : [])
+      .map((keyword, index) => {
+        const term = String(keyword || "").trim();
+        if (!term) return null;
+        const key = `local-${plan.id}-keyword-${index + 1}`;
+        return {
+          key,
+          profileId: key,
+          label: term,
+          labelEn: term,
+          labelZh: term,
+          query: `${term} in:name,description,readme archived:false mirror:false`
+        };
+      })
+      .filter(Boolean)
+      .slice(0, BROWSER_QUERY_LIMIT);
+  }
+
+  // Last-resort anchors for a legacy query that carries no usable domain term.
+  // Anchors are never invented from the query: they come from the plan identity.
+  function browserPlanAnchorFallback(plan = {}) {
+    const logic = plan.searchLogic || plan.strategy || {};
+    return domainCore.planAnchorTerms("", [plan.name, plan.nameEn].concat(Array.isArray(logic.keywords) ? logic.keywords : []), {
+      limit: 8,
+      // The last-resort fallback keeps capability words: it only runs when a
+      // query carries no usable subject at all, and an empty anchor list would
+      // drop the profile instead of narrowing it.
+      includeIntent: true
+    });
+  }
+
   function scanProfiles(plan) {
     const logic = plan.searchLogic || plan.strategy || {};
-    const profiles = [];
-    for (const [index, item] of (logic.customQueries || []).entries()) {
-      const query = item.query || item.q;
-      if (!query) continue;
-      profiles.push({
-        key: String(item.key || `local-${plan.id}-${index + 1}`),
-        label: String(item.labelZh || item.label || item.labelEn || query),
-        query: String(query).trim(),
-        index
-      });
+    const planGenerated = Boolean(plan?.id && plan.id !== "default");
+    const assignedQueries = domainCore.assignProfileIds(plan.id, logic.customQueries || [], logic.customQueries || []);
+    if (Array.isArray(logic.customQueries)) {
+      logic.customQueries = assignedQueries;
+      plan.searchLogic = logic;
+      plan.strategy = logic;
     }
-    if (!profiles.length) {
-      for (const [index, keyword] of (logic.keywords || []).entries()) {
-        if (!keyword || profiles.length >= 30) continue;
-        profiles.push({
-          key: `local-${plan.id}-keyword-${index + 1}`,
-          label: String(keyword),
-          query: `${keyword} in:name,description,readme archived:false mirror:false`,
-          index
-        });
-      }
+    const baseMode = planGenerated ? String(logic.baseMode || "only") : "only";
+    // Mode semantics mirror the server scan: only = the plan's own profiles,
+    // focused = its profiles plus the ten strongest default profiles, blend =
+    // its profiles plus the full default matrix. The built-in default plan
+    // already is the matrix, so it never mixes anything into itself.
+    const defaultProfiles =
+      !planGenerated || baseMode === "only"
+        ? []
+        : baseMode === "blend"
+          ? browserDefaultProfiles()
+          : browserDefaultProfiles().slice(0, 10);
+    const customProfiles = browserCustomQueryProfiles(plan, logic, assignedQueries).map((profile) => ({
+      ...profile,
+      planGenerated
+    }));
+    const claimed = new Set();
+    const profiles = [];
+    for (const item of [...customProfiles, ...defaultProfiles.map((profile) => ({ ...profile, planGenerated: false }))]) {
+      const query = lower(item.query);
+      if (!query || claimed.has(query)) continue;
+      claimed.add(query);
+      profiles.push(item);
     }
     const memory = plan.memory || defaultMemory();
-    const seen = new Set();
+    const fallbackAnchors = planGenerated ? browserPlanAnchorFallback(plan) : [];
     return profiles
-      .filter((profile) => {
-        const query = lower(profile.query);
-        if (!query || seen.has(query)) return false;
-        seen.add(query);
-        return true;
-      })
-      .slice(0, 30)
+      .map((profile, index) => ({ ...profile, index }))
       .map((profile) => {
+        const requiresAnchors = Boolean(profile.planGenerated);
+        const profileAnchors = requiresAnchors
+          ? domainCore.planAnchorTerms(profile.query, [profile.label, profile.labelZh, profile.labelEn], { limit: 16 })
+          : [];
+        const planAnchors = requiresAnchors ? (profileAnchors.length ? profileAnchors : fallbackAnchors) : [];
         const learnedSignal = Number(memory.discoveryProfiles?.[profile.key] || 0);
         return {
           ...profile,
+          // Generated profiles fail closed: without a verifiable anchor they
+          // are dropped instead of widening the pool with unrelated hits.
+          planGenerated: requiresAnchors,
+          planAnchors,
           learnedSignal,
           perPage: Math.max(20, Math.min(60, 30 + Math.round(Math.max(-5, Math.min(15, learnedSignal)) * 2)))
         };
       })
+      .filter((profile) => !profile.planGenerated || profile.planAnchors.length > 0)
       .sort((a, b) => b.learnedSignal - a.learnedSignal || a.index - b.index);
   }
 
-  async function runBrowserScan(snapshot, requestedPlanId = "") {
+  function githubNamesFromSignals(signals = []) {
+    const names = new Set();
+    for (const signal of signals) {
+      const text = [signal.url, signal.title, signal.content].filter(Boolean).join(" ");
+      for (const match of text.matchAll(/github\.com\/([a-z0-9_.-]+)\/([a-z0-9_.-]+)/gi)) {
+        const repo = `${match[1]}/${match[2].replace(/(?:\.git)?[?#/].*$/i, "").replace(/\.git$/i, "")}`;
+        if (!/^(topics|collections|trending|features|settings)\//i.test(repo)) names.add(repo);
+      }
+    }
+    return Array.from(names).slice(0, 8);
+  }
+
+  // Relevance gate shared with the server scan. Anchor extraction, low-value
+  // container filtering and anchor matching all live in the domain core so the
+  // browser pool cannot drift from the server pool for the same plan.
+  function browserRepositoryAllowed(profile = {}, repo = {}) {
+    if (!profile.planGenerated) return true;
+    if (domainCore.isLowValuePlanContainer(repo)) return false;
+    return domainCore.repositoryMatchesPlanAnchors(repo, profile.planAnchors);
+  }
+
+  function browserPlanLevelAnchors(plan, profiles = []) {
+    if (!plan || plan.id === "default") return [];
+    const anchors = [];
+    for (const profile of profiles) {
+      for (const term of profile.planAnchors || []) {
+        if (anchors.length >= 32) break;
+        if (!anchors.some((item) => item.toLowerCase() === String(term).toLowerCase())) anchors.push(term);
+      }
+    }
+    return anchors.length ? anchors : browserPlanAnchorFallback(plan);
+  }
+
+  async function browserScanExternalDiscovery(plan) {
+    const secrets = await getSecrets();
+    const logic = plan.searchLogic || plan.strategy || {};
+    const query = [
+      plan.name || plan.nameEn || "",
+      plan.description || "",
+      ...(Array.isArray(logic.keywords) ? logic.keywords.slice(0, 12) : []),
+      "GitHub repositories"
+    ].join(" ").replace(/\s+/g, " ").trim();
+    const result = { signals: [], errors: [] };
+    const jobs = [];
+    if (secrets.tavilyKey) {
+      jobs.push(browserTavilySearch(query, secrets.tavilyKey).then((items) => result.signals.push(...items)).catch((error) => result.errors.push(`Tavily: ${error.message}`)));
+    }
+    if (secrets.exaKey) {
+      jobs.push(browserExaSearch(query, secrets.exaKey).then((items) => result.signals.push(...items)).catch((error) => result.errors.push(`Exa: ${error.message}`)));
+    }
+    await Promise.all(jobs);
+    result.repositories = githubNamesFromSignals(result.signals);
+    return result;
+  }
+
+  function mergeBrowserScanProject(seen, project, planId) {
+    const key = projectKey(project?.fullName);
+    if (!key) return;
+    if (!seen.has(key)) {
+      seen.set(key, project);
+      return;
+    }
+    const previous = seen.get(key);
+    previous.profileMatches = domainCore.mergeProfileMatches(previous.profileMatches, project.profileMatches);
+    previous.observationPlanMatches = {
+      ...(previous.observationPlanMatches || {}),
+      ...(project.observationPlanMatches || {})
+    };
+    if (planId) {
+      previous.observationPlanMatches[planId] = {
+        ...(previous.observationPlanMatches[planId] || {}),
+        ...(project.observationPlanMatches?.[planId] || {}),
+        planId,
+        profileMatches: previous.profileMatches
+      };
+    }
+    previous.signals = { ...(previous.signals || {}), ...(project.signals || {}) };
+  }
+
+  function applyBrowserScanArtifact(seen, errors, relaxations, artifact, planId) {
+    for (const project of artifact?.projects || []) mergeBrowserScanProject(seen, project, planId);
+    for (const error of artifact?.errors || []) {
+      if (error && !errors.includes(error)) errors.push(error);
+    }
+    for (const relaxation of artifact?.relaxations || []) {
+      if (relaxation) relaxations.push(relaxation);
+    }
+  }
+
+  function initialBrowserScanCheckpoint(task, planId) {
+    const current = task?.checkpoint;
+    if (current?.version === 1 && current.planId === planId) {
+      return {
+        ...current,
+        completedProfiles: Array.isArray(current.completedProfiles) ? current.completedProfiles : []
+      };
+    }
+    return {
+      version: 1,
+      planId,
+      stage: "prepare",
+      completedProfiles: [],
+      externalCompleted: false,
+      scanId: ""
+    };
+  }
+
+  async function persistBrowserScanCheckpoint(snapshot, task, checkpoint, patch = {}) {
+    if (!task) return { ...checkpoint, ...patch };
+    const next = { ...checkpoint, ...patch };
+    task.checkpoint = next;
+    task.updatedAt = nowIso();
+    await saveSnapshot(snapshot);
+    return next;
+  }
+
+  // A niche domain gets exactly one controlled second look. Only stars and
+  // recency limiters are dropped; the query core, scope qualifiers and every
+  // anti-noise exclusion stay intact, and the relaxed results still pass the
+  // same anchor gate as the original query.
+  function shouldRelaxBrowserProfile(profile = {}, stats = {}) {
+    if (!profile.planGenerated) return false;
+    const query = String(profile.query || "");
+    if (!/\b(?:stars|pushed|created):/i.test(query)) return false;
+    if (domainCore.relaxPlanQuery(query) === query) return false;
+    const accepted = Number(stats.accepted || 0);
+    const totalCount = Number(stats.totalCount || 0);
+    if (accepted <= 0) return true;
+    const minimumYield = Math.max(1, Math.min(3, Math.ceil(Number(profile.perPage || 30) / 10)));
+    return totalCount > 0 && totalCount < 10 && accepted < minimumYield;
+  }
+
+  // Some GitHub failures must abort the whole scan instead of being collected
+  // per profile: an auth failure or an active cooldown means every remaining
+  // request would fail the same way (and a cooldown must reach the task record).
+  function isFatalGithubScanError(error) {
+    return ["github-auth", "github-rate-limit"].includes(error?.code) ||
+      isGithubCooldownError(error) ||
+      Boolean(error?.cooldown?.active);
+  }
+
+  async function browserSearchProfile(plan, profile) {
+    const projects = [];
+    const errors = [];
+    const relaxations = [];
+    let accepted = 0;
+    let totalCount = 0;
+    let originalTotalCount = 0;
+    const runQuery = async (query) => {
+      const params = new URLSearchParams({
+        q: query,
+        sort: "stars",
+        order: "desc",
+        per_page: String(profile.perPage),
+        page: "1"
+      });
+      const result = await githubFetch(`/search/repositories?${params.toString()}`);
+      totalCount = Number(result?.total_count || 0);
+      let localAccepted = 0;
+      for (const repo of result?.items || []) {
+        if (!browserRepositoryAllowed(profile, repo)) continue;
+        localAccepted += 1;
+        projects.push(githubRepoToProject(repo, plan, profile));
+      }
+      return localAccepted;
+    };
+    try {
+      accepted = await runQuery(profile.query);
+      originalTotalCount = totalCount;
+    } catch (error) {
+      if (isFatalGithubScanError(error)) throw error;
+      errors.push(error.message);
+    }
+    if (shouldRelaxBrowserProfile(profile, { accepted, totalCount: originalTotalCount })) {
+      const relaxedQuery = domainCore.relaxPlanQuery(profile.query);
+      if (relaxedQuery && relaxedQuery !== profile.query) {
+        try {
+          const matchedAfterRelaxation = await runQuery(relaxedQuery);
+          relaxations.push({
+            profile: profile.key,
+            query: profile.query,
+            executedQuery: relaxedQuery,
+            reportedTotalCount: originalTotalCount,
+            matchedBeforeRelaxation: accepted,
+            matchedAfterRelaxation
+          });
+        } catch (error) {
+          if (isFatalGithubScanError(error)) throw error;
+          errors.push(`Relaxed search: ${error.message}`);
+        }
+      }
+    }
+    return { projects, errors, relaxations };
+  }
+
+  async function runBrowserScan(snapshot, requestedPlanId = "", task = null) {
     const planId = String(requestedPlanId || snapshot.activeObservationPlanId || "default");
     const plan = snapshot.store.observationPlans?.[planId];
     if (!plan) throw new Error("扫描任务对应的观察方案已不存在。");
+    await validateGithubScanToken();
+    if (task?.checkpoint?.planId && task.checkpoint.planId !== planId) {
+      await storage().clearTaskArtifacts?.(task.id);
+      task.checkpoint = null;
+    }
+    let checkpoint = initialBrowserScanCheckpoint(task, planId);
+    const completedScan = checkpoint.stage === "completed" && checkpoint.scanId
+      ? (snapshot.store.scans || []).find((item) => item.id === checkpoint.scanId)
+      : null;
+    if (completedScan) return completedScan;
     const profiles = scanProfiles(plan);
     if (!profiles.length) throw new Error("当前观察方案没有可执行的检索逻辑。");
     const seen = new Map();
     const errors = [];
+    const relaxations = [];
+    const artifacts = task ? await storage().getTaskArtifacts?.(task.id) || {} : {};
     for (const profile of profiles) {
-      try {
-        const params = new URLSearchParams({ q: profile.query, sort: "stars", order: "desc", per_page: String(profile.perPage), page: "1" });
-        const result = await githubFetch(`/search/repositories?${params.toString()}`);
-        for (const repo of result.items || []) {
-          if (!seen.has(repo.full_name)) seen.set(repo.full_name, githubRepoToProject(repo, plan.id, profile));
+      const artifactKey = `github:${profile.index}:${profile.key}`;
+      let artifact = checkpoint.completedProfiles.includes(artifactKey) ? artifacts[artifactKey] : null;
+      if (!artifact) {
+        artifact = await browserSearchProfile(plan, profile);
+        if (task) {
+          await storage().putTaskArtifact(task.id, artifactKey, artifact);
+          artifacts[artifactKey] = artifact;
+          checkpoint = await persistBrowserScanCheckpoint(snapshot, task, checkpoint, {
+            stage: "github-search",
+            completedProfiles: [...checkpoint.completedProfiles.filter((key) => key !== artifactKey), artifactKey]
+          });
         }
-      } catch (error) {
-        errors.push(error.message);
       }
+      applyBrowserScanArtifact(seen, errors, relaxations, artifact, plan.id);
     }
     if (!seen.size && errors.length) throw new Error(errors[0]);
-    await storage().replaceProjectsForPlan(plan.id, Array.from(seen.values()));
+    const externalArtifactKey = "external-discovery";
+    let externalArtifact = checkpoint.externalCompleted ? artifacts[externalArtifactKey] : null;
+    if (!externalArtifact) {
+      const external = await browserScanExternalDiscovery(plan);
+      const externalProjects = [];
+      const externalErrors = [...external.errors];
+      const externalProfile = {
+        key: `profile-${domainCore.normalizedId(plan.id) || "default"}-external-web`,
+        profileId: `profile-${domainCore.normalizedId(plan.id) || "default"}-external-web`,
+        label: "外部研究信号",
+        labelZh: "外部研究信号",
+        labelEn: "External research signals",
+        query: `${plan.name || plan.nameEn || ""} GitHub repositories`,
+        planGenerated: plan.id !== "default",
+        planAnchors: browserPlanLevelAnchors(plan, profiles)
+      };
+      for (const fullName of external.repositories || []) {
+        const existing = seen.get(projectKey(fullName));
+        const matchedSignals = external.signals.filter((signal) => [signal.url, signal.title, signal.content].join(" ").toLowerCase().includes(fullName.toLowerCase()));
+        if (existing) {
+          const project = clone(existing, existing);
+          project.signals = { ...(project.signals || {}), externalWeb: matchedSignals };
+          externalProjects.push(project);
+          continue;
+        }
+        try {
+          const repo = await githubFetch(`/repos/${fullName.split("/").map(encodeURIComponent).join("/")}`);
+          if (!browserRepositoryAllowed(externalProfile, repo)) continue;
+          const project = githubRepoToProject(repo, plan, externalProfile);
+          project.signals.externalWeb = matchedSignals;
+          project.source = "github-browser-external-discovery";
+          externalProjects.push(project);
+        } catch (error) {
+          if (isFatalGithubScanError(error)) throw error;
+          externalErrors.push(`External discovery ${fullName}: ${error.message}`);
+        }
+      }
+      externalArtifact = { projects: externalProjects, errors: externalErrors };
+      if (task) {
+        await storage().putTaskArtifact(task.id, externalArtifactKey, externalArtifact);
+        artifacts[externalArtifactKey] = externalArtifact;
+        checkpoint = await persistBrowserScanCheckpoint(snapshot, task, checkpoint, {
+          stage: "external-discovery",
+          externalCompleted: true
+        });
+      }
+    }
+    applyBrowserScanArtifact(seen, errors, relaxations, externalArtifact, plan.id);
+    const projects = Array.from(seen.values());
+    const previousProjects = await storage().getProjects(projects.map((project) => project.fullName));
+    const previousByKey = new Map(previousProjects.map((project) => [projectKey(project.fullName), project]));
+    const scannedAt = nowIso();
+    for (const project of projects) {
+      const previous = previousByKey.get(projectKey(project.fullName));
+      const snapshotEntry = {
+        at: scannedAt,
+        stars: Number(project.stars || 0),
+        forks: Number(project.forks || 0),
+        openIssues: Number(project.openIssues || 0),
+        opportunity: Number(project.scores?.opportunity || 0),
+        momentum: Number(project.scores?.momentum || 0),
+        risk: Number(project.scores?.risk || 0)
+      };
+      project.firstSeenAt = previous?.firstSeenAt || scannedAt;
+      project.lastSeenAt = scannedAt;
+      project.snapshots = [...(previous?.snapshots || []), snapshotEntry].slice(-180);
+      project.trend = previous
+        ? {
+            stars: Number(project.stars || 0) - Number(previous.stars || 0),
+            forks: Number(project.forks || 0) - Number(previous.forks || 0),
+            date: scannedAt.slice(0, 10),
+            status: "ready",
+            source: "github-browser-snapshots",
+            updatedAt: scannedAt,
+            complete: true
+          }
+        : {
+            stars: 0,
+            forks: 0,
+            date: scannedAt.slice(0, 10),
+            status: "baseline",
+            source: "github-browser-snapshots",
+            updatedAt: scannedAt,
+            complete: false
+          };
+    }
+    await storage().replaceProjectsForPlan(plan.id, projects);
+    checkpoint = await persistBrowserScanCheckpoint(snapshot, task, checkpoint, { stage: "persisted" });
+    const scanId = task ? `browser-scan-${task.id}` : `browser-scan-${Date.now()}`;
     const scan = {
-      id: `browser-scan-${Date.now()}`,
+      id: scanId,
       at: nowIso(),
       status: errors.length ? "completed-with-errors" : "completed",
       mode: "browser-indexeddb",
@@ -766,14 +1990,30 @@
       received: seen.size,
       insertedOrUpdated: seen.size,
       profiles: profiles.map((profile) => profile.key),
-      errors
+      errors,
+      // Controlled sparse-domain relaxations actually executed by this scan.
+      relaxations
     };
-    snapshot.store.scans = [scan, ...(snapshot.store.scans || [])].slice(0, 120);
+    snapshot.store.scans = [scan, ...(snapshot.store.scans || []).filter((item) => item.id !== scan.id)].slice(0, 120);
     const planProjects = await projectsForActivePlan(snapshot);
     snapshot.counts = { ...(snapshot.counts || {}), projects: await storage().countProjects() };
     snapshot.summary = summary(snapshot, {}, planProjects);
     snapshot.leaderboard = buildLeaderboard(snapshot, { limit: 20 }, planProjects);
+    const archiveDate = scannedAt.slice(0, 10);
+    if (plan.id === "default") {
+      snapshot.store.leaderboards.daily = snapshot.store.leaderboards.daily || {};
+      snapshot.store.leaderboards.daily[archiveDate] = clone(snapshot.leaderboard, snapshot.leaderboard);
+    } else {
+      snapshot.store.leaderboards.byPlan = snapshot.store.leaderboards.byPlan || {};
+      snapshot.store.leaderboards.byPlan[plan.id] = snapshot.store.leaderboards.byPlan[plan.id] || { daily: {} };
+      snapshot.store.leaderboards.byPlan[plan.id].daily[archiveDate] = clone(snapshot.leaderboard, snapshot.leaderboard);
+    }
     updateCounts(snapshot);
+    if (task) {
+      checkpoint = { ...checkpoint, stage: "completed", scanId: scan.id };
+      task.checkpoint = checkpoint;
+      task.updatedAt = nowIso();
+    }
     await saveSnapshot(snapshot);
     return scan;
   }
@@ -851,7 +2091,10 @@
       payload = { raw: text };
     }
     if (!response.ok) {
-      throw new Error(payload?.error?.message || payload?.message || `模型接口请求失败 ${response.status}`);
+      const error = new Error(payload?.error?.message || payload?.message || `模型接口请求失败 ${response.status}`);
+      error.status = response.status;
+      error.providerAuthFailure = [401, 403].includes(response.status);
+      throw error;
     }
     const content = payload?.choices?.[0]?.message?.content || payload?.content || payload?.raw || "";
     return {
@@ -926,12 +2169,75 @@
     return { provider: analysis.provider, model: analysis.model, analysis, project: await hydratedProject(snapshot, key, planId) };
   }
 
-  function normalizeBrowserPlan(plan = {}, fallback = {}) {
+  // Browser mode mirrors the server rule: plan ids stay ASCII-safe, and an id
+  // is derived from the plan name when none was provided. Chinese-only names
+  // such as「抖音」would otherwise normalize to "" and mint a fresh
+  // `plan-<timestamp>` on every save, leaving each copy with an empty pool.
+  function stableBrowserPlanId(plan = {}, fallbackName = "") {
+    const explicit = domainCore.normalizedId(plan?.id);
+    if (explicit) return explicit;
+    const name = String(plan?.name || fallbackName || "").replace(/\s+/g, " ").trim();
+    const nameEn = String(plan?.nameEn || "").replace(/\s+/g, " ").trim();
+    const seed = (name || nameEn || "observation-plan").toLowerCase().slice(0, 160);
+    const slug = domainCore.normalizedId(seed);
+    if (slug && slug === seed && slug !== "default") return slug;
+    const hash = domainCore.stableHash(seed);
+    return slug && slug !== "default" ? `${slug.slice(0, 40)}-${hash}` : `plan-${hash}`;
+  }
+
+  function browserPlanName(value = "") {
+    return String(value || "")
+      .replace(/\s+/g, " ")
+      .trim()
+      .toLowerCase();
+  }
+
+  // Mirrors the server rule: a draft saved without an id adopts an existing
+  // plan that already owns its name, so regenerating「抖音」lands on the plan
+  // that holds the scanned pool instead of forking a second empty one.
+  function sameNameBrowserPlanId(snapshot, plan = {}) {
+    const target = browserPlanName(plan?.name || plan?.nameEn || "");
+    if (!target) return "";
+    const candidates = Object.values(snapshot?.store?.observationPlans || {}).filter(
+      (candidate) =>
+        candidate &&
+        candidate.id !== "default" &&
+        !candidate.builtIn &&
+        browserPlanName(candidate.name || candidate.nameEn || "") === target
+    );
+    if (!candidates.length) return "";
+    const scans = Array.isArray(snapshot?.store?.scans) ? snapshot.store.scans : [];
+    const projects = Object.values(snapshot?.store?.projects || {});
+    return candidates
+      .map((candidate) => ({
+        id: candidate.id,
+        hasScan: scans.some((scan) => String(scan?.observationPlanId || scan?.planId || "default") === candidate.id) ? 1 : 0,
+        projectCount: projects.filter((project) => project?.observationPlanMatches?.[candidate.id]).length,
+        updatedAt: String(candidate.updatedAt || "")
+      }))
+      .sort(
+        (a, b) =>
+          b.hasScan - a.hasScan ||
+          b.projectCount - a.projectCount ||
+          b.updatedAt.localeCompare(a.updatedAt)
+      )[0].id;
+  }
+
+  function normalizeBrowserPlan(plan = {}, fallback = {}, previousPlan = null) {
     const name = fallback.name || plan.name || "自定义观察";
     const logic = plan.searchLogic || plan.strategy || {};
-    const customQueries = Array.isArray(logic.customQueries) ? logic.customQueries : [];
+    const id = plan.id || previousPlan?.id || stableBrowserPlanId({ ...plan, name: plan.name || name }, name);
+    const incomingQueries = (Array.isArray(logic.customQueries) ? logic.customQueries : []).map((item) => {
+      const source = typeof item === "string" ? { query: item } : item || {};
+      return { ...source, query: domainCore.completePlanQuery(source.query || source.q || "") };
+    });
+    const customQueries = domainCore.assignProfileIds(
+      id,
+      incomingQueries,
+      previousPlan?.searchLogic?.customQueries || previousPlan?.strategy?.customQueries || []
+    );
     return {
-      id: plan.id || `plan-${Date.now()}`,
+      id,
       name,
       nameEn: fallback.name || plan.nameEn || name,
       description: plan.description || `围绕「${name}」发现值得学习、理解与持续跟踪的项目。`,
@@ -946,6 +2252,7 @@
         excludeTerms: Array.isArray(logic.excludeTerms) ? logic.excludeTerms.slice(0, 20) : [],
         customQueries: customQueries
           .map((item) => ({
+            profileId: item.profileId,
             label: item.label || item.labelZh || item.query || "",
             labelZh: item.labelZh || item.label || "",
             labelEn: item.labelEn || item.label || "",
@@ -965,7 +2272,80 @@
     };
   }
 
-  function browserPlanGenerationPrompt(name, idea, repair = null) {
+  async function browserTavilySearch(query, key, maxResults = 6) {
+    if (!key) return [];
+    const response = await fetchWithTimeout("https://api.tavily.com/search", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Authorization: `Bearer ${key}` },
+      body: JSON.stringify({ query, search_depth: "basic", max_results: maxResults, include_answer: false, include_raw_content: false })
+    });
+    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+    const payload = await response.json();
+    return (payload.results || []).slice(0, maxResults).map((item) => ({ source: "tavily", title: item.title || "", content: item.content || "", url: item.url || "" }));
+  }
+
+  async function browserExaSearch(query, key, maxResults = 6) {
+    if (!key) return [];
+    const response = await fetchWithTimeout("https://api.exa.ai/search", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "x-api-key": key },
+      body: JSON.stringify({
+        query,
+        type: "auto",
+        numResults: Math.max(1, Math.min(10, Number(maxResults) || 6)),
+        contents: { text: true }
+      })
+    });
+    if (!response.ok) throw await exaErrorFromResponse(response);
+    const payload = await response.json();
+    return (payload.results || []).slice(0, maxResults).map((item) => ({
+      source: "exa",
+      title: item.title || "",
+      content: (item.highlights || []).join(" ") || item.text || "",
+      url: item.url || ""
+    }));
+  }
+
+  async function browserPlanResearch(snapshot, name, idea) {
+    const secrets = await getSecrets();
+    const query = `${name} ${idea}`.replace(/\s+/g, " ").trim().slice(0, 500);
+    const research = { query, github: null, tavily: [], exa: [], errors: [] };
+    const jobs = [];
+    if (secrets.githubToken) {
+      jobs.push(
+        githubFetch(`/search/repositories?${new URLSearchParams({ q: `${name} in:name,description,readme`, per_page: "5", page: "1" }).toString()}`)
+          .then((result) => {
+            research.github = {
+              totalCount: Number(result.total_count || 0),
+              repositories: (result.items || []).slice(0, 5).map((repo) => ({ fullName: repo.full_name, description: repo.description || "", topics: repo.topics || [] }))
+            };
+          })
+          .catch((error) => research.errors.push(`GitHub research: ${error.message}`))
+      );
+    }
+    if (secrets.tavilyKey) {
+      jobs.push(
+        browserTavilySearch(query, secrets.tavilyKey)
+          .then((items) => {
+            research.tavily = items;
+          })
+          .catch((error) => research.errors.push(`Tavily research: ${error.message}`))
+      );
+    }
+    if (secrets.exaKey) {
+      jobs.push(
+        browserExaSearch(query, secrets.exaKey)
+          .then((items) => {
+            research.exa = items;
+          })
+          .catch((error) => research.errors.push(`Exa research: ${error.message}`))
+      );
+    }
+    await Promise.all(jobs);
+    return research;
+  }
+
+  function browserPlanGenerationPrompt(name, idea, research = {}, repair = null) {
     const schema = {
       name,
       nameEn: name,
@@ -997,10 +2377,14 @@
       "只根据本次方案名称和详细需求工作，不读取、猜测或混入其他方案。方案名必须原样保留。",
       "使用同一套不依赖固定领域词典的方法：先确定唯一核心锚点及准确含义，再识别官方名称、确认别名、格式/协议、API/SDK、插件或扩展体系、产品族、相邻库、用户工作流和实际 GitHub 仓库形态；删除无法绑定核心锚点的宽泛父级词、SEO/GEO 噪音和无关厂商词。不存在的维度留空，不要硬编。",
       "先生成紧凑且强相关的 keywords，再由这些词生成 customQueries。不能只返回“名称 + app/tool/workflow”这类表面变体。",
-      "每条 customQuery 都会直接执行，必须包含 in:name,description,readme archived:false mirror:false，不使用 OR 串；重要别名拆成独立查询。",
+      "每条 customQuery 都会直接执行，必须保留方案名称或详细需求中的核心锚点/确认别名，并包含 in:name,description,readme archived:false mirror:false，不使用 OR 串；重要别名拆成独立查询。",
+      "锚点必须能在仓库名称、描述、主题或主页里验证：只在 README 里被顺带提及的词会在扫描后置校验中被淘汰，不要依赖这类词。",
+      "宽泛父级词（app、tool、workflow、platform、software 等）不能单独构成一条查询，必须与核心锚点或研究证据确认的相邻概念绑定。",
+      "冷门或低活跃领域：放宽或去掉 stars、pushed 限制并使用精确别名，但绝不能删除核心锚点；允许“低活跃度 + 高锚点一致性”的稀疏例外，宁可少而准，也不要靠宽泛查询凑数。",
       "excludeTerms 通常可以为空，只在存在明确歧义、低价值仓库类型或反复假阳性时添加。不要罗列任意无关词。",
       "customQueries 最多 30 条，不足 30 条不要硬凑。成熟领域应覆盖主要仓库形态，小众领域放宽 Star 和更新时间限制，但始终保留核心锚点。",
       "searchLogic 与 strategy 必须同形；若只返回一个，系统会自动复制。",
+      `研究上下文：${JSON.stringify(research).slice(0, 12000)}`,
       repair ? `上次结果没有通过质量门禁：${repair.issues.join("；")}。请修复，不要降低相关性。上次输出：${repair.raw.slice(0, 2400)}` : "",
       `JSON 结构：${JSON.stringify(schema)}`,
       `方案名称：${name}`,
@@ -1010,18 +2394,63 @@
       .join("\n");
   }
 
-  function browserPlanQualityIssues(plan = {}, expectedName = "") {
+  function browserPlanQualityMinimums(research = {}) {
+    const totalCount = Number(research.github?.totalCount);
+    if (!Number.isFinite(totalCount)) return { keywords: 4, queries: 3 };
+    if (totalCount >= 10_000) return { keywords: 8, queries: 8 };
+    if (totalCount >= 1_000) return { keywords: 8, queries: 6 };
+    if (totalCount >= 100) return { keywords: 6, queries: 5 };
+    if (totalCount >= 20) return { keywords: 5, queries: 4 };
+    return { keywords: 3, queries: 2 };
+  }
+
+  function browserPlanAnchorTerms(expectedName = "", need = "", research = {}) {
+    const source = `${expectedName} ${need}`;
+    const terms = [source, expectedName, ...Array.from(source.matchAll(/[A-Za-z][A-Za-z0-9.+#-]{1,48}|[\u4e00-\u9fa5]{2,20}/g)).map((match) => match[0])];
+    for (const repository of research.github?.repositories || []) terms.push(...(repository.topics || []));
+    const generic = new Set(["相关", "项目", "开源", "工具", "平台", "软件", "系统", "应用", "服务", "领域", "方向", "观察", "github", "open source", "app", "tool", "workflow"]);
+    return Array.from(new Set(terms.map((term) => String(term || "").replace(/\s+/g, " ").trim()).filter((term) => {
+      const normalized = lower(term);
+      return normalized.length >= 2 && !generic.has(normalized);
+    })));
+  }
+
+  function browserTextContainsAny(text, terms) {
+    const source = lower(text).replace(/[_./-]+/g, " ").replace(/\s+/g, " ");
+    return terms.some((term) => {
+      const target = lower(term).replace(/[_./-]+/g, " ").replace(/\s+/g, " ").trim();
+      return target && source.includes(target);
+    });
+  }
+
+  function browserPlanQualityIssues(plan = {}, expectedName = "", research = {}, detailedNeed = "") {
     const logic = plan.searchLogic || plan.strategy || {};
     const keywords = Array.isArray(logic.keywords) ? logic.keywords.map((item) => String(item || "").trim()).filter(Boolean) : [];
     const queries = Array.isArray(logic.customQueries) ? logic.customQueries.filter((item) => String(item?.query || item?.q || "").trim()) : [];
+    const minimums = browserPlanQualityMinimums(research);
+    const anchorTerms = browserPlanAnchorTerms(expectedName, detailedNeed, research);
     const issues = [];
     if (String(plan.name || "").trim() !== String(expectedName || "").trim()) issues.push("方案名没有原样保留");
-    if (keywords.length < 8) issues.push(`keywords 过少：${keywords.length}/8`);
-    if (queries.length < 6) issues.push(`customQueries 过少：${queries.length}/6`);
+    if (keywords.length < minimums.keywords) issues.push(`keywords 过少：${keywords.length}/${minimums.keywords}`);
+    if (queries.length < minimums.queries) issues.push(`customQueries 过少：${queries.length}/${minimums.queries}`);
+    if (anchorTerms.length && !browserTextContainsAny(keywords.join(" "), anchorTerms)) issues.push("keywords 缺少当前方案的核心锚点");
+    const directAnchoredCount = queries.filter((item) => browserTextContainsAny(
+      `${item.label || ""} ${item.labelZh || ""} ${item.labelEn || ""} ${item.query || item.q || ""}`,
+      anchorTerms
+    )).length;
+    if (queries.length && anchorTerms.length && directAnchoredCount < Math.ceil(queries.length * 0.5)) {
+      issues.push("customQueries 中保留核心锚点的查询比例过低");
+    }
     const weak = queries.filter((item) => {
       const query = String(item.query || item.q || "");
-      const linked = keywords.some((keyword) => lower(`${item.label || ""} ${item.labelZh || ""} ${query}`).includes(lower(keyword)));
+      // The gate measures exactly what the scan gate verifies: every query must
+      // carry at least one domain anchor that also appears in the keyword list.
+      const anchors = domainCore.planAnchorTerms(query, [item.label, item.labelZh, item.labelEn], { limit: 16 });
+      const linked = anchors.some((anchor) =>
+        keywords.some((keyword) => domainCore.planTextMatches(keyword, anchor) || domainCore.planTextMatches(anchor, keyword))
+      );
       return (
+        !anchors.length ||
         !linked ||
         /\bOR\b/i.test(query) ||
         !/in:name,description,readme/i.test(query) ||
@@ -1030,6 +2459,11 @@
       );
     });
     if (weak.length) issues.push(`${weak.length} 条 customQueries 缺少领域锚点或 GitHub 限定符`);
+    const evidenceText = `${expectedName} ${detailedNeed} ${JSON.stringify(research)}`;
+    const excludeTerms = Array.isArray(logic.excludeTerms) ? logic.excludeTerms.filter(Boolean) : [];
+    const universalNoise = new Set(["awesome list", "paper list", "toy example", "benchmark", "course", "tutorial", "resource list", "curated list"]);
+    const unsupported = excludeTerms.filter((term) => !universalNoise.has(lower(term).trim()) && !browserTextContainsAny(evidenceText, [term]));
+    if (unsupported.length) issues.push(`排除词缺少当前需求或研究证据：${unsupported.slice(0, 4).join("、")}`);
     return issues;
   }
 
@@ -1037,20 +2471,21 @@
     const name = String(body.name || "").trim();
     const idea = [body.idea, body.detailedNeed].map((item) => String(item || "").trim()).filter(Boolean).join("\n");
     if (!name || !idea) throw new Error("方案名称和详细需求不能为空");
-    const first = await callModelJson(snapshot, [{ role: "user", content: browserPlanGenerationPrompt(name, idea) }]);
+    const research = await browserPlanResearch(snapshot, name, idea);
+    const first = await callModelJson(snapshot, [{ role: "user", content: browserPlanGenerationPrompt(name, idea, research) }]);
     let raw = first.raw;
     let plan = normalizeBrowserPlan(first.json, { name, idea });
-    let issues = browserPlanQualityIssues(plan, name);
+    let issues = browserPlanQualityIssues(plan, name, research, idea);
     if (issues.length) {
       const repaired = await callModelJson(snapshot, [
-        { role: "user", content: browserPlanGenerationPrompt(name, idea, { issues, raw }) }
+        { role: "user", content: browserPlanGenerationPrompt(name, idea, research, { issues, raw }) }
       ]);
       raw = repaired.raw;
       plan = normalizeBrowserPlan(repaired.json, { name, idea });
-      issues = browserPlanQualityIssues(plan, name);
+      issues = browserPlanQualityIssues(plan, name, research, idea);
     }
     if (issues.length) throw new Error(`AI 生成方案未通过质量门禁：${issues.slice(0, 3).join("；")}`);
-    return { ok: true, source: "ai-browser", raw, plan };
+    return { ok: true, source: "ai-browser", raw, plan, research };
   }
 
   function publicLocalTask(task = {}) {
@@ -1058,10 +2493,14 @@
       id: task.id,
       type: task.type,
       key: task.key || "",
+      // The owning plan lets the UI tell "my scan finished" apart from another
+      // plan's scan finishing while a different plan is on screen.
+      observationPlanId: task.input?.observationPlanId || "",
       status: task.status,
       attempts: Number(task.attempts || 0),
       result: task.status === "completed" ? task.result : null,
       error: task.status === "failed" ? task.error || "Task failed" : "",
+      cooldown: task.status === "failed" && task.cooldown?.active ? task.cooldown : null,
       createdAt: task.createdAt || "",
       startedAt: task.startedAt || "",
       finishedAt: task.finishedAt || "",
@@ -1071,21 +2510,37 @@
 
   async function executeLocalTask(snapshot, task) {
     if (task.type === "scan") {
-      return { status: "completed", scan: await runBrowserScan(snapshot, task.input?.observationPlanId) };
+      return { status: "completed", scan: await runBrowserScan(snapshot, task.input?.observationPlanId, task) };
     }
     if (task.type === "analysis") return analyzeProjectWithModel(snapshot, task.input, await projectForKey(snapshot, task.input.fullName));
     if (task.type === "plan-generation") return generatePlanWithModel(snapshot, task.input);
     throw new Error(`Unsupported task type: ${task.type}`);
   }
 
+  async function clearLocalTaskArtifacts(task) {
+    if (task?.type === "scan") await storage().clearTaskArtifacts?.(task.id);
+  }
+
   function startLocalTask(snapshot, task) {
     if (!task?.id || localTaskPromises.has(task.id)) return;
+    // A scan stays queued (not failed) while GitHub is cooling down; the next
+    // queue pump after the countdown expires starts it for real.
+    if (task.type === "scan") {
+      const cooldown = githubCooldownState();
+      if (cooldown.active) {
+        task.status = "queued";
+        task.cooldown = cooldown;
+        task.updatedAt = nowIso();
+        saveSnapshot(snapshot).catch(() => {});
+        return;
+      }
+    }
     if (Number(task.attempts || 0) >= 3) {
       task.status = "failed";
       task.error = "Task was interrupted too many times";
       task.finishedAt = nowIso();
       task.updatedAt = task.finishedAt;
-      saveSnapshot(snapshot).catch(() => {});
+      saveSnapshot(snapshot).then(() => clearLocalTaskArtifacts(task)).catch(() => {});
       return;
     }
     const startedAt = nowIso();
@@ -1094,22 +2549,37 @@
     task.startedAt = startedAt;
     task.updatedAt = startedAt;
     task.error = "";
+    task.cooldown = null;
     const promise = saveSnapshot(snapshot)
       .then(() => executeLocalTask(snapshot, task))
       .then(async (result) => {
         task.status = "completed";
         task.result = result;
+        task.cooldown = null;
+        if (task.type === "analysis" || task.type === "plan-generation") {
+          updateProviderStatus(snapshot, "deepseek", { lastTestAt: nowIso(), testStatus: "ok" });
+        }
         task.finishedAt = nowIso();
         task.updatedAt = task.finishedAt;
         await saveSnapshot(snapshot);
+        await clearLocalTaskArtifacts(task).catch(() => {});
       })
       .catch(async (error) => {
         task.status = "failed";
         task.result = null;
         task.error = error?.message || "Task failed";
+        task.cooldown = error?.cooldown?.active ? clone(error.cooldown) : isGithubCooldownError(error) ? clone(error.cooldown) : null;
+        if ((task.type === "analysis" || task.type === "plan-generation") && isProviderAuthError(error)) {
+          const provider = activeProvider(snapshot, await getSecrets());
+          updateProviderStatus(snapshot, "deepseek", {
+            lastTestAt: nowIso(),
+            testStatus: providerFailureStatus(provider, error)
+          });
+        }
         task.finishedAt = nowIso();
         task.updatedAt = task.finishedAt;
         await saveSnapshot(snapshot).catch(() => {});
+        await clearLocalTaskArtifacts(task).catch(() => {});
       })
       .finally(() => localTaskPromises.delete(task.id));
     localTaskPromises.set(task.id, promise);
@@ -1173,6 +2643,108 @@
     };
   }
 
+  function localExportRecord(project, language, index) {
+    const localized = (value = {}) => language === "zh" ? value.labelZh || value.label || value.labelEn || "" : value.labelEn || value.label || value.labelZh || "";
+    const fields = language === "zh"
+      ? {
+          排名: index + 1,
+          仓库全名: project.fullName,
+          项目名: project.name,
+          中文名: project.nameZh || project.name,
+          作者: project.owner,
+          "GitHub 地址": project.url,
+          项目主页: project.homepage,
+          原始简介: project.description,
+          中文简介: project.descriptionZh || project.description,
+          解决什么: localized(project.semantic?.problem),
+          给谁用: localized(project.semantic?.audience),
+          可做成: localized(project.semantic?.shape),
+          分类: localized(project.category),
+          用途方向: localized(project.useCase),
+          语言: project.language,
+          主题: (project.topics || []).join(" / "),
+          Stars: project.stars,
+          Forks: project.forks,
+          Issues: project.openIssues,
+          "趋势 Stars": project.trend?.stars ?? "",
+          "趋势 Forks": project.trend?.forks ?? "",
+          趋势日期: project.trend?.date || "",
+          推荐值: project.scores?.opportunity ?? "",
+          可落地性: project.scores?.actionability ?? "",
+          工程质量: project.scores?.quality ?? "",
+          项目风险: project.scores?.risk ?? "",
+          许可风险: project.scores?.licenseRisk ?? "",
+          许可证: project.licensePolicy?.name || project.license?.name || "",
+          许可标签: project.licensePolicy?.labelZh || "",
+          最近更新: project.pushedAt || project.updatedAt || "",
+          首次入池: project.firstSeenAt || "",
+          最近入池: project.lastSeenAt || "",
+          已收藏: Boolean(project.watched),
+          研判状态: project.triageStatus || "",
+          研判记录: project.note || ""
+        }
+      : {
+          rank: index + 1,
+          fullName: project.fullName,
+          name: project.name,
+          nameZh: project.nameZh || project.name,
+          owner: project.owner,
+          githubUrl: project.url,
+          homepage: project.homepage,
+          description: project.description,
+          descriptionZh: project.descriptionZh || project.description,
+          problem: localized(project.semantic?.problem),
+          audience: localized(project.semantic?.audience),
+          canBecome: localized(project.semantic?.shape),
+          category: localized(project.category),
+          useCase: localized(project.useCase),
+          language: project.language,
+          topics: (project.topics || []).join(" / "),
+          stars: project.stars,
+          forks: project.forks,
+          issues: project.openIssues,
+          trendStars: project.trend?.stars ?? "",
+          trendForks: project.trend?.forks ?? "",
+          trendDate: project.trend?.date || "",
+          opportunity: project.scores?.opportunity ?? "",
+          actionability: project.scores?.actionability ?? "",
+          quality: project.scores?.quality ?? "",
+          projectRisk: project.scores?.risk ?? "",
+          licenseRisk: project.scores?.licenseRisk ?? "",
+          license: project.licensePolicy?.name || project.license?.name || "",
+          licensePolicy: project.licensePolicy?.labelEn || "",
+          pushedAt: project.pushedAt || project.updatedAt || "",
+          firstSeenAt: project.firstSeenAt || "",
+          lastSeenAt: project.lastSeenAt || "",
+          favorite: Boolean(project.watched),
+          triageStatus: project.triageStatus || "",
+          note: project.note || ""
+        };
+    return fields;
+  }
+
+  function csvCell(value) {
+    const text = String(value ?? "");
+    return /[",\n\r]/.test(text) ? `"${text.replaceAll('"', '""')}"` : text;
+  }
+
+  async function localProjectExport(snapshot, params = {}) {
+    const language = params.language === "en" ? "en" : "zh";
+    const projects = await projectsForActivePlan(snapshot);
+    const items = filterProjects(snapshot, { ...params, limit: "all" }, projects).slice(0, 2000);
+    const records = items.map((project, index) => localExportRecord(project, language, index));
+    const format = params.format === "csv" ? "csv" : "json";
+    if (format === "csv") {
+      const headers = Object.keys(records[0] || localExportRecord({}, language, 0));
+      const content = `\ufeff${[headers.map(csvCell).join(","), ...records.map((record) => headers.map((header) => csvCell(record[header])).join(","))].join("\n")}`;
+      return { filename: `starvault-projects-${Date.now()}.csv`, mimeType: "text/csv;charset=utf-8", content };
+    }
+    const payload = language === "zh"
+      ? { 导出时间: nowIso(), 观察方案: publicPlan(activePlan(snapshot), snapshot.activeObservationPlanId, false), 总数: records.length, 项目: records }
+      : { exportedAt: nowIso(), observationPlan: publicPlan(activePlan(snapshot), snapshot.activeObservationPlanId, false), total: records.length, items: records };
+    return { filename: `starvault-projects-${Date.now()}.json`, mimeType: "application/json;charset=utf-8", content: JSON.stringify(payload, null, 2) };
+  }
+
   async function importPortableData(snapshot, payload = {}) {
     if (!payload || payload.schema !== "starvault-portable-config/v1") {
       throw new Error("No portable configuration data to import");
@@ -1181,11 +2753,11 @@
     const planPayload = payload.observationPlans || {};
     for (const plan of planPayload.plans || []) {
       if (!plan?.id) continue;
-      snapshot.store.observationPlans[plan.id] = {
+      snapshot.store.observationPlans[plan.id] = ensurePlanQueryQualifiers({
         ...plan,
         memory: plan.memory || defaultMemory(),
         userData: plan.userData || defaultUserData()
-      };
+      });
     }
     if (planPayload.activeObservationPlanId && snapshot.store.observationPlans[planPayload.activeObservationPlanId]) {
       snapshot.activeObservationPlanId = planPayload.activeObservationPlanId;
@@ -1259,21 +2831,18 @@
   }
 
   function localEventWeight(eventType, override) {
+    if (eventType === "select_project") return 0;
     if (override !== undefined && Number.isFinite(Number(override))) return Number(override);
     return MEMORY_EVENT_WEIGHTS[eventType] ?? 0.5;
   }
 
   function projectProfile(project = {}, planId = "") {
-    const matches = project.observationPlanMatches || project.observationMatches || {};
-    let match = null;
-    if (Array.isArray(matches)) {
-      match = matches.find((item) => typeof item === "object" && String(item?.planId || item?.id || "") === planId) || null;
-    } else {
-      match = matches?.[planId] || null;
-    }
+    const matches = domainCore.projectProfileMatches(project, planId);
+    const primary = matches[0] || {};
     return {
-      key: String(match?.profileKey || project.profileKey || ""),
-      label: String(match?.profileLabel || project.profileLabel || "")
+      key: String(primary.key || ""),
+      label: String(primary.label || ""),
+      matches
     };
   }
 
@@ -1320,7 +2889,8 @@
       }
     }
     const profile = projectProfile(project, planId);
-    if (profile.key) adjustLocalBucket(memory.discoveryProfiles, profile.key, signed, -40, 40);
+    const profileDelta = profile.matches.length ? signed / profile.matches.length : 0;
+    for (const match of profile.matches) adjustLocalBucket(memory.discoveryProfiles, match.key, profileDelta, -40, 40);
     return { keys, profile };
   }
 
@@ -1345,6 +2915,8 @@
       risk: keys.risk,
       profileKey: profile.key,
       profileLabel: profile.label,
+      profileMatches: profile.matches,
+      observationPlanId: planId,
       source: options.source || "indexeddb"
     };
     memory.events = [entry, ...(memory.events || [])].slice(0, Number(memory.context?.rawEventLimit || 300));
@@ -1363,7 +2935,21 @@
     const matches = (entry) => projectKey(entry.fullName) === projectKey(project.fullName) && localMemoryEventType(entry.type || entry.reason) === type;
     const event = (memory.events || []).find(matches);
     if (!event) return false;
-    adjustLocalMemorySignal(memory, project, planId, Number(event.weight || localEventWeight(type)), type, -1);
+    const rollbackProject = event.profileMatches?.length
+      ? {
+          ...project,
+          observationPlanMatches: {
+            ...(project.observationPlanMatches || {}),
+            [planId]: {
+              planId,
+              profileKey: event.profileKey || "",
+              profileLabel: event.profileLabel || "",
+              profileMatches: event.profileMatches
+            }
+          }
+        }
+      : project;
+    adjustLocalMemorySignal(memory, rollbackProject, planId, Number(event.weight || localEventWeight(type)), type, -1);
     const removeFirst = (items = []) => {
       let removed = false;
       return items.filter((item) => {
@@ -1386,23 +2972,158 @@
     return appendLocalMemoryEvent(snapshot, project, eventType, options);
   }
 
+  function browserHarnessScorecard(snapshot) {
+    const planId = snapshot.activeObservationPlanId || "default";
+    const memory = memoryForPlan(snapshot, planId);
+    const archive = planId === "default" ? snapshot.store.leaderboards?.daily || {} : snapshot.store.leaderboards?.byPlan?.[planId]?.daily || {};
+    const cutoff = Date.now() - 30 * 86400000;
+    const recentArchives = Object.values(archive).filter((entry) => new Date(entry.generatedAt || entry.date || 0).getTime() >= cutoff);
+    const currentItems = snapshot.leaderboard?.items || recentArchives[recentArchives.length - 1]?.items || [];
+    const exposed = new Set(recentArchives.flatMap((entry) => (entry.items || []).map((item) => projectKey(item.fullName))));
+    currentItems.forEach((item) => exposed.add(projectKey(item.fullName)));
+    const events = (memory.events || []).filter((event) => new Date(event.at || 0).getTime() >= cutoff);
+    const positiveTypes = new Set(["favorite", "star", "fork", "triage_note", "ai_analyze", "leaderboard_positive", "leaderboard_strong_positive"]);
+    const negativeTypes = new Set(["unfavorite", "unstar", "leaderboard_negative", "dismiss_project"]);
+    const positiveProjects = new Set(events.filter((event) => positiveTypes.has(event.type)).map((event) => projectKey(event.fullName)));
+    const negativeProjects = new Set(events.filter((event) => negativeTypes.has(event.type)).map((event) => projectKey(event.fullName)));
+    const useCaseCounts = {};
+    for (const item of currentItems) {
+      const key = item.useCase?.key || item.category?.key || "other";
+      useCaseCounts[key] = Number(useCaseCounts[key] || 0) + 1;
+    }
+    const maxShare = currentItems.length ? Math.max(0, ...Object.values(useCaseCounts)) / currentItems.length : 0;
+    const diversity = Object.keys(useCaseCounts).length;
+    const targetExploration = Number(memory.antiBubble?.explorationRatio || 0.25);
+    const explorationShare = currentItems.length
+      ? currentItems.filter((item) => Number(item.scoreParts?.memoryBoost || 0) <= 0.5).length / currentItems.length
+      : targetExploration;
+    const percent = (value) => Math.max(0, Math.min(100, Math.round(Number(value || 0))));
+    const exposedCount = Math.max(1, exposed.size);
+    const metrics = {
+      positiveYield: percent((positiveProjects.size / exposedCount) * 100),
+      negativeRate: percent((negativeProjects.size / exposedCount) * 100),
+      diversityCoverage: percent(currentItems.length ? (diversity / Math.min(8, currentItems.length)) * 100 : 0),
+      repetitionControl: percent((1 - maxShare) * 100),
+      actionabilityFit: percent(currentItems.length ? currentItems.reduce((sum, item) => sum + Number(item.scores?.actionability || 0), 0) / currentItems.length : 0),
+      licenseReadiness: percent(currentItems.length ? (currentItems.filter((item) => item.licensePolicy?.bucket === "permissive-commercial").length / currentItems.length) * 100 : 0),
+      explorationFit: percent((1 - Math.min(1, Math.abs(explorationShare - targetExploration) / 0.35)) * 100)
+    };
+    const qualityMetrics = [metrics.diversityCoverage, metrics.repetitionControl, metrics.actionabilityFit, metrics.licenseReadiness, metrics.explorationFit];
+    const scorecard = {
+      evaluatedAt: nowIso(),
+      proxyOnly: true,
+      sample: {
+        exposedProjects30d: exposed.size,
+        rankedItems: currentItems.length,
+        events30d: events.length,
+        positiveProjects: positiveProjects.size,
+        negativeProjects: negativeProjects.size
+      },
+      metrics,
+      overall: percent(qualityMetrics.reduce((sum, value) => sum + value, 0) / qualityMetrics.length),
+      recommendations: []
+    };
+    if (metrics.diversityCoverage < 55 || metrics.repetitionControl < 60) scorecard.recommendations.push("提高探索比例或压低重复用途权重，避免同类项目连续占据前排。");
+    if (metrics.negativeRate > metrics.positiveYield && events.length >= 3) scorecard.recommendations.push("近期明确负反馈偏多，应降低对应画像的候选预算并保留探索位。");
+    if (metrics.actionabilityFit < 55) scorecard.recommendations.push("当前项目可实践性偏弱，后续排序应提高工程质量与用途清晰度权重。");
+    if (metrics.licenseReadiness < 35) scorecard.recommendations.push("许可清晰项目占比较低，不明许可项目应更多进入观察而非前排。");
+    if (!scorecard.recommendations.length) scorecard.recommendations.push("当前代理指标稳定，继续保留个性化加权和探索位，并等待更多明确反馈。");
+    return scorecard;
+  }
+
+  function applyBrowserMemoryTuning(memory, tuning = {}) {
+    const applied = [];
+    const apply = (root, deltas, scope) => {
+      for (const bucket of ["categories", "useCases", "languages", "licenses", "riskLevels"]) {
+        root[bucket] = root[bucket] || {};
+        for (const [key, raw] of Object.entries(deltas?.[bucket] || {})) {
+          const delta = Math.max(-3, Math.min(3, Number(raw || 0)));
+          if (!key || !delta) continue;
+          adjustLocalBucket(root[bucket], key, delta, 0, scope === "negative" ? 30 : 40);
+          applied.push(`${scope}.${bucket}.${key}:${delta > 0 ? "+" : ""}${delta}`);
+        }
+      }
+    };
+    apply(memory.preferences, tuning.positivePreferenceDeltas, "positive");
+    apply(memory.negativePreferences, tuning.negativePreferenceDeltas, "negative");
+    if (Number.isFinite(Number(tuning.antiBubble?.explorationRatio))) {
+      memory.antiBubble.explorationRatio = Math.max(0.1, Math.min(0.45, Number(tuning.antiBubble.explorationRatio)));
+      applied.push(`antiBubble.explorationRatio:${memory.antiBubble.explorationRatio}`);
+    }
+    return applied;
+  }
+
+  async function tuneBrowserMemory(snapshot, scorecard) {
+    const memory = memoryForPlan(snapshot);
+    const { json, provider } = await callModelJson(snapshot, [
+      {
+        role: "system",
+        content:
+          "你是星仓印记学习策略调优器。只返回 JSON。不得删除探索位，不得按普通点击放大偏好。字段：summaryZh、summaryEn、confidence、recommendations数组、positivePreferenceDeltas、negativePreferenceDeltas、antiBubble.explorationRatio。各偏好增量只能在 -3 到 3。"
+      },
+      {
+        role: "user",
+        content: JSON.stringify({
+          scorecard,
+          memory: {
+            preferences: memory.preferences,
+            negativePreferences: memory.negativePreferences,
+            antiBubble: memory.antiBubble,
+            recentEvents: (memory.events || []).slice(0, 40)
+          }
+        })
+      }
+    ]);
+    const applied = applyBrowserMemoryTuning(memory, json);
+    const at = nowIso();
+    memory.harness = {
+      ...(memory.harness || {}),
+      mode: provider.name || provider.id || "llm",
+      lastTunedAt: at,
+      lastTuning: {
+        at,
+        source: provider.name || provider.id || "llm",
+        confidence: json.confidence ?? null,
+        summaryZh: json.summaryZh || "",
+        summaryEn: json.summaryEn || "",
+        recommendations: Array.isArray(json.recommendations) ? json.recommendations.slice(0, 8) : [],
+        applied
+      }
+    };
+    syncPlanMemory(snapshot, snapshot.activeObservationPlanId || "default", memory);
+    await saveSnapshot(snapshot);
+    return { tuning: json, memory, provider: provider.name || provider.id || "", model: provider.model || "" };
+  }
+
   async function handle(path, options = {}) {
     const url = new URL(path, window.location.origin);
     const params = Object.fromEntries(url.searchParams.entries());
     const method = String(options.method || "GET").toUpperCase();
     const body = options.body ? JSON.parse(options.body) : {};
+    await restoreGithubCooldownState();
     const snapshot = await requireSnapshot();
     const secrets = await getSecrets();
     const userData = activeUserData(snapshot);
     const activeId = snapshot.activeObservationPlanId || "default";
 
     if (method === "GET" && url.pathname === "/api/tasks") {
+      const planFilter = String(params.observationPlanId || "").trim();
       const tasks = Object.values(snapshot.store.tasks || {})
         .filter((task) => !params.type || task.type === params.type)
+        .filter((task) => {
+          if (!planFilter) return true;
+          const taskPlanId = String(task.input?.observationPlanId || "").trim();
+          return taskPlanId ? taskPlanId === planFilter : planFilter === "default";
+        })
         .sort((a, b) => String(b.updatedAt || "").localeCompare(String(a.updatedAt || "")))
         .slice(0, Math.max(1, Math.min(60, Number(params.limit || 30))));
       tasks.filter((task) => task.status === "queued" || task.status === "running").forEach((task) => startLocalTask(snapshot, task));
-      return { tasks: tasks.map(publicLocalTask) };
+      const cooldown = githubCooldownState();
+      return {
+        tasks: tasks.map(publicLocalTask),
+        cooling: cooldown.active,
+        cooldown: cooldown.active ? cooldown : null
+      };
     }
     if (method === "GET" && url.pathname.startsWith("/api/tasks/")) {
       const id = decodeURIComponent(url.pathname.slice("/api/tasks/".length));
@@ -1413,7 +3134,10 @@
     }
 
     if (method === "GET" && url.pathname === "/api/config") {
-      return { port: "", host: location.host, githubConfigured: Boolean(secrets.githubToken), tavilyConfigured: Boolean(secrets.tavilyKey), exaConfigured: Boolean(secrets.exaKey), scanHour: 8, scanMaxRepos: 800, githubSearchPages: 2, githubTrendLimit: 80, githubTrendingMaxRepos: 60, githubTrendingPerPeriod: 25 };
+      const persistence = await storage().storageStatus?.() || { supported: false, persisted: false };
+      const lastPortableExportAt = String((await storage().getValue?.(LAST_PORTABLE_EXPORT_KEY)) || "");
+      const backupDue = !lastPortableExportAt || Date.now() - new Date(lastPortableExportAt).getTime() > 7 * 86400000;
+      return { port: "", host: location.host, runtime: "browser-indexeddb", githubConfigured: Boolean(secrets.githubToken), tavilyConfigured: Boolean(secrets.tavilyKey), exaConfigured: Boolean(secrets.exaKey), scanHour: 8, scanMaxRepos: 800, githubSearchPages: 2, githubTrendLimit: 80, githubTrendingMaxRepos: 60, githubTrendingPerPeriod: 25, storagePersistence: persistence, lastPortableExportAt, backupDue };
     }
     if (method === "GET" && url.pathname === "/api/settings") return settingsResponse(snapshot, secrets, url.searchParams.get("reveal") || "");
     if (method === "POST" && url.pathname === "/api/settings") {
@@ -1432,7 +3156,12 @@
       snapshot.settings = { ...snapshot.settings, ...safeSettings(body), activeObservationPlanId: activeId };
       await saveSecrets(nextSecrets);
       await saveSnapshot(snapshot);
-      return settingsResponse(snapshot, nextSecrets);
+      const keyValidation = await validateBrowserServiceKeys(nextSecrets);
+      if (body.validateProvider !== false) {
+        keyValidation.provider = await validateBrowserProviderStatus(snapshot, nextSecrets, "deepseek");
+      }
+      await saveSnapshot(snapshot);
+      return { ...settingsResponse(snapshot, nextSecrets), keyValidation };
     }
     if (method === "GET" && url.pathname === "/api/observation-plans") {
       const plans = Object.values(snapshot.store.observationPlans || {}).map((plan) => publicPlan(plan, activeId, false));
@@ -1456,7 +3185,28 @@
       return { active: publicPlan(snapshot.store.observationPlans[body.id], body.id, true), plans: Object.values(snapshot.store.observationPlans).map((plan) => publicPlan(plan, body.id, false)) };
     }
     if (method === "POST" && url.pathname === "/api/observation-plans") {
-      const plan = { ...(body.plan || body), id: (body.plan || body).id || `plan-${Date.now()}`, builtIn: false, active: false, updatedAt: nowIso(), createdAt: (body.plan || body).createdAt || nowIso(), memory: (body.plan || body).memory || defaultMemory(), userData: (body.plan || body).userData || defaultUserData() };
+      const sourcePlan = body.plan || body;
+      const requestedId = domainCore.normalizedId(sourcePlan.id);
+      const id =
+        requestedId && requestedId !== "default"
+          ? requestedId
+          : sameNameBrowserPlanId(snapshot, sourcePlan) || stableBrowserPlanId({ ...sourcePlan, id: "" });
+      const previousPlan = snapshot.store.observationPlans[id] || null;
+      const plan = normalizeBrowserPlan(
+        {
+          ...(previousPlan || {}),
+          ...sourcePlan,
+          id,
+          builtIn: false,
+          active: false,
+          updatedAt: nowIso(),
+          createdAt: previousPlan?.createdAt || sourcePlan.createdAt || nowIso(),
+          memory: sourcePlan.memory || previousPlan?.memory || defaultMemory(),
+          userData: sourcePlan.userData || previousPlan?.userData || defaultUserData()
+        },
+        { name: sourcePlan.name || previousPlan?.name || "自定义观察" },
+        previousPlan
+      );
       snapshot.store.observationPlans[plan.id] = plan;
       updateCounts(snapshot);
       await saveSnapshot(snapshot);
@@ -1464,11 +3214,25 @@
     }
     if (method === "POST" && url.pathname === "/api/observation-plans/delete") {
       if (body.id === "default") throw new Error("Default observation plan cannot be deleted");
+      const activeTask = Object.values(snapshot.store.tasks || {}).find(
+        (task) => task?.input?.observationPlanId === body.id && ["queued", "running"].includes(task.status)
+      );
+      if (activeTask) throw new Error("方案有正在执行的任务，请等待完成后再删除");
+      const deletedTaskIds = Object.entries(snapshot.store.tasks || {})
+        .filter(([, task]) => task?.input?.observationPlanId === body.id)
+        .map(([taskId]) => taskId);
       delete snapshot.store.observationPlans[body.id];
+      snapshot.store.scans = (snapshot.store.scans || []).filter((scan) => scan.observationPlanId !== body.id);
+      if (snapshot.store.leaderboards?.byPlan) delete snapshot.store.leaderboards.byPlan[body.id];
+      for (const [taskId, task] of Object.entries(snapshot.store.tasks || {})) {
+        if (task.input?.observationPlanId === body.id) delete snapshot.store.tasks[taskId];
+      }
       if (snapshot.activeObservationPlanId === body.id) snapshot.activeObservationPlanId = "default";
       snapshot.settings.activeObservationPlanId = snapshot.activeObservationPlanId;
       updateCounts(snapshot);
       await saveSnapshot(snapshot);
+      await storage().deletePlanData?.(body.id);
+      await Promise.all(deletedTaskIds.map((taskId) => Promise.resolve(storage().clearTaskArtifacts?.(taskId)).catch(() => {})));
       return { activeObservationPlanId: snapshot.activeObservationPlanId, plans: Object.values(snapshot.store.observationPlans).map((item) => publicPlan(item, snapshot.activeObservationPlanId, false)) };
     }
     if (method === "GET" && url.pathname === "/api/projects") {
@@ -1493,10 +3257,26 @@
       return summary(snapshot, params, projects);
     }
     if (method === "GET" && url.pathname === "/api/leaderboard") {
+      const planId = snapshot.activeObservationPlanId || "default";
+      const archive = planId === "default" ? snapshot.store.leaderboards?.daily || {} : snapshot.store.leaderboards?.byPlan?.[planId]?.daily || {};
+      if ((params.period || "daily") === "daily" && params.date && archive[params.date]) {
+        return {
+          ...clone(archive[params.date], archive[params.date]),
+          period: "daily",
+          date: params.date,
+          memory: memoryForPlan(snapshot),
+          observationPlan: publicPlan(activePlan(snapshot), planId, false),
+          archiveDates: Object.keys(archive).sort().reverse()
+        };
+      }
       const projects = await projectsForActivePlan(snapshot);
       return buildLeaderboard(snapshot, params, projects);
     }
-    if (method === "GET" && url.pathname === "/api/leaderboard-archives") return { dates: Object.keys(snapshot.store.leaderboards?.daily || {}).sort().reverse() };
+    if (method === "GET" && url.pathname === "/api/leaderboard-archives") {
+      const planId = snapshot.activeObservationPlanId || "default";
+      const archive = planId === "default" ? snapshot.store.leaderboards?.daily || {} : snapshot.store.leaderboards?.byPlan?.[planId]?.daily || {};
+      return { dates: Object.keys(archive).sort().reverse() };
+    }
     if (method === "GET" && url.pathname === "/api/memory") return activePlan(snapshot).memory || snapshot.store.memory || defaultMemory();
     if (method === "POST" && url.pathname === "/api/memory-preference") {
       const memory = applyPreference(activePlan(snapshot).memory || defaultMemory(), body.kind, body.key, body);
@@ -1610,12 +3390,21 @@
       return { memory, chunk };
     }
     if (method === "POST" && ["/api/memory/harness/evaluate", "/api/memory/harness/tune"].includes(url.pathname)) {
-      const memory = activePlan(snapshot).memory || defaultMemory();
-      memory.harness = { ...(memory.harness || {}), mode: "local-indexeddb", lastEvaluatedAt: nowIso(), recommendations: [] };
-      if (url.pathname.endsWith("/tune")) memory.harness.lastTunedAt = nowIso();
-      activePlan(snapshot).memory = memory;
-      snapshot.store.memory = memory;
+      const projects = await projectsForActivePlan(snapshot);
+      snapshot.leaderboard = buildLeaderboard(snapshot, { period: "daily", limit: 20 }, projects);
+      const scorecard = browserHarnessScorecard(snapshot);
+      const memory = memoryForPlan(snapshot);
+      memory.harness = {
+        ...(memory.harness || {}),
+        mode: "local-rules",
+        lastEvaluatedAt: scorecard.evaluatedAt,
+        scorecard,
+        recommendations: scorecard.recommendations,
+        runs: [{ at: scorecard.evaluatedAt, overall: scorecard.overall, metrics: scorecard.metrics }, ...(memory.harness?.runs || [])].slice(0, 30)
+      };
+      syncPlanMemory(snapshot, activeId, memory);
       await saveSnapshot(snapshot);
+      if (url.pathname.endsWith("/tune")) return { ok: true, ...(await tuneBrowserMemory(snapshot, scorecard)) };
       return { ok: true, harness: memory.harness, memory };
     }
     if (method === "POST" && url.pathname === "/api/memory-settings") {
@@ -1660,11 +3449,15 @@
       return { action: userData.githubActions[key], project: await hydratedProject(snapshot, key), memory: activePlan(snapshot).memory || defaultMemory() };
     }
     if (method === "POST" && url.pathname === "/api/scan") {
-      const task = await enqueueLocalTask(snapshot, "scan", "scan", {
+      const cooldown = githubCooldownState();
+      if (cooldown.active) throw createGithubCooldownError(cooldown);
+      // Per-plan task key: reusing a single "scan" key let a newly activated
+      // plan adopt another plan's running scan and report it as its own.
+      const task = await enqueueLocalTask(snapshot, "scan", `scan:${activeId}`, {
         mode: body.mode || "manual",
         observationPlanId: activeId
       });
-      return { status: "started", task: publicLocalTask(task) };
+      return { status: "started", observationPlanId: activeId, task: publicLocalTask(task) };
     }
     if (method === "POST" && url.pathname === "/api/analyze") {
       const task = await enqueueLocalTask(snapshot, "analysis", `analysis:${projectKey(body.fullName)}`, {
@@ -1685,19 +3478,69 @@
       return { status: "started", task: publicLocalTask(task) };
     }
     if (method === "GET" && url.pathname === "/api/scan/status") {
-      const lastScan = snapshot.store.scans?.[0] || null;
-      const task = Object.values(snapshot.store.tasks || {}).filter((item) => item.type === "scan").sort((a, b) => String(b.updatedAt || "").localeCompare(String(a.updatedAt || "")))[0] || null;
-      const running = Boolean(task && ["queued", "running"].includes(task.status));
-      return { status: running ? "running" : lastScan ? "completed" : "idle", stage: running ? "github" : lastScan ? "completed" : "idle", label: running ? "扫描中" : lastScan ? "完成" : "空闲", percent: running ? 20 : lastScan ? 100 : 0, running, task: task ? publicLocalTask(task) : null, updatedAt: task?.updatedAt || lastScan?.at || null };
+      const requestedPlanId = String(params.observationPlanId || "").trim();
+      const planId = snapshot.store.observationPlans?.[requestedPlanId] ? requestedPlanId : activeId;
+      const lastScan = (snapshot.store.scans || []).find((scan) => (scan.observationPlanId || "default") === planId) || null;
+      const task = Object.values(snapshot.store.tasks || {})
+        .filter((item) => item.type === "scan")
+        .filter((item) => {
+          const taskPlanId = String(item.input?.observationPlanId || "").trim();
+          return taskPlanId ? taskPlanId === planId : planId === "default";
+        })
+        .sort((a, b) => String(b.updatedAt || "").localeCompare(String(a.updatedAt || "")))[0] || null;
+      const cooldown = githubCooldownState();
+      const taskPending = Boolean(task && ["queued", "running"].includes(task.status));
+      // Nothing reaches GitHub during a cooldown, so a queued scan must not be
+      // reported as running. Once the countdown has lapsed this status read is
+      // also the recovery point that releases the queued task.
+      const running = taskPending && !cooldown.active;
+      if (running && task?.status === "queued") {
+        startLocalTask(snapshot, task);
+      }
+      const hasScan = Boolean(lastScan) || task?.status === "completed";
+      const failed = !cooldown.active && !running && task?.status === "failed" && !hasScan;
+      const status = cooldown.active ? "cooling" : running ? "running" : failed ? "failed" : lastScan ? "completed" : "idle";
+      return {
+        status,
+        stage: cooldown.active ? "cooling" : running ? "github" : failed ? "failed" : lastScan ? "completed" : "idle",
+        label: cooldown.active ? "冷却中" : running ? "扫描中" : failed ? "扫描失败" : lastScan ? "完成" : "空闲",
+        percent: cooldown.active ? 0 : running ? 20 : lastScan ? 100 : 0,
+        error: failed ? task.error || "" : lastScan?.errors?.[0]?.message || "",
+        observationPlanId: planId,
+        hasScan,
+        running,
+        cooling: cooldown.active,
+        cooldown: cooldown.active ? cooldown : null,
+        task: task ? publicLocalTask(task) : null,
+        updatedAt: task?.updatedAt || lastScan?.at || null
+      };
     }
-    if (method === "GET" && url.pathname === "/api/portable-data/export") return portableData(snapshot);
+    if (method === "GET" && url.pathname === "/api/export") return localProjectExport(snapshot, params);
+    if (method === "GET" && url.pathname === "/api/portable-data/export") {
+      const exportedAt = nowIso();
+      await storage().putValue?.(LAST_PORTABLE_EXPORT_KEY, exportedAt);
+      return { ...portableData(snapshot), exportedAt };
+    }
     if (method === "POST" && url.pathname === "/api/portable-data/import") return importPortableData(snapshot, body);
     if (method === "POST" && url.pathname === "/api/provider-test") {
-      await callModelJson(snapshot, [
-        { role: "system", content: "Return JSON only." },
-        { role: "user", content: "{\"ok\":true}" }
-      ]);
-      return { ok: true };
+      try {
+        const result = await callModelJson(snapshot, [
+          { role: "system", content: "Return JSON only." },
+          { role: "user", content: "{\"ok\":true}" }
+        ]);
+        updateProviderStatus(snapshot, "deepseek", { lastTestAt: nowIso(), testStatus: "ok" });
+        await saveSnapshot(snapshot);
+        return { ok: true, settings: settingsResponse(snapshot, secrets) };
+      } catch (error) {
+        const provider = activeProvider(snapshot, secrets);
+        updateProviderStatus(snapshot, "deepseek", {
+          lastTestAt: nowIso(),
+          testStatus: providerFailureStatus(provider, error)
+        });
+        await saveSnapshot(snapshot);
+        error.details = { settings: settingsResponse(snapshot, secrets) };
+        throw error;
+      }
     }
     if (method === "POST" && url.pathname === "/api/provider-models") {
       const provider = activeProvider(snapshot, secrets);
@@ -1728,6 +3571,10 @@
     canHandle,
     shouldUseLocal,
     handle,
-    localModeForced
+    ensureDemoSnapshot,
+    isStaticDeployment,
+    localModeForced,
+    activateLocalMode,
+    deactivateLocalMode
   };
 })();

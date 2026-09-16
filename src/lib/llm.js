@@ -1,37 +1,37 @@
 const { fetchWithRetries } = require("./http-client");
+const {
+  extractJsonObject,
+  providerContentType,
+  providerMessageContent,
+  readProviderResponse
+} = require("./provider-response");
 
 // LLM calls can take a while; allow one retry on transient 429/5xx/network errors.
 const LLM_HTTP_OPTS = { timeoutMs: 45_000, retries: 1 };
+// Observation-plan JSON can contain up to 30 executable GitHub profiles. Give
+// that single response enough time, but do not repeat an already expensive
+// generation request after a timeout.
+const OBSERVATION_PLAN_HTTP_OPTS = { timeoutMs: 75_000, retries: 0 };
+// Reasoning-capable models bill hidden reasoning against the same max_tokens
+// budget as the visible JSON, so a plan request needs headroom beyond the JSON
+// body itself. Providers that cap the parameter lower reject the request
+// instead of clamping it; those step down through the budgets below.
+const OBSERVATION_PLAN_MAX_TOKENS = 16_000;
+const OBSERVATION_PLAN_FALLBACK_MAX_TOKENS = 7_000;
+const OBSERVATION_PLAN_MINIMAL_MAX_TOKENS = 4_000;
 
-// Reads & validates a provider response body. Throws a useful message on !ok or
-// non-JSON bodies (avoids crashing on HTML/plain-text error pages).
-async function readProviderResponse(response) {
-  if (response.ok) {
-    try {
-      return await response.json();
-    } catch {
-      throw new Error("Provider returned a non-JSON response");
-    }
-  }
-  let message = `Provider request failed with ${response.status}`;
-  try {
-    const text = await response.text();
-    if (text) {
-      try {
-        const errBody = JSON.parse(text);
-        if (errBody?.error?.message) {
-          message = String(errBody.error.message).slice(0, 500);
-        } else {
-          message += `: ${text.slice(0, 180)}`;
-        }
-      } catch {
-        message += `: ${text.slice(0, 180)}`;
-      }
-    }
-  } catch {
-    /* ignore */
-  }
-  throw new Error(message);
+function providerHttpOptions(provider) {
+  if (!provider?.networkPolicy) return LLM_HTTP_OPTS;
+  return { ...LLM_HTTP_OPTS, externalUrlPolicy: provider.networkPolicy };
+}
+
+function observationPlanHttpOptions(provider) {
+  if (!provider?.networkPolicy) return OBSERVATION_PLAN_HTTP_OPTS;
+  return { ...OBSERVATION_PLAN_HTTP_OPTS, externalUrlPolicy: provider.networkPolicy };
+}
+
+function isRequestTimeout(error) {
+  return /request timed out|timed out|timeout/i.test(String(error?.message || ""));
 }
 
 // Defense-in-depth against prompt injection via the free-form user need field.
@@ -237,25 +237,6 @@ function observationPlanPrompt(payload = {}, language = "zh") {
       preferredShapes: [],
       minStars: 20,
       notes: "How this plan should search and rank."
-    },
-    searchLogic: {
-      baseMode: "focused | blend | only",
-      keywords: ["domain keyword"],
-      excludeTerms: ["optional ambiguity/noise term"],
-      customQueries: [
-        {
-          label: "short label",
-          labelZh: language === "en" ? "Chinese label if useful" : "中文标签",
-          labelEn: "English label",
-          query: "Complete GitHub repository search query, including in:name,description,readme, archived:false, mirror:false, useful anti-noise exclusions, and domain-appropriate stars/pushed filters only when they will not hide niche repositories",
-          stars: 20
-        }
-      ],
-      preferredLanguages: ["TypeScript"],
-      preferredCategories: ["creative-media"],
-      preferredShapes: ["content-creation"],
-      minStars: 20,
-      notes: "Same object shape as strategy."
     }
   };
   const base =
@@ -273,7 +254,7 @@ ${JSON.stringify(schema, null, 2)}
 - baseMode focused 表示仅当需求本身较宽时，才把自定义 profiles 与最强默认产品 profiles 混合。
 - baseMode blend 表示仅当用户要求跨领域发现时，才混合自定义 profiles 与全部默认 profiles。
 - baseMode only 表示只使用本方案生成的 profiles；用户输入明确领域时默认使用 only。
-- 输出结构必须与用户请求中的默认观察方案保持同形。strategy 用作检索逻辑；searchLogic 可以重复 strategy。
+- 只输出一次 strategy 检索逻辑；服务端会自动生成同形的 searchLogic，禁止为了兼容性重复输出 searchLogic。
 - 使用 researchContext 作为发现证据：写查询前，只提取与领域相关的产品形态、文件格式、技术术语、相邻工具和真实噪音词。
 - 必须先根据 researchContext.metacognition/domainModel 做元认知领域建模：识别概念、定义、文件格式、标准、协议、知名软件、库、用户、工作流、产品形态和排除边界，然后再生成检索 JSON。
 - 写 JSON 前必须按这个方法思考，但不要输出方法步骤：(1) 从 payload.name/payload.coreKeyword/payload.detailedNeed 中确定唯一主核心锚点；(2) 判断锚点类型：命名产品、宽泛类别、缩写、文件格式、协议、框架、软件生态或工作流；(3) 从官方名称、别名、翻译、标准、格式、API/SDK、插件/扩展体系、产品族、相邻库、用户工作流和具体 GitHub 仓库形态中构建紧凑领域词表；(4) 移除 SEO/GEO/厂商结果噪音、用户未要求的单一公司或单一项目名，以及无法绑定核心锚点的父级领域词；(5) 从词表生成查询组；(6) 自检每个关键词和查询的相关性、覆盖度和 GitHub 可执行性。
@@ -316,75 +297,6 @@ ${JSON.stringify(schema, null, 2)}
 
 User request:
 ${JSON.stringify(payload, null, 2)}`;
-}
-
-function parseJsonCandidate(candidate = "", depth = 0) {
-  const source = String(candidate || "").trim();
-  if (!source) return null;
-  const candidates = [source, source.replace(/,\s*([}\]])/g, "$1")];
-  for (const item of candidates) {
-    try {
-      const parsed = JSON.parse(item);
-      if (typeof parsed === "string" && depth < 2) return parseJsonCandidate(parsed, depth + 1);
-      return parsed;
-    } catch {
-      /* try next candidate */
-    }
-  }
-  return null;
-}
-
-function balancedJsonObjectCandidates(text = "") {
-  const source = String(text || "");
-  const candidates = [];
-  let start = -1;
-  let depth = 0;
-  let inString = false;
-  let escaped = false;
-  for (let index = 0; index < source.length; index += 1) {
-    const char = source[index];
-    if (inString) {
-      if (escaped) {
-        escaped = false;
-      } else if (char === "\\") {
-        escaped = true;
-      } else if (char === '"') {
-        inString = false;
-      }
-      continue;
-    }
-    if (char === '"') {
-      inString = true;
-      continue;
-    }
-    if (char === "{") {
-      if (depth === 0) start = index;
-      depth += 1;
-    } else if (char === "}" && depth > 0) {
-      depth -= 1;
-      if (depth === 0 && start >= 0) {
-        candidates.push(source.slice(start, index + 1));
-        start = -1;
-      }
-    }
-  }
-  return candidates;
-}
-
-function extractJsonObject(text = "") {
-  const trimmed = String(text || "").trim();
-  if (!trimmed) return null;
-  const direct = parseJsonCandidate(trimmed);
-  if (direct !== null) return direct;
-  const candidates = [];
-  const fences = Array.from(trimmed.matchAll(/```(?:json)?\s*([\s\S]*?)```/gi)).map((match) => match[1].trim());
-  candidates.push(...fences);
-  candidates.push(...balancedJsonObjectCandidates(trimmed));
-  for (const candidate of candidates) {
-    const parsed = parseJsonCandidate(candidate);
-    if (parsed !== null) return parsed;
-  }
-  return null;
 }
 
 function textValue(value) {
@@ -628,7 +540,7 @@ async function tuneMemoryWithProvider({ provider, payload, language }) {
         ]
       })
     },
-    LLM_HTTP_OPTS
+    providerHttpOptions(provider)
   );
 
   const json = await readProviderResponse(response);
@@ -656,7 +568,9 @@ function normalizeObservationPlanDraft(parsed = {}, fallback = {}, language = "z
   const strategy = observationDraftStrategy(parsed);
   const preferChinese = language !== "en";
   const searchLogic = {
-    baseMode: ["focused", "blend", "only"].includes(strategy.baseMode) ? strategy.baseMode : "focused",
+    // A generated plan without an explicit mode stays focused on its own
+    // queries; mixing default profiles in is an explicit choice (focused/blend).
+    baseMode: ["focused", "blend", "only"].includes(strategy.baseMode) ? strategy.baseMode : "only",
     keywords: Array.isArray(strategy.keywords) ? strategy.keywords.map(String).filter(Boolean).slice(0, 30) : [],
     excludeTerms: Array.isArray(strategy.excludeTerms) ? strategy.excludeTerms.map(String).filter(Boolean).slice(0, 30) : [],
     customQueries: Array.isArray(strategy.customQueries)
@@ -811,6 +725,24 @@ function observationPayloadCoreTerms(payload = {}) {
   ).slice(0, 80);
 }
 
+function observationPayloadPrimaryTerms(payload = {}) {
+  const context = payload.researchContext || {};
+  const domainModel = context.domainModel || context.metacognition || {};
+  const values = [
+    payload.coreKeyword,
+    payload.name,
+    ...(Array.isArray(domainModel.aliases) ? domainModel.aliases : [])
+  ];
+  const generic = new Set(["相关", "项目", "开源", "工具", "平台", "软件", "系统", "应用", "服务", "领域", "方向", "观察", "app", "tool", "workflow", "software", "platform", "system"]);
+  return Array.from(new Set(values
+    .flatMap((value) => String(value || "").split(/[,，;；\n]/))
+    .map((term) => term.replace(/^\s*(?:方案名称|核心关键词)[:：]?\s*/i, "").trim())
+    .filter((term) => {
+      const normalized = normalizedObservationText(term);
+      return normalized && !generic.has(normalized) && (/[\u4e00-\u9fa5]/.test(term) ? Array.from(term).length >= 2 : normalized.length >= 2);
+    })));
+}
+
 function observationQueryCore(query = "") {
   return String(query || "")
     .replace(/\bin:name,description,readme\b/gi, "")
@@ -847,6 +779,7 @@ function observationPlanDraftQualityIssues(parsed = {}, payload = {}) {
   const keywords = Array.isArray(strategy.keywords) ? strategy.keywords.filter((item) => String(item || "").trim()) : [];
   const queries = Array.isArray(strategy.customQueries) ? strategy.customQueries.filter((item) => String(item?.query || item?.q || "").trim()) : [];
   const coreTerms = observationPayloadCoreTerms(payload);
+  const primaryTerms = observationPayloadPrimaryTerms(payload);
   const minQueries = minimumObservationDraftCustomQueries(payload);
   const minKeywords = Math.min(18, Math.max(10, minQueries));
   const issues = [];
@@ -863,6 +796,9 @@ function observationPlanDraftQualityIssues(parsed = {}, payload = {}) {
   if (coreTerms.length && !observationTextContainsAny(keywords.join(" "), coreTerms)) {
     issues.push("strategy.keywords does not contain enough core anchors, aliases, formats, APIs, SDKs, product families, or workflow terms");
   }
+  if (primaryTerms.length && !observationTextContainsAny(keywords.join(" "), primaryTerms)) {
+    issues.push("strategy.keywords does not preserve the exact core anchor or a confirmed alias");
+  }
 
   const weakQueries = [];
   queries.forEach((item, index) => {
@@ -876,6 +812,16 @@ function observationPlanDraftQualityIssues(parsed = {}, payload = {}) {
     if (coreTerms.length && !observationTextContainsAny(`${label} ${query}`, coreTerms)) {
       weakQueries.push(`${label}: missing the current need's core anchor or confirmed adjacent term`);
     }
+    if (primaryTerms.length && !observationTextContainsAny(`${label} ${query}`, primaryTerms)) {
+      weakQueries.push(`${label}: query must retain the exact core anchor or a confirmed alias`);
+    }
+    const negativeTerms = Array.from(query.matchAll(/(?:^|\s)-(?:(?:"([^"]+)")|([^\s]+))/g))
+      .map((match) => match[1] || match[2] || "")
+      .filter((term) => term && !/^topic:(?:awesome|tutorial|course|paper|benchmark|agent|agents)$/i.test(term) && !/^(?:fork|archived|mirror)$/i.test(term));
+    const evidenceText = `${payload.name || ""} ${payload.coreKeyword || ""} ${payload.detailedNeed || ""} ${JSON.stringify(payload.researchContext || {})}`;
+    if (negativeTerms.some((term) => !observationTextContainsAny(evidenceText, [term]))) {
+      weakQueries.push(`${label}: negative terms need ambiguity or noise evidence in the current request/research context`);
+    }
     if (/^(app|tool|tools|workflow|workflows|software|platform|system|dashboard|project|projects|open source|starter|template)$/.test(core)) {
       weakQueries.push(`${label}: generic-only query core`);
     }
@@ -884,17 +830,54 @@ function observationPlanDraftQualityIssues(parsed = {}, payload = {}) {
     issues.push(`customQueries have quality issues: ${weakQueries.slice(0, 8).join("; ")}`);
   }
 
+  const excludeTerms = Array.isArray(strategy.excludeTerms) ? strategy.excludeTerms.filter((item) => String(item || "").trim()) : [];
+  const universalNoise = new Set(["awesome list", "paper list", "toy example", "benchmark", "course", "tutorial", "resource list", "curated list"]);
+  const evidenceText = `${payload.name || ""} ${payload.coreKeyword || ""} ${payload.detailedNeed || ""} ${JSON.stringify(payload.researchContext || {})}`;
+  const unsupportedExclusions = excludeTerms.filter((term) => {
+    const normalized = normalizedObservationText(term);
+    return !universalNoise.has(normalized) && !observationTextContainsAny(evidenceText, [term]);
+  });
+  if (unsupportedExclusions.length) {
+    issues.push(`excludeTerms are not supported by the current request or research evidence: ${unsupportedExclusions.slice(0, 5).join(", ")}`);
+  }
+
   return issues;
 }
 
-function unusableObservationPlanError(raw = "") {
-  const error = new Error("AI did not return a usable observation-plan JSON object");
+function isTruncatedCompletion(completion = {}) {
+  return completion.finishReason === "length" || completion.finishReason === "max_tokens";
+}
+
+function unusableObservationPlanError(raw = "", completion = {}, payload = {}) {
+  const needLength = String(payload.detailedNeed || payload.latestNeed || "").length;
+  let message = "AI 返回的方案结构不完整，请重新生成。";
+  if (isTruncatedCompletion(completion)) {
+    // A four-character brief cannot be shortened; only blame the brief when it
+    // is actually long enough to drive a large plan.
+    message =
+      needLength > 200
+        ? "AI 输出被截断，方案尚未生成完整，请缩短详细需求后重试。"
+        : "AI 连续生成多次仍被截断，方案尚未生成完整。请稍后重试，或在设置中更换输出预算更充足的模型。";
+  } else if (completion.hasChoices === false) {
+    message = "AI 没有返回方案内容，请稍后重试。";
+  } else if (!String(raw || "").trim()) {
+    message = "AI 返回内容为空，请稍后重试。";
+  }
+  const error = new Error(message);
   error.rawPreview = String(raw || "").slice(0, 3000);
+  error.providerResponseMeta = {
+    contentType: completion.contentType || "unknown",
+    contentLength: String(raw || "").length,
+    finishReason: completion.finishReason || "",
+    hasChoices: completion.hasChoices !== false,
+    maxTokens: Number(completion.maxTokens || 0),
+    usage: completion.usage || null
+  };
   return error;
 }
 
 function observationPlanQualityError(issues = [], raw = "") {
-  const error = new Error(`AI observation plan did not pass the quality gate: ${issues.slice(0, 4).join("; ")}`);
+  const error = new Error("AI 返回的方案未通过完整性校验，请重新生成或补充更具体的详细需求。");
   error.qualityIssues = issues.slice();
   error.rawPreview = String(raw || "").slice(0, 3000);
   return error;
@@ -924,17 +907,6 @@ Required shape:
     "preferredShapes": [],
     "minStars": 0,
     "notes": "生成依据"
-  },
-  "searchLogic": {
-    "baseMode": "only",
-    "keywords": ["围绕核心关键词的强相关词，至少 12 个"],
-    "excludeTerms": [],
-    "customQueries": [{"label": "中文短标签", "labelZh": "中文短标签", "labelEn": "English label", "query": "complete GitHub repository search query", "stars": 0}],
-    "preferredLanguages": [],
-    "preferredCategories": [],
-    "preferredShapes": [],
-    "minStars": 0,
-    "notes": "生成依据"
   }
 }
 
@@ -949,6 +921,7 @@ Rules:
 - customQueries must be executable GitHub repository search queries and must include in:name,description,readme archived:false mirror:false.
 - Do not use parenthesized OR groups like "(A OR B)" in customQueries. Split key aliases into separate customQueries or choose the strongest alias.
 - Do not use unparenthesized OR chains like "A OR B OR C" either. Split aliases into separate customQueries; each query should express one stable topic.
+- Output strategy only. The server derives searchLogic from strategy.
 - Return JSON only.
 
 Original payload:
@@ -992,27 +965,199 @@ Previous JSON preview:
 ${String(raw || "").slice(0, 3500)}`;
 }
 
-async function requestObservationPlanCompletion({ provider, messages, temperature = 0.25 }) {
-  const url = `${provider.baseUrl.replace(/\/$/, "")}/chat/completions`;
-  const response = await fetchWithRetries(
-    url,
-    {
-      method: "POST",
-      headers: {
-        Authorization: `Bearer ${provider.apiKey}`,
-        "Content-Type": "application/json"
-      },
-      body: JSON.stringify({
-        model: provider.model,
-        temperature,
-        max_tokens: 7000,
-        messages
-      })
-    },
-    LLM_HTTP_OPTS
+function observationPlanCompactRetryPrompt(payload = {}, language = "zh") {
+  const core = String(payload.coreKeyword || payload.name || "").trim();
+  const need = String(payload.detailedNeed || payload.latestNeed || "").trim();
+  const requiredQueries = minimumObservationDraftCustomQueries(payload);
+  const requiredKeywords = Math.min(18, Math.max(10, requiredQueries));
+  const research = payload.researchContext || {};
+  const compactResearch = {
+    githubActivity: research.githubActivity || {},
+    domainModel: research.domainModel || research.metacognition || {},
+    githubSamples: research.githubSamples || {},
+    signals: Array.isArray(research.signals)
+      ? research.signals.slice(0, 4).map((signal) => ({
+          source: String(signal?.source || "").slice(0, 40),
+          title: String(signal?.title || "").slice(0, 120),
+          content: String(signal?.content || "").replace(/\s+/g, " ").trim().slice(0, 260)
+        }))
+      : []
+  };
+  const base = language === "en"
+    ? "The previous observation-plan response was truncated. Generate a complete strict JSON object now. Keep every query strongly anchored to the exact user domain."
+    : "上一次观察方案输出被截断。现在请重新生成一个完整的严格 JSON 对象。每条查询都必须紧扣用户本次输入的准确领域。";
+  return `${base}
+
+${language === "en" ? "Do not explain your reasoning. Output JSON only." : "不要解释推理过程，只输出 JSON。"}
+- name must remain exactly: ${JSON.stringify(String(payload.name || "").trim())}
+- core keyword: ${JSON.stringify(core)}
+- user need: ${JSON.stringify(need)}
+- use only the supplied research evidence and stable knowledge about this exact core concept; do not import unrelated domains or old plan history.
+- strategy.baseMode must be "only" for a focused custom plan.
+- 输出必须短：description ≤ 40 字，notes ≤ 120 字，label/labelZh/labelEn ≤ 8 字，每条 query ≤ 96 字符。
+- keywords: ${requiredKeywords}-${requiredKeywords + 4} 个紧凑强相关锚点（硬性下限 ${requiredKeywords}，少于会被系统拒绝）。不要用 app/tool/workflow 这类泛化变体凑数。
+- customQueries: ${requiredQueries}-${requiredQueries + 4} 条强相关可执行 profiles（硬性下限 ${requiredQueries}，少于会被系统拒绝；最多 30 条，不要为了凑数添加弱相关查询）。
+- each customQueries item must contain only label, labelZh, labelEn, query, and stars. The query must include in:name,description,readme archived:false mirror:false and retain the exact core anchor or a confirmed alias.
+- excludeTerms may be []. Add a term only when it is a demonstrated ambiguity or repeated false positive in the supplied evidence.
+- do not use OR chains. Do not output searchLogic; output strategy only.
+
+Compact research evidence:
+${JSON.stringify(compactResearch, null, 2)}
+
+Return this shape (the example shows field shape only; customQueries must contain ${requiredQueries}-${requiredQueries + 4} items):
+${JSON.stringify({
+    name: String(payload.name || ""),
+    nameEn: String(payload.name || ""),
+    description: "短说明",
+    descriptionEn: "short description",
+    requirements: [{ text: need }],
+    strategy: {
+      baseMode: "only",
+      keywords: [core],
+      excludeTerms: [],
+      customQueries: [{ label: "核心查询", labelZh: "核心查询", labelEn: "Core query", query: `${core} in:name,description,readme archived:false mirror:false`, stars: 0 }],
+      preferredLanguages: [],
+      preferredCategories: [],
+      preferredShapes: [],
+      minStars: 0,
+      notes: "基于本次需求和研究证据生成"
+    }
+  }, null, 2)}`;
+}
+
+// Last recovery step. Every previous attempt was cut off, so this asks for the
+// smallest object that still passes the quality gate: the same anchors and
+// executable profiles, but no long prose, no research digest, and no reasoning.
+function observationPlanMinimalRecoveryPrompt(payload = {}, language = "zh") {
+  const core = String(payload.coreKeyword || payload.name || "").trim();
+  const need = String(payload.detailedNeed || payload.latestNeed || "").trim();
+  const requiredQueries = minimumObservationDraftCustomQueries(payload);
+  const requiredKeywords = Math.min(18, Math.max(10, requiredQueries));
+  const anchors = observationPayloadCoreTerms(payload).slice(0, 20);
+  const activity = observationPayloadActivity(payload);
+  const base = language === "en"
+    ? "The last two responses were cut off. Reply with the smallest complete JSON object that still carries a real search plan. No reasoning, no commentary, JSON only."
+    : "前两次输出都被截断。现在只返回最小的完整 JSON 对象，不得输出任何推理、解释或 Markdown。";
+  return `${base}
+
+- name 必须严格等于 ${JSON.stringify(String(payload.name || "").trim())}。
+- 核心锚点：${JSON.stringify(core)}；用户需求：${JSON.stringify(need)}。
+- 必须输出 strategy.keywords ${requiredKeywords}-${requiredKeywords + 3} 个字符串（硬性下限 ${requiredKeywords}）。
+- 必须输出 strategy.customQueries ${requiredQueries}-${requiredQueries + 3} 条（硬性下限 ${requiredQueries}，上限 30）。
+- 每条 query 写成 "<核心锚点或确认别名> <一个具体维度> in:name,description,readme archived:false mirror:false"，≤ 96 字符，保留精确核心锚点，禁止使用 OR。
+- labelZh/label ≤ 8 字，labelEn ≤ 24 字符，每条只含 label、labelZh、labelEn、query、stars 五个字段。
+- baseMode 固定为 "only"；excludeTerms 为 []；不要输出 searchLogic、description 或 requirements。
+- 可用的核心锚点与领域词：${(anchors.length ? anchors : [core]).map((term) => JSON.stringify(term)).join("、") || JSON.stringify(core)}。
+- GitHub 活跃度参考：${activity.activityLevel || "unknown"}（maxTotalCount=${activity.maxTotalCount || 0}）。活跃度高时覆盖不同仓库形态，活跃度低时保持更少的精确查询，但都不要移除核心锚点。
+
+只返回这一个 JSON 对象：
+${JSON.stringify({
+    name: String(payload.name || ""),
+    strategy: {
+      baseMode: "only",
+      keywords: [core],
+      excludeTerms: [],
+      customQueries: [
+        {
+          label: "核心",
+          labelZh: "核心",
+          labelEn: "Core",
+          query: `${core} in:name,description,readme archived:false mirror:false`,
+          stars: 0
+        }
+      ],
+      preferredLanguages: [],
+      preferredCategories: [],
+      preferredShapes: [],
+      minStars: 0
+    }
+  }, null, 2)}`;
+}
+
+// Providers recover from an oversized max_tokens in different ways: most reject
+// the request with a validation error instead of clamping the value.
+function isMaxTokensRejection(error) {
+  const status = Number(error?.status || 0);
+  if (status !== 400 && status !== 422) return false;
+  return /max[_\s-]*tokens?|maximum context length|context length is \d+|too (?:large|long)|reduce the length/i.test(
+    String(error?.message || "")
   );
-  const json = await readProviderResponse(response);
-  return json.choices?.[0]?.message?.content || "";
+}
+
+async function requestObservationPlanCompletion({ provider, messages, temperature = 0.25, maxTokens = OBSERVATION_PLAN_MAX_TOKENS }) {
+  const url = `${provider.baseUrl.replace(/\/$/, "")}/chat/completions`;
+  const request = (includeJsonMode, tokens) =>
+    fetchWithRetries(
+      url,
+      {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${provider.apiKey}`,
+          "Content-Type": "application/json"
+        },
+        body: JSON.stringify({
+          model: provider.model,
+          temperature,
+          ...(includeJsonMode ? { response_format: { type: "json_object" } } : {}),
+          max_tokens: tokens,
+          messages
+        })
+      },
+      observationPlanHttpOptions(provider)
+    );
+  const readCompletion = async (includeJsonMode, tokens) => {
+    const response = await request(includeJsonMode, tokens);
+    const json = await readProviderResponse(response);
+    const choice = Array.isArray(json?.choices) ? json.choices[0] : null;
+    const content = choice?.message?.content;
+    return {
+      raw: providerMessageContent(content),
+      contentType: providerContentType(content),
+      finishReason: String(choice?.finish_reason || choice?.finishReason || "").toLowerCase(),
+      hasChoices: Array.isArray(json?.choices) && json.choices.length > 0,
+      maxTokens: tokens,
+      usage: json?.usage || null
+    };
+  };
+  const readWithBudgetFallback = async (includeJsonMode, tokens) => {
+    const budgets = [
+      tokens,
+      ...[OBSERVATION_PLAN_FALLBACK_MAX_TOKENS, OBSERVATION_PLAN_MINIMAL_MAX_TOKENS].filter((value) => value < tokens)
+    ];
+    let lastError = null;
+    for (const budget of budgets) {
+      try {
+        return await readCompletion(includeJsonMode, budget);
+      } catch (error) {
+        lastError = error;
+        if (!isMaxTokensRejection(error)) throw error;
+      }
+    }
+    throw lastError;
+  };
+  try {
+    return await readWithBudgetFallback(true, maxTokens);
+  } catch (error) {
+    // Some OpenAI-compatible providers, older DeepSeek-compatible gateways,
+    // and selected models reject JSON mode even though they accept the same
+    // chat request. The prompt already requires strict JSON, so retry once
+    // without only this optional parameter.
+    if (error?.providerResponseFormatUnsupported) {
+      try {
+        return await readWithBudgetFallback(false, maxTokens);
+      } catch (fallbackError) {
+        if (isRequestTimeout(fallbackError)) {
+          throw new Error("AI 生成方案请求超时：模型未能在 75 秒内返回结果，请稍后重试或缩短详细需求。");
+        }
+        throw fallbackError;
+      }
+    } else {
+      if (isRequestTimeout(error)) {
+        throw new Error("AI 生成方案请求超时：模型未能在 75 秒内返回结果，请稍后重试或缩短详细需求。");
+      }
+      throw error;
+    }
+  }
 }
 
 async function generateObservationPlanWithProvider({ provider, payload, language }) {
@@ -1037,58 +1182,71 @@ async function generateObservationPlanWithProvider({ provider, payload, language
     role: "user",
     content: observationPlanPrompt(payload, language)
   };
-  let raw = await requestObservationPlanCompletion({
+  let completion = await requestObservationPlanCompletion({
     provider,
     temperature: 0.25,
     messages: [systemMessage, userMessage]
   });
+  let raw = completion.raw;
+  // A length stop does not always mean the JSON body is incomplete: hidden
+  // reasoning tokens share the same budget, and often only trailing prose gets
+  // cut. Parse first so a usable plan is never discarded because of the stop
+  // reason alone.
   let parsed = extractJsonObject(raw);
-  if (!hasUsableObservationPlanDraft(parsed)) {
-    raw = await requestObservationPlanCompletion({
+  if (!hasUsableObservationPlanDraft(parsed) && isTruncatedCompletion(completion)) {
+    completion = await requestObservationPlanCompletion({
       provider,
       temperature: 0,
       messages: [
         systemMessage,
-        userMessage,
-        {
-          role: "assistant",
-          content: String(raw || "").slice(0, 3000)
-        },
         {
           role: "user",
-          content: observationPlanRepairPrompt(payload, raw, language)
+          content: observationPlanCompactRetryPrompt(payload, language)
         }
       ]
     });
+    raw = completion.raw;
     parsed = extractJsonObject(raw);
   }
   if (!hasUsableObservationPlanDraft(parsed)) {
-    throw unusableObservationPlanError(raw);
-  }
-  let qualityIssues = observationPlanDraftQualityIssues(parsed, payload);
-  for (let qualityRepairAttempt = 0; qualityIssues.length && qualityRepairAttempt < 2; qualityRepairAttempt += 1) {
-    raw = await requestObservationPlanCompletion({
+    completion = await requestObservationPlanCompletion({
       provider,
       temperature: 0,
       messages: [
         systemMessage,
-        userMessage,
         {
-          role: "assistant",
-          content: String(raw || "").slice(0, 3500)
-        },
+          role: "user",
+          content: isTruncatedCompletion(completion)
+            ? observationPlanMinimalRecoveryPrompt(payload, language)
+            : observationPlanRepairPrompt(payload, raw, language)
+        }
+      ]
+    });
+    raw = completion.raw;
+    parsed = extractJsonObject(raw);
+  }
+  if (!hasUsableObservationPlanDraft(parsed)) {
+    throw unusableObservationPlanError(raw, completion, payload);
+  }
+  let qualityIssues = observationPlanDraftQualityIssues(parsed, payload);
+  for (let qualityRepairAttempt = 0; qualityIssues.length && qualityRepairAttempt < 2; qualityRepairAttempt += 1) {
+    completion = await requestObservationPlanCompletion({
+      provider,
+      temperature: 0,
+      messages: [
         {
           role: "user",
           content: observationPlanQualityRepairPrompt(payload, raw, qualityIssues, language)
         }
       ]
     });
+    raw = completion.raw;
     parsed = extractJsonObject(raw);
     if (!hasUsableObservationPlanDraft(parsed)) break;
     qualityIssues = observationPlanDraftQualityIssues(parsed, payload);
   }
   if (!hasUsableObservationPlanDraft(parsed)) {
-    throw unusableObservationPlanError(raw);
+    throw unusableObservationPlanError(raw, completion, payload);
   }
   if (qualityIssues.length) {
     throw observationPlanQualityError(qualityIssues, raw);
@@ -1116,7 +1274,7 @@ async function listProviderModels(provider) {
         "Content-Type": "application/json"
       }
     },
-    LLM_HTTP_OPTS
+    providerHttpOptions(provider)
   );
   const json = await readProviderResponse(response);
   return (json.data || []).map((item) => item.id).filter(Boolean).sort();
@@ -1133,7 +1291,7 @@ async function testProviderConnection(provider) {
 
 async function analyzeOpenAICompatible(provider, project, language, context = {}) {
   const url = `${provider.baseUrl.replace(/\/$/, "")}/chat/completions`;
-  const response = await fetch(url, {
+  const response = await fetchWithRetries(url, {
     method: "POST",
     headers: {
       Authorization: `Bearer ${provider.apiKey}`,
@@ -1157,7 +1315,7 @@ async function analyzeOpenAICompatible(provider, project, language, context = {}
         }
       ]
     })
-  });
+  }, providerHttpOptions(provider));
 
   const json = await response.json();
   if (!response.ok) {
@@ -1172,7 +1330,7 @@ async function analyzeOpenAICompatible(provider, project, language, context = {}
 
 async function analyzeAnthropic(provider, project, language, context = {}) {
   const url = `${provider.baseUrl.replace(/\/$/, "")}/messages`;
-  const response = await fetch(url, {
+  const response = await fetchWithRetries(url, {
     method: "POST",
     headers: {
       "x-api-key": provider.apiKey,
@@ -1190,7 +1348,7 @@ async function analyzeAnthropic(provider, project, language, context = {}) {
         }
       ]
     })
-  });
+  }, providerHttpOptions(provider));
 
   const json = await response.json();
   if (!response.ok) {
@@ -1205,10 +1363,11 @@ async function analyzeAnthropic(provider, project, language, context = {}) {
 
 async function analyzeGemini(provider, project, language, context = {}) {
   const base = provider.baseUrl.replace(/\/$/, "");
-  const url = `${base}/models/${encodeURIComponent(provider.model)}:generateContent?key=${encodeURIComponent(provider.apiKey)}`;
-  const response = await fetch(url, {
+  const url = `${base}/models/${encodeURIComponent(provider.model)}:generateContent`;
+  const response = await fetchWithRetries(url, {
     method: "POST",
     headers: {
+      "x-goog-api-key": provider.apiKey,
       "Content-Type": "application/json"
     },
     body: JSON.stringify({
@@ -1222,7 +1381,7 @@ async function analyzeGemini(provider, project, language, context = {}) {
         maxOutputTokens: 700
       }
     })
-  });
+  }, providerHttpOptions(provider));
 
   const json = await response.json();
   if (!response.ok) {

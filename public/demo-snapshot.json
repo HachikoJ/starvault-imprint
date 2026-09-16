@@ -1,0 +1,1491 @@
+{
+  "schema": "starvault-demo-snapshot/v1",
+  "generatedAt": "2026-09-16T08:24:45.493Z",
+  "generator": "scripts/build-demo-snapshot.js",
+  "source": {
+    "provider": "github-rest-api",
+    "endpoint": "https://api.github.com",
+    "mode": "anonymous-public-metadata",
+    "note": "Public repository metadata captured with the unauthenticated GitHub REST API. Repository names, descriptions, licenses and counts belong to their owners.",
+    "license": "GitHub API terms: https://docs.github.com/site-policy/github-terms/github-api-terms"
+  },
+  "plan": {
+    "id": "demo-content",
+    "name": "在线体验：内容与设计工作流",
+    "nameEn": "Online demo: content and design workflows",
+    "description": "在线体验专用示例方案。用真实 GitHub 公开仓库元数据演示“方案生成 → 扫描检索 → 项目池 → 榜单”的完整链路，不写入任何个人账号数据。",
+    "descriptionEn": "Sample plan used by the static online demo. It replays the plan, scan, project pool and leaderboard flow with real public GitHub repository metadata and stores no personal account data.",
+    "requirements": [
+      {
+        "id": "demo-requirement-1",
+        "text": "只观察内容创作、设计协作和知识管理方向的真实开源项目，用来演示从方案到扫描再到项目池的完整链路。",
+        "textEn": "Only observe real open source projects in content creation, design collaboration and knowledge management so the demo covers the full plan-to-scan-to-pool flow."
+      },
+      {
+        "id": "demo-requirement-2",
+        "text": "覆盖设计画布与界面编辑、白板与图表、视频与音频创作、文档与知识协作、AI 创作工作台、内容管理与发布、创作流程自动化这些方向。",
+        "textEn": "Cover design canvas and interface editing, whiteboards and diagrams, video and audio production, documents and knowledge collaboration, AI creation workspaces, content management and publishing, and creative workflow automation."
+      },
+      {
+        "id": "demo-requirement-3",
+        "text": "入池项目要近期仍在提交、Star 或 Fork 有一定规模、许可信息可读取（GitHub 未识别时按未知许可标注），并排除资料合集、教程和已归档项目。",
+        "textEn": "Only keep repositories with recent commits, meaningful stars or forks and readable license metadata (flagged as unknown when GitHub cannot identify it), excluding link collections, tutorials and archived projects."
+      },
+      {
+        "id": "demo-requirement-4",
+        "text": "示例数据只使用真实 GitHub 公开仓库元数据，不写入任何个人账号信息，也不调用需要密钥的服务。",
+        "textEn": "Sample data uses real public GitHub repository metadata only. It contains no personal account data and calls no service that needs a key."
+      }
+    ],
+    "searchLogic": {
+      "baseMode": "only",
+      "keywords": [],
+      "excludeTerms": [
+        "awesome list",
+        "tutorial",
+        "course",
+        "archived"
+      ],
+      "customQueries": [
+        {
+          "key": "demo-design-tools",
+          "label": "Design tools and interface editing",
+          "labelZh": "设计工具与界面编辑",
+          "labelEn": "Design tools and interface editing",
+          "query": "design tool prototyping collaboration in:name,description,readme archived:false mirror:false",
+          "stars": 0
+        },
+        {
+          "key": "demo-whiteboard-diagram",
+          "label": "Whiteboards and diagrams",
+          "labelZh": "白板与图表",
+          "labelEn": "Whiteboards and diagrams",
+          "query": "whiteboard collaborative diagram canvas in:name,description,readme archived:false mirror:false",
+          "stars": 0
+        },
+        {
+          "key": "demo-video-editing",
+          "label": "Video creation and editing",
+          "labelZh": "视频创作与剪辑",
+          "labelEn": "Video creation and editing",
+          "query": "video editor open source in:name,description,readme archived:false mirror:false",
+          "stars": 0
+        },
+        {
+          "key": "demo-audio-tools",
+          "label": "Audio creation tools",
+          "labelZh": "音频创作工具",
+          "labelEn": "Audio creation tools",
+          "query": "audio editor open source in:name,description,readme archived:false mirror:false",
+          "stars": 0
+        },
+        {
+          "key": "demo-document-signing",
+          "label": "Document signing and approval",
+          "labelZh": "文档签署与审批",
+          "labelEn": "Document signing and approval",
+          "query": "document signing electronic signature in:name,description,readme archived:false mirror:false",
+          "stars": 0
+        },
+        {
+          "key": "demo-knowledge-base",
+          "label": "Knowledge bases and knowledge management",
+          "labelZh": "知识库与知识管理",
+          "labelEn": "Knowledge bases and knowledge management",
+          "query": "knowledge base note taking in:name,description,readme archived:false mirror:false",
+          "stars": 0
+        },
+        {
+          "key": "demo-ai-creation",
+          "label": "AI creation workspaces",
+          "labelZh": "AI 创作工作台",
+          "labelEn": "AI creation workspaces",
+          "query": "ai creative generation open source in:name,description,readme archived:false mirror:false",
+          "stars": 0
+        },
+        {
+          "key": "demo-content-publishing",
+          "label": "Headless CMS and content publishing",
+          "labelZh": "无头 CMS 与内容发布",
+          "labelEn": "Headless CMS and content publishing",
+          "query": "headless cms content publishing in:name,description,readme archived:false mirror:false",
+          "stars": 0
+        },
+        {
+          "key": "demo-visual-builder",
+          "label": "Visual builders and page editing",
+          "labelZh": "可视化搭建与页面编辑",
+          "labelEn": "Visual builders and page editing",
+          "query": "page builder template builder drag and drop in:name,description,readme archived:false mirror:false",
+          "stars": 0
+        },
+        {
+          "key": "demo-workflow-automation",
+          "label": "Automation and AI workflows",
+          "labelZh": "自动化与 AI 工作流",
+          "labelEn": "Automation and AI workflows",
+          "query": "mcp workflow automation integrations in:name,description,readme archived:false mirror:false",
+          "stars": 0
+        }
+      ],
+      "minStars": 0
+    }
+  },
+  "profiles": [
+    {
+      "key": "demo-design-tools",
+      "labelZh": "设计工具与界面编辑",
+      "labelEn": "Design tools and interface editing",
+      "query": "design tool prototyping collaboration in:name,description,readme archived:false mirror:false",
+      "anchors": [
+        "design"
+      ]
+    },
+    {
+      "key": "demo-whiteboard-diagram",
+      "labelZh": "白板与图表",
+      "labelEn": "Whiteboards and diagrams",
+      "query": "whiteboard collaborative diagram canvas in:name,description,readme archived:false mirror:false",
+      "anchors": [
+        "whiteboard"
+      ]
+    },
+    {
+      "key": "demo-video-editing",
+      "labelZh": "视频创作与剪辑",
+      "labelEn": "Video creation and editing",
+      "query": "video editor open source in:name,description,readme archived:false mirror:false",
+      "anchors": [
+        "video"
+      ]
+    },
+    {
+      "key": "demo-audio-tools",
+      "labelZh": "音频创作工具",
+      "labelEn": "Audio creation tools",
+      "query": "audio editor open source in:name,description,readme archived:false mirror:false",
+      "anchors": [
+        "audio"
+      ]
+    },
+    {
+      "key": "demo-document-signing",
+      "labelZh": "文档签署与审批",
+      "labelEn": "Document signing and approval",
+      "query": "document signing electronic signature in:name,description,readme archived:false mirror:false",
+      "anchors": [
+        "document",
+        "signing"
+      ]
+    },
+    {
+      "key": "demo-knowledge-base",
+      "labelZh": "知识库与知识管理",
+      "labelEn": "Knowledge bases and knowledge management",
+      "query": "knowledge base note taking in:name,description,readme archived:false mirror:false",
+      "anchors": [
+        "knowledge"
+      ]
+    },
+    {
+      "key": "demo-ai-creation",
+      "labelZh": "AI 创作工作台",
+      "labelEn": "AI creation workspaces",
+      "query": "ai creative generation open source in:name,description,readme archived:false mirror:false",
+      "anchors": [
+        "ai"
+      ]
+    },
+    {
+      "key": "demo-content-publishing",
+      "labelZh": "无头 CMS 与内容发布",
+      "labelEn": "Headless CMS and content publishing",
+      "query": "headless cms content publishing in:name,description,readme archived:false mirror:false",
+      "anchors": [
+        "headless",
+        "cms",
+        "content",
+        "publishing"
+      ]
+    },
+    {
+      "key": "demo-visual-builder",
+      "labelZh": "可视化搭建与页面编辑",
+      "labelEn": "Visual builders and page editing",
+      "query": "page builder template builder drag and drop in:name,description,readme archived:false mirror:false",
+      "anchors": [
+        "page"
+      ]
+    },
+    {
+      "key": "demo-workflow-automation",
+      "labelZh": "自动化与 AI 工作流",
+      "labelEn": "Automation and AI workflows",
+      "query": "mcp workflow automation integrations in:name,description,readme archived:false mirror:false",
+      "anchors": [
+        "mcp"
+      ]
+    }
+  ],
+  "items": [
+    {
+      "profileKey": "demo-design-tools",
+      "profileLabelZh": "设计工具与界面编辑",
+      "profileLabelEn": "Design tools and interface editing",
+      "repository": {
+        "id": 48769241,
+        "full_name": "penpot/penpot",
+        "name": "penpot",
+        "owner": {
+          "login": "penpot",
+          "avatar_url": "https://avatars.githubusercontent.com/u/30179644?v=4"
+        },
+        "html_url": "https://github.com/penpot/penpot",
+        "description": "Penpot: The open-source design platform for Product teams that need scalable collaboration.",
+        "homepage": "https://penpot.app",
+        "language": "Clojure",
+        "topics": [
+          "clojure",
+          "clojurescript",
+          "design",
+          "prototyping",
+          "ui",
+          "ux-design",
+          "ux-experience"
+        ],
+        "stargazers_count": 60040,
+        "forks_count": 4100,
+        "watchers_count": 60040,
+        "open_issues_count": 811,
+        "default_branch": "develop",
+        "created_at": "2015-12-29T22:09:07Z",
+        "updated_at": "2026-09-16T08:08:07Z",
+        "pushed_at": "2026-09-16T08:22:14Z",
+        "license": {
+          "key": "mpl-2.0",
+          "name": "Mozilla Public License 2.0",
+          "spdx_id": "MPL-2.0",
+          "url": "https://api.github.com/licenses/mpl-2.0"
+        },
+        "archived": false,
+        "disabled": false,
+        "fork": false
+      }
+    },
+    {
+      "profileKey": "demo-design-tools",
+      "profileLabelZh": "设计工具与界面编辑",
+      "profileLabelEn": "Design tools and interface editing",
+      "repository": {
+        "id": 820087727,
+        "full_name": "onlook-dev/onlook",
+        "name": "onlook",
+        "owner": {
+          "login": "onlook-dev",
+          "avatar_url": "https://avatars.githubusercontent.com/u/157326433?v=4"
+        },
+        "html_url": "https://github.com/onlook-dev/onlook",
+        "description": "The Cursor for Designers • An Open-Source AI-First Design tool • Visually build, style, and edit your React App with AI",
+        "homepage": "https://onlook.com",
+        "language": "TypeScript",
+        "topics": [
+          "ai",
+          "cursor",
+          "cursor-ai",
+          "design",
+          "design-to-code",
+          "drizzle",
+          "editor",
+          "figma",
+          "frontend",
+          "ide",
+          "low-code",
+          "nextjs",
+          "react",
+          "supabase",
+          "tailwindcss",
+          "typescript",
+          "ui",
+          "vibe-coding",
+          "vibecoding"
+        ],
+        "stargazers_count": 26744,
+        "forks_count": 2098,
+        "watchers_count": 26744,
+        "open_issues_count": 380,
+        "default_branch": "main",
+        "created_at": "2024-06-25T19:16:02Z",
+        "updated_at": "2026-09-16T03:54:07Z",
+        "pushed_at": "2026-08-25T01:06:22Z",
+        "license": {
+          "key": "apache-2.0",
+          "name": "Apache License 2.0",
+          "spdx_id": "Apache-2.0",
+          "url": "https://api.github.com/licenses/apache-2.0"
+        },
+        "archived": false,
+        "disabled": false,
+        "fork": false
+      }
+    },
+    {
+      "profileKey": "demo-design-tools",
+      "profileLabelZh": "设计工具与界面编辑",
+      "profileLabelEn": "Design tools and interface editing",
+      "repository": {
+        "id": 667110339,
+        "full_name": "drawdb-io/drawdb",
+        "name": "drawdb",
+        "owner": {
+          "login": "drawdb-io",
+          "avatar_url": "https://avatars.githubusercontent.com/u/139706923?v=4"
+        },
+        "html_url": "https://github.com/drawdb-io/drawdb",
+        "description": "Free, simple, and intuitive online database diagram editor and SQL generator.",
+        "homepage": "https://drawdb.app",
+        "language": "JavaScript",
+        "topics": [
+          "database",
+          "database-design",
+          "database-diagram",
+          "database-schema",
+          "dbml",
+          "diagram-editor",
+          "editor",
+          "er-diagram",
+          "erd",
+          "erdiagram",
+          "indexeddb",
+          "mariadb",
+          "mcp",
+          "oracle-database",
+          "oracle-db",
+          "postgresql",
+          "schema-design",
+          "sql",
+          "sql-server",
+          "sqlite"
+        ],
+        "stargazers_count": 39560,
+        "forks_count": 3245,
+        "watchers_count": 39560,
+        "open_issues_count": 241,
+        "default_branch": "main",
+        "created_at": "2023-07-16T17:09:20Z",
+        "updated_at": "2026-09-16T08:07:57Z",
+        "pushed_at": "2026-09-13T18:45:53Z",
+        "license": {
+          "key": "agpl-3.0",
+          "name": "GNU Affero General Public License v3.0",
+          "spdx_id": "AGPL-3.0",
+          "url": "https://api.github.com/licenses/agpl-3.0"
+        },
+        "archived": false,
+        "disabled": false,
+        "fork": false
+      }
+    },
+    {
+      "profileKey": "demo-whiteboard-diagram",
+      "profileLabelZh": "白板与图表",
+      "profileLabelEn": "Whiteboards and diagrams",
+      "repository": {
+        "id": 231283452,
+        "full_name": "excalidraw/excalidraw",
+        "name": "excalidraw",
+        "owner": {
+          "login": "excalidraw",
+          "avatar_url": "https://avatars.githubusercontent.com/u/59452120?v=4"
+        },
+        "html_url": "https://github.com/excalidraw/excalidraw",
+        "description": "Virtual whiteboard for sketching hand-drawn like diagrams",
+        "homepage": "https://excalidraw.com",
+        "language": "TypeScript",
+        "topics": [
+          "canvas",
+          "collaboration",
+          "diagrams",
+          "drawing",
+          "hacktoberfest",
+          "productivity",
+          "whiteboard"
+        ],
+        "stargazers_count": 132088,
+        "forks_count": 15305,
+        "watchers_count": 132088,
+        "open_issues_count": 3476,
+        "default_branch": "master",
+        "created_at": "2020-01-02T01:04:43Z",
+        "updated_at": "2026-09-16T07:53:31Z",
+        "pushed_at": "2026-09-15T12:12:56Z",
+        "license": {
+          "key": "mit",
+          "name": "MIT License",
+          "spdx_id": "MIT",
+          "url": "https://api.github.com/licenses/mit"
+        },
+        "archived": false,
+        "disabled": false,
+        "fork": false
+      }
+    },
+    {
+      "profileKey": "demo-whiteboard-diagram",
+      "profileLabelZh": "白板与图表",
+      "profileLabelEn": "Whiteboards and diagrams",
+      "repository": {
+        "id": 365739812,
+        "full_name": "tldraw/tldraw",
+        "name": "tldraw",
+        "owner": {
+          "login": "tldraw",
+          "avatar_url": "https://avatars.githubusercontent.com/u/86724562?v=4"
+        },
+        "html_url": "https://github.com/tldraw/tldraw",
+        "description": "Build infinite canvas apps in React with the tldraw SDK. World's best, top-most agent recommended #1 five star SDK.",
+        "homepage": "https://tldraw.dev",
+        "language": "TypeScript",
+        "topics": [
+          "canvas",
+          "collaboration",
+          "design",
+          "diagram",
+          "drawing",
+          "infinite",
+          "multiplayer",
+          "react",
+          "sdk",
+          "sketch",
+          "sync",
+          "whiteboard"
+        ],
+        "stargazers_count": 50381,
+        "forks_count": 3509,
+        "watchers_count": 50381,
+        "open_issues_count": 658,
+        "default_branch": "main",
+        "created_at": "2021-05-09T11:48:37Z",
+        "updated_at": "2026-09-16T04:56:11Z",
+        "pushed_at": "2026-09-15T22:34:20Z",
+        "license": {
+          "key": "other",
+          "name": "Other",
+          "spdx_id": "NOASSERTION",
+          "url": ""
+        },
+        "archived": false,
+        "disabled": false,
+        "fork": false
+      }
+    },
+    {
+      "profileKey": "demo-video-editing",
+      "profileLabelZh": "视频创作与剪辑",
+      "profileLabelEn": "Video creation and editing",
+      "repository": {
+        "id": 274495425,
+        "full_name": "remotion-dev/remotion",
+        "name": "remotion",
+        "owner": {
+          "login": "remotion-dev",
+          "avatar_url": "https://avatars.githubusercontent.com/u/85344006?v=4"
+        },
+        "html_url": "https://github.com/remotion-dev/remotion",
+        "description": "🎥      Make videos programmatically with React",
+        "homepage": "https://remotion.dev",
+        "language": "TypeScript",
+        "topics": [
+          "javascript",
+          "react",
+          "video"
+        ],
+        "stargazers_count": 59428,
+        "forks_count": 4546,
+        "watchers_count": 59428,
+        "open_issues_count": 181,
+        "default_branch": "main",
+        "created_at": "2020-06-23T19:49:10Z",
+        "updated_at": "2026-09-16T08:23:40Z",
+        "pushed_at": "2026-09-16T08:15:57Z",
+        "license": {
+          "key": "other",
+          "name": "Other",
+          "spdx_id": "NOASSERTION",
+          "url": ""
+        },
+        "archived": false,
+        "disabled": false,
+        "fork": false
+      }
+    },
+    {
+      "profileKey": "demo-video-editing",
+      "profileLabelZh": "视频创作与剪辑",
+      "profileLabelEn": "Video creation and editing",
+      "repository": {
+        "id": 72343657,
+        "full_name": "mifi/lossless-cut",
+        "name": "lossless-cut",
+        "owner": {
+          "login": "mifi",
+          "avatar_url": "https://avatars.githubusercontent.com/u/402547?v=4"
+        },
+        "html_url": "https://github.com/mifi/lossless-cut",
+        "description": "The swiss army knife of lossless video/audio editing",
+        "homepage": "https://losslesscut.app/",
+        "language": "TypeScript",
+        "topics": [
+          "codec",
+          "cut",
+          "editor",
+          "ffmpeg",
+          "lossless",
+          "losslesscut",
+          "player",
+          "video",
+          "video-editor",
+          "video-files"
+        ],
+        "stargazers_count": 43798,
+        "forks_count": 2171,
+        "watchers_count": 43798,
+        "open_issues_count": 305,
+        "default_branch": "master",
+        "created_at": "2016-10-30T10:49:56Z",
+        "updated_at": "2026-09-16T08:03:15Z",
+        "pushed_at": "2026-09-14T09:55:23Z",
+        "license": {
+          "key": "gpl-2.0",
+          "name": "GNU General Public License v2.0",
+          "spdx_id": "GPL-2.0",
+          "url": "https://api.github.com/licenses/gpl-2.0"
+        },
+        "archived": false,
+        "disabled": false,
+        "fork": false
+      }
+    },
+    {
+      "profileKey": "demo-video-editing",
+      "profileLabelZh": "视频创作与剪辑",
+      "profileLabelEn": "Video creation and editing",
+      "repository": {
+        "id": 36648301,
+        "full_name": "OpenShot/openshot-qt",
+        "name": "openshot-qt",
+        "owner": {
+          "login": "OpenShot",
+          "avatar_url": "https://avatars.githubusercontent.com/u/5551888?v=4"
+        },
+        "html_url": "https://github.com/OpenShot/openshot-qt",
+        "description": "OpenShot Video Editor is an award-winning free and open-source video editor for Linux, Mac, and Windows, and is dedicated to delivering high quality video editing and animation solutions to the world.",
+        "homepage": "http://www.openshot.org",
+        "language": "Python",
+        "topics": [
+          "c-plus-plus",
+          "ffmpeg",
+          "gplv3",
+          "openshot",
+          "python",
+          "qt5",
+          "video",
+          "video-editing",
+          "video-production"
+        ],
+        "stargazers_count": 6503,
+        "forks_count": 805,
+        "watchers_count": 6503,
+        "open_issues_count": 424,
+        "default_branch": "develop",
+        "created_at": "2015-06-01T08:39:27Z",
+        "updated_at": "2026-09-16T07:55:23Z",
+        "pushed_at": "2026-09-15T21:15:28Z",
+        "license": {
+          "key": "other",
+          "name": "Other",
+          "spdx_id": "NOASSERTION",
+          "url": ""
+        },
+        "archived": false,
+        "disabled": false,
+        "fork": false
+      }
+    },
+    {
+      "profileKey": "demo-audio-tools",
+      "profileLabelZh": "音频创作工具",
+      "profileLabelEn": "Audio creation tools",
+      "repository": {
+        "id": 32921736,
+        "full_name": "audacity/audacity",
+        "name": "audacity",
+        "owner": {
+          "login": "audacity",
+          "avatar_url": "https://avatars.githubusercontent.com/u/11648186?v=4"
+        },
+        "html_url": "https://github.com/audacity/audacity",
+        "description": "Audio Editor                                     ",
+        "homepage": "https://wiki.audacityteam.org/wiki/For_Developers",
+        "language": "C++",
+        "topics": [
+          "audio",
+          "cross-platform",
+          "editor",
+          "gplv2",
+          "wxwidgets-applications"
+        ],
+        "stargazers_count": 18447,
+        "forks_count": 2669,
+        "watchers_count": 18447,
+        "open_issues_count": 1785,
+        "default_branch": "master",
+        "created_at": "2015-03-26T10:46:17Z",
+        "updated_at": "2026-09-16T08:05:47Z",
+        "pushed_at": "2026-09-16T08:05:42Z",
+        "license": {
+          "key": "other",
+          "name": "Other",
+          "spdx_id": "NOASSERTION",
+          "url": ""
+        },
+        "archived": false,
+        "disabled": false,
+        "fork": false
+      }
+    },
+    {
+      "profileKey": "demo-audio-tools",
+      "profileLabelZh": "音频创作工具",
+      "profileLabelEn": "Audio creation tools",
+      "repository": {
+        "id": 10126031,
+        "full_name": "mixxxdj/mixxx",
+        "name": "mixxx",
+        "owner": {
+          "login": "mixxxdj",
+          "avatar_url": "https://avatars.githubusercontent.com/u/1743769?v=4"
+        },
+        "html_url": "https://github.com/mixxxdj/mixxx",
+        "description": "Mixxx is Free DJ software that gives you everything you need to perform live mixes.",
+        "homepage": "http://mixxx.org",
+        "language": "C++",
+        "topics": [
+          "audio",
+          "dj",
+          "hid",
+          "linux",
+          "mac",
+          "midi",
+          "music",
+          "qt",
+          "windows"
+        ],
+        "stargazers_count": 7156,
+        "forks_count": 1895,
+        "watchers_count": 7156,
+        "open_issues_count": 2938,
+        "default_branch": "main",
+        "created_at": "2013-05-17T15:14:38Z",
+        "updated_at": "2026-09-16T05:51:47Z",
+        "pushed_at": "2026-09-15T15:34:20Z",
+        "license": {
+          "key": "other",
+          "name": "Other",
+          "spdx_id": "NOASSERTION",
+          "url": ""
+        },
+        "archived": false,
+        "disabled": false,
+        "fork": false
+      }
+    },
+    {
+      "profileKey": "demo-document-signing",
+      "profileLabelZh": "文档签署与审批",
+      "profileLabelEn": "Document signing and approval",
+      "repository": {
+        "id": 613010835,
+        "full_name": "documenso/documenso",
+        "name": "documenso",
+        "owner": {
+          "login": "documenso",
+          "avatar_url": "https://avatars.githubusercontent.com/u/127681099?v=4"
+        },
+        "html_url": "https://github.com/documenso/documenso",
+        "description": "The Open Source DocuSign Alternative.",
+        "homepage": "https://documenso.com",
+        "language": "TypeScript",
+        "topics": [
+          "digital-signature",
+          "document-signing",
+          "docusign-alternative",
+          "e-signature",
+          "esign",
+          "esignature",
+          "next-auth",
+          "nextjs",
+          "open-source",
+          "pades-standard",
+          "pdf",
+          "pdf-sign",
+          "pdf-signature",
+          "postgresql",
+          "prisma",
+          "self-hosted",
+          "signing",
+          "typescript"
+        ],
+        "stargazers_count": 15043,
+        "forks_count": 3216,
+        "watchers_count": 15043,
+        "open_issues_count": 221,
+        "default_branch": "main",
+        "created_at": "2023-03-12T16:28:56Z",
+        "updated_at": "2026-09-16T04:42:00Z",
+        "pushed_at": "2026-09-16T08:11:38Z",
+        "license": {
+          "key": "agpl-3.0",
+          "name": "GNU Affero General Public License v3.0",
+          "spdx_id": "AGPL-3.0",
+          "url": "https://api.github.com/licenses/agpl-3.0"
+        },
+        "archived": false,
+        "disabled": false,
+        "fork": false
+      }
+    },
+    {
+      "profileKey": "demo-document-signing",
+      "profileLabelZh": "文档签署与审批",
+      "profileLabelEn": "Document signing and approval",
+      "repository": {
+        "id": 699424633,
+        "full_name": "OpenSignLabs/OpenSign",
+        "name": "OpenSign",
+        "owner": {
+          "login": "OpenSignLabs",
+          "avatar_url": "https://avatars.githubusercontent.com/u/146751146?v=4"
+        },
+        "html_url": "https://github.com/OpenSignLabs/OpenSign",
+        "description": "🔥 The free & Open Source DocuSign alternative",
+        "homepage": "https://www.opensignlabs.com",
+        "language": "JavaScript",
+        "topics": [
+          "digital-signature",
+          "document-signing",
+          "docusign-alternative",
+          "docusign-free",
+          "e-signature",
+          "electronic-signature",
+          "electronic-signatures",
+          "esign",
+          "esignature",
+          "hacktoberfest",
+          "javascript",
+          "legaltech",
+          "mongodb",
+          "nodejs",
+          "open-source",
+          "pdf-sign",
+          "pdf-signature",
+          "reactjs",
+          "self-hosted",
+          "sign-pdf-files"
+        ],
+        "stargazers_count": 7000,
+        "forks_count": 821,
+        "watchers_count": 7000,
+        "open_issues_count": 150,
+        "default_branch": "staging",
+        "created_at": "2023-10-02T15:53:30Z",
+        "updated_at": "2026-09-16T07:27:53Z",
+        "pushed_at": "2026-08-21T12:29:09Z",
+        "license": {
+          "key": "other",
+          "name": "Other",
+          "spdx_id": "NOASSERTION",
+          "url": ""
+        },
+        "archived": false,
+        "disabled": false,
+        "fork": false
+      }
+    },
+    {
+      "profileKey": "demo-knowledge-base",
+      "profileLabelZh": "知识库与知识管理",
+      "profileLabelEn": "Knowledge bases and knowledge management",
+      "repository": {
+        "id": 59435364,
+        "full_name": "outline/outline",
+        "name": "outline",
+        "owner": {
+          "login": "outline",
+          "avatar_url": "https://avatars.githubusercontent.com/u/1765001?v=4"
+        },
+        "html_url": "https://github.com/outline/outline",
+        "description": "The fastest knowledge base for growing teams. Beautiful, realtime collaborative, feature packed, and markdown compatible.",
+        "homepage": "https://www.getoutline.com",
+        "language": "TypeScript",
+        "topics": [
+          "docker",
+          "javascript",
+          "mobx",
+          "nodejs",
+          "react",
+          "slack",
+          "wiki"
+        ],
+        "stargazers_count": 40554,
+        "forks_count": 3559,
+        "watchers_count": 40554,
+        "open_issues_count": 77,
+        "default_branch": "main",
+        "created_at": "2016-05-22T21:31:47Z",
+        "updated_at": "2026-09-16T07:52:47Z",
+        "pushed_at": "2026-09-14T23:31:09Z",
+        "license": {
+          "key": "other",
+          "name": "Other",
+          "spdx_id": "NOASSERTION",
+          "url": ""
+        },
+        "archived": false,
+        "disabled": false,
+        "fork": false
+      }
+    },
+    {
+      "profileKey": "demo-knowledge-base",
+      "profileLabelZh": "知识库与知识管理",
+      "profileLabelEn": "Knowledge bases and knowledge management",
+      "repository": {
+        "id": 291438522,
+        "full_name": "siyuan-note/siyuan",
+        "name": "siyuan",
+        "owner": {
+          "login": "siyuan-note",
+          "avatar_url": "https://avatars.githubusercontent.com/u/70468694?v=4"
+        },
+        "html_url": "https://github.com/siyuan-note/siyuan",
+        "description": "An open-source, privacy-first, self-hosted knowledge workspace where humans and AI agents work together 开源、隐私优先、自托管的知识工作空间，让人与智能体在此协作",
+        "homepage": "https://b3log.org/siyuan",
+        "language": "TypeScript",
+        "topics": [
+          "agentic-ai",
+          "ai-agent",
+          "knowledge-base",
+          "local-first",
+          "markdown",
+          "mcp",
+          "note-taking",
+          "self-hosted",
+          "siyuan"
+        ],
+        "stargazers_count": 46388,
+        "forks_count": 3007,
+        "watchers_count": 46388,
+        "open_issues_count": 17,
+        "default_branch": "master",
+        "created_at": "2020-08-30T09:21:35Z",
+        "updated_at": "2026-09-16T08:05:55Z",
+        "pushed_at": "2026-09-16T07:31:05Z",
+        "license": {
+          "key": "agpl-3.0",
+          "name": "GNU Affero General Public License v3.0",
+          "spdx_id": "AGPL-3.0",
+          "url": "https://api.github.com/licenses/agpl-3.0"
+        },
+        "archived": false,
+        "disabled": false,
+        "fork": false
+      }
+    },
+    {
+      "profileKey": "demo-knowledge-base",
+      "profileLabelZh": "知识库与知识管理",
+      "profileLabelEn": "Knowledge bases and knowledge management",
+      "repository": {
+        "id": 519859998,
+        "full_name": "toeverything/AFFiNE",
+        "name": "AFFiNE",
+        "owner": {
+          "login": "toeverything",
+          "avatar_url": "https://avatars.githubusercontent.com/u/78728988?v=4"
+        },
+        "html_url": "https://github.com/toeverything/AFFiNE",
+        "description": "There can be more than Notion and Miro. AFFiNE(pronounced [ə‘fain]) is a next-gen knowledge base that brings planning, sorting and creating all together. Privacy first, open-source, customizable and ready to use. ",
+        "homepage": "https://affine.pro",
+        "language": "TypeScript",
+        "topics": [
+          "app",
+          "crdt",
+          "editor",
+          "electron",
+          "knowledge-base",
+          "markdown",
+          "miro",
+          "notes",
+          "notion",
+          "notion-alternative",
+          "rust",
+          "rust-lang",
+          "rust-language",
+          "table",
+          "tableview",
+          "whiteboard",
+          "wiki",
+          "workspace"
+        ],
+        "stargazers_count": 72656,
+        "forks_count": 5277,
+        "watchers_count": 72656,
+        "open_issues_count": 743,
+        "default_branch": "canary",
+        "created_at": "2022-07-31T18:45:21Z",
+        "updated_at": "2026-09-16T07:45:23Z",
+        "pushed_at": "2026-09-15T09:38:38Z",
+        "license": {
+          "key": "other",
+          "name": "Other",
+          "spdx_id": "NOASSERTION",
+          "url": ""
+        },
+        "archived": false,
+        "disabled": false,
+        "fork": false
+      }
+    },
+    {
+      "profileKey": "demo-ai-creation",
+      "profileLabelZh": "AI 创作工作台",
+      "profileLabelEn": "AI creation workspaces",
+      "repository": {
+        "id": 589831718,
+        "full_name": "Comfy-Org/ComfyUI",
+        "name": "ComfyUI",
+        "owner": {
+          "login": "Comfy-Org",
+          "avatar_url": "https://avatars.githubusercontent.com/u/166579949?v=4"
+        },
+        "html_url": "https://github.com/Comfy-Org/ComfyUI",
+        "description": "The most powerful and modular diffusion model GUI, api and backend with a graph/nodes interface.",
+        "homepage": "https://www.comfy.org/",
+        "language": "Python",
+        "topics": [
+          "ai",
+          "comfy",
+          "comfyui",
+          "python",
+          "pytorch",
+          "stable-diffusion"
+        ],
+        "stargazers_count": 133462,
+        "forks_count": 15790,
+        "watchers_count": 133462,
+        "open_issues_count": 4880,
+        "default_branch": "master",
+        "created_at": "2023-01-17T03:15:56Z",
+        "updated_at": "2026-09-16T08:15:09Z",
+        "pushed_at": "2026-09-16T05:56:17Z",
+        "license": {
+          "key": "gpl-3.0",
+          "name": "GNU General Public License v3.0",
+          "spdx_id": "GPL-3.0",
+          "url": "https://api.github.com/licenses/gpl-3.0"
+        },
+        "archived": false,
+        "disabled": false,
+        "fork": false
+      }
+    },
+    {
+      "profileKey": "demo-ai-creation",
+      "profileLabelZh": "AI 创作工作台",
+      "profileLabelEn": "AI creation workspaces",
+      "repository": {
+        "id": 525592995,
+        "full_name": "invoke-ai/InvokeAI",
+        "name": "InvokeAI",
+        "owner": {
+          "login": "invoke-ai",
+          "avatar_url": "https://avatars.githubusercontent.com/u/113954515?v=4"
+        },
+        "html_url": "https://github.com/invoke-ai/InvokeAI",
+        "description": "Invoke is a leading creative engine for Stable Diffusion models, empowering professionals, artists, and enthusiasts to generate and create visual media using the latest AI-driven technologies. The solution offers an industry leading WebUI, and serves as the foundation for multiple commercial products.",
+        "homepage": "https://invoke-ai.github.io/InvokeAI/",
+        "language": "Python",
+        "topics": [
+          "ai-art",
+          "artificial-intelligence",
+          "generative-art",
+          "image-generation",
+          "img2img",
+          "inpainting",
+          "latent-diffusion",
+          "linux",
+          "macos",
+          "outpainting",
+          "stable-diffusion",
+          "txt2img",
+          "windows"
+        ],
+        "stargazers_count": 28225,
+        "forks_count": 2972,
+        "watchers_count": 28225,
+        "open_issues_count": 372,
+        "default_branch": "main",
+        "created_at": "2022-08-17T01:04:27Z",
+        "updated_at": "2026-09-16T08:13:14Z",
+        "pushed_at": "2026-09-15T12:27:03Z",
+        "license": {
+          "key": "apache-2.0",
+          "name": "Apache License 2.0",
+          "spdx_id": "Apache-2.0",
+          "url": "https://api.github.com/licenses/apache-2.0"
+        },
+        "archived": false,
+        "disabled": false,
+        "fork": false
+      }
+    },
+    {
+      "profileKey": "demo-ai-creation",
+      "profileLabelZh": "AI 创作工作台",
+      "profileLabelEn": "AI creation workspaces",
+      "repository": {
+        "id": 626805178,
+        "full_name": "langgenius/dify",
+        "name": "dify",
+        "owner": {
+          "login": "langgenius",
+          "avatar_url": "https://avatars.githubusercontent.com/u/127165244?v=4"
+        },
+        "html_url": "https://github.com/langgenius/dify",
+        "description": "Build Agentic workflows, RAG pipelines, with rich AI model and tool support on one collaborative workspace. Deploy on cloud, VPC, or self-hosted, so teams move from prototype to production without rebuilding the stack.",
+        "homepage": "https://dify.ai",
+        "language": "TypeScript",
+        "topics": [
+          "agent",
+          "agentic-ai",
+          "agentic-framework",
+          "agentic-workflow",
+          "ai",
+          "automation",
+          "claude",
+          "deepseek",
+          "genai",
+          "gpt",
+          "llm",
+          "low-code",
+          "mcp",
+          "nextjs",
+          "no-code",
+          "openai",
+          "python",
+          "skills",
+          "workflow"
+        ],
+        "stargazers_count": 155908,
+        "forks_count": 24628,
+        "watchers_count": 155908,
+        "open_issues_count": 1075,
+        "default_branch": "main",
+        "created_at": "2023-04-12T07:40:24Z",
+        "updated_at": "2026-09-16T08:13:55Z",
+        "pushed_at": "2026-09-16T08:01:27Z",
+        "license": {
+          "key": "other",
+          "name": "Other",
+          "spdx_id": "NOASSERTION",
+          "url": ""
+        },
+        "archived": false,
+        "disabled": false,
+        "fork": false
+      }
+    },
+    {
+      "profileKey": "demo-content-publishing",
+      "profileLabelZh": "无头 CMS 与内容发布",
+      "profileLabelEn": "Headless CMS and content publishing",
+      "repository": {
+        "id": 7122594,
+        "full_name": "directus/directus",
+        "name": "directus",
+        "owner": {
+          "login": "directus",
+          "avatar_url": "https://avatars.githubusercontent.com/u/15967950?v=4"
+        },
+        "html_url": "https://github.com/directus/directus",
+        "description": "The flexible backend for all your projects 🐰 Turn your DB into a headless CMS, admin panels, or apps with a custom UI, instant APIs, auth & more.",
+        "homepage": "https://directus.com",
+        "language": "TypeScript",
+        "topics": [
+          "api",
+          "app",
+          "cms",
+          "composable",
+          "data-visualization",
+          "database",
+          "directus",
+          "graphql",
+          "headless-cms",
+          "javascript",
+          "mariadb",
+          "mssql",
+          "mysql",
+          "no-code",
+          "node",
+          "postgresql",
+          "sql",
+          "sqlite",
+          "typescript",
+          "vue"
+        ],
+        "stargazers_count": 37928,
+        "forks_count": 4939,
+        "watchers_count": 37928,
+        "open_issues_count": 400,
+        "default_branch": "main",
+        "created_at": "2012-12-12T01:35:36Z",
+        "updated_at": "2026-09-16T07:39:27Z",
+        "pushed_at": "2026-09-16T03:53:00Z",
+        "license": {
+          "key": "other",
+          "name": "Other",
+          "spdx_id": "NOASSERTION",
+          "url": ""
+        },
+        "archived": false,
+        "disabled": false,
+        "fork": false
+      }
+    },
+    {
+      "profileKey": "demo-content-publishing",
+      "profileLabelZh": "无头 CMS 与内容发布",
+      "profileLabelEn": "Headless CMS and content publishing",
+      "repository": {
+        "id": 43441403,
+        "full_name": "strapi/strapi",
+        "name": "strapi",
+        "owner": {
+          "login": "strapi",
+          "avatar_url": "https://avatars.githubusercontent.com/u/19872173?v=4"
+        },
+        "html_url": "https://github.com/strapi/strapi",
+        "description": "🚀 Strapi is the leading open-source headless CMS. It’s 100% JavaScript/TypeScript, fully customizable, and developer-first.",
+        "homepage": "https://strapi.io",
+        "language": "TypeScript",
+        "topics": [
+          "api",
+          "cms",
+          "cms-framework",
+          "content-management",
+          "content-management-system",
+          "customizable",
+          "dashboard",
+          "graphql",
+          "hacktoberfest",
+          "headless-cms",
+          "jamstack",
+          "javascript",
+          "mysql",
+          "no-code",
+          "nodejs",
+          "posgresql",
+          "rest",
+          "strapi",
+          "typescript"
+        ],
+        "stargazers_count": 73170,
+        "forks_count": 9870,
+        "watchers_count": 73170,
+        "open_issues_count": 532,
+        "default_branch": "develop",
+        "created_at": "2015-09-30T15:34:48Z",
+        "updated_at": "2026-09-16T08:00:27Z",
+        "pushed_at": "2026-09-16T08:07:00Z",
+        "license": {
+          "key": "other",
+          "name": "Other",
+          "spdx_id": "NOASSERTION",
+          "url": ""
+        },
+        "archived": false,
+        "disabled": false,
+        "fork": false
+      }
+    },
+    {
+      "profileKey": "demo-content-publishing",
+      "profileLabelZh": "无头 CMS 与内容发布",
+      "profileLabelEn": "Headless CMS and content publishing",
+      "repository": {
+        "id": 327089870,
+        "full_name": "payloadcms/payload",
+        "name": "payload",
+        "owner": {
+          "login": "payloadcms",
+          "avatar_url": "https://avatars.githubusercontent.com/u/62968818?v=4"
+        },
+        "html_url": "https://github.com/payloadcms/payload",
+        "description": "Payload is the open-source, fullstack Next.js framework, giving you instant backend superpowers. Get a full TypeScript backend and admin panel instantly. Use Payload as a headless CMS or for building powerful applications.",
+        "homepage": "https://payloadcms.com",
+        "language": "TypeScript",
+        "topics": [
+          "cms",
+          "content-management",
+          "content-management-system",
+          "express",
+          "graphql",
+          "headless",
+          "headless-cms",
+          "jamstack",
+          "javascript",
+          "mit-license",
+          "mongodb",
+          "nextjs",
+          "nodejs",
+          "open-source",
+          "payload",
+          "payloadcms",
+          "postgres",
+          "react",
+          "typescript"
+        ],
+        "stargazers_count": 44764,
+        "forks_count": 4154,
+        "watchers_count": 44764,
+        "open_issues_count": 1142,
+        "default_branch": "main",
+        "created_at": "2021-01-05T18:49:45Z",
+        "updated_at": "2026-09-16T08:04:45Z",
+        "pushed_at": "2026-09-15T16:15:47Z",
+        "license": {
+          "key": "mit",
+          "name": "MIT License",
+          "spdx_id": "MIT",
+          "url": "https://api.github.com/licenses/mit"
+        },
+        "archived": false,
+        "disabled": false,
+        "fork": false
+      }
+    },
+    {
+      "profileKey": "demo-visual-builder",
+      "profileLabelZh": "可视化搭建与页面编辑",
+      "profileLabelEn": "Visual builders and page editing",
+      "repository": {
+        "id": 50146229,
+        "full_name": "GrapesJS/grapesjs",
+        "name": "grapesjs",
+        "owner": {
+          "login": "GrapesJS",
+          "avatar_url": "https://avatars.githubusercontent.com/u/123950155?v=4"
+        },
+        "html_url": "https://github.com/GrapesJS/grapesjs",
+        "description": "Free and Open source Web Builder Framework. Next generation tool for building templates without coding",
+        "homepage": "https://grapesjs.com",
+        "language": "TypeScript",
+        "topics": [
+          "drag-and-drop",
+          "framework",
+          "no-code",
+          "nocode",
+          "page-builder",
+          "site-builder",
+          "site-generator",
+          "template-builder",
+          "ui-builder",
+          "web-builder",
+          "web-builder-framework",
+          "website-builder"
+        ],
+        "stargazers_count": 26239,
+        "forks_count": 4645,
+        "watchers_count": 26239,
+        "open_issues_count": 40,
+        "default_branch": "dev",
+        "created_at": "2016-01-22T00:23:19Z",
+        "updated_at": "2026-09-16T08:23:18Z",
+        "pushed_at": "2026-08-26T12:21:05Z",
+        "license": {
+          "key": "other",
+          "name": "Other",
+          "spdx_id": "NOASSERTION",
+          "url": ""
+        },
+        "archived": false,
+        "disabled": false,
+        "fork": false
+      }
+    },
+    {
+      "profileKey": "demo-visual-builder",
+      "profileLabelZh": "可视化搭建与页面编辑",
+      "profileLabelEn": "Visual builders and page editing",
+      "repository": {
+        "id": 168429268,
+        "full_name": "BuilderIO/builder",
+        "name": "builder",
+        "owner": {
+          "login": "BuilderIO",
+          "avatar_url": "https://avatars.githubusercontent.com/u/35700027?v=4"
+        },
+        "html_url": "https://github.com/BuilderIO/builder",
+        "description": "Visual Development for React, Vue, Svelte, Qwik, and more",
+        "homepage": "https://builder.io",
+        "language": "TypeScript",
+        "topics": [
+          "angular",
+          "builder",
+          "cms",
+          "drag-drop",
+          "frontend",
+          "gatsby",
+          "headless",
+          "headless-cms",
+          "landing-pages",
+          "next-js",
+          "nocode",
+          "page-builder",
+          "pwa",
+          "qwik",
+          "react",
+          "react-native",
+          "shopify",
+          "vue",
+          "webcomponents",
+          "wysiwyg"
+        ],
+        "stargazers_count": 8832,
+        "forks_count": 1163,
+        "watchers_count": 8832,
+        "open_issues_count": 150,
+        "default_branch": "main",
+        "created_at": "2019-01-30T23:06:02Z",
+        "updated_at": "2026-09-15T17:26:15Z",
+        "pushed_at": "2026-09-16T07:05:44Z",
+        "license": {
+          "key": "mit",
+          "name": "MIT License",
+          "spdx_id": "MIT",
+          "url": "https://api.github.com/licenses/mit"
+        },
+        "archived": false,
+        "disabled": false,
+        "fork": false
+      }
+    },
+    {
+      "profileKey": "demo-workflow-automation",
+      "profileLabelZh": "自动化与 AI 工作流",
+      "profileLabelEn": "Automation and AI workflows",
+      "repository": {
+        "id": 193215554,
+        "full_name": "n8n-io/n8n",
+        "name": "n8n",
+        "owner": {
+          "login": "n8n-io",
+          "avatar_url": "https://avatars.githubusercontent.com/u/45487711?v=4"
+        },
+        "html_url": "https://github.com/n8n-io/n8n",
+        "description": "Fair-code workflow automation platform with native AI capabilities. Combine visual building with custom code, self-host or cloud, 400+ integrations.",
+        "homepage": "https://n8n.io",
+        "language": "TypeScript",
+        "topics": [
+          "ai",
+          "apis",
+          "automation",
+          "cli",
+          "data-flow",
+          "development",
+          "integration-framework",
+          "integrations",
+          "ipaas",
+          "low-code",
+          "low-code-platform",
+          "mcp",
+          "mcp-client",
+          "mcp-server",
+          "n8n",
+          "no-code",
+          "self-hosted",
+          "typescript",
+          "workflow",
+          "workflow-automation"
+        ],
+        "stargazers_count": 204499,
+        "forks_count": 60699,
+        "watchers_count": 204499,
+        "open_issues_count": 1167,
+        "default_branch": "master",
+        "created_at": "2019-06-22T09:24:21Z",
+        "updated_at": "2026-09-16T08:21:03Z",
+        "pushed_at": "2026-09-16T08:22:56Z",
+        "license": {
+          "key": "other",
+          "name": "Other",
+          "spdx_id": "NOASSERTION",
+          "url": ""
+        },
+        "archived": false,
+        "disabled": false,
+        "fork": false
+      }
+    },
+    {
+      "profileKey": "demo-workflow-automation",
+      "profileLabelZh": "自动化与 AI 工作流",
+      "profileLabelEn": "Automation and AI workflows",
+      "repository": {
+        "id": 573661753,
+        "full_name": "activepieces/activepieces",
+        "name": "activepieces",
+        "owner": {
+          "login": "activepieces",
+          "avatar_url": "https://avatars.githubusercontent.com/u/99494700?v=4"
+        },
+        "html_url": "https://github.com/activepieces/activepieces",
+        "description": "AI Agents & MCPs & AI Workflow Automation • (~400 MCP servers for AI agents) • AI Automation / AI Agent with MCPs • AI Workflows & AI Agents • MCPs for AI Agents",
+        "homepage": "https://www.activepieces.com",
+        "language": "TypeScript",
+        "topics": [
+          "ai-agent",
+          "ai-agent-tools",
+          "ai-agents",
+          "ai-agents-framework",
+          "mcp",
+          "mcp-server",
+          "mcp-tools",
+          "mcps",
+          "n8n-alternative",
+          "no-code-automation",
+          "workflow",
+          "workflow-automation",
+          "workflows"
+        ],
+        "stargazers_count": 24477,
+        "forks_count": 4194,
+        "watchers_count": 24477,
+        "open_issues_count": 574,
+        "default_branch": "main",
+        "created_at": "2022-12-03T02:52:46Z",
+        "updated_at": "2026-09-16T08:19:19Z",
+        "pushed_at": "2026-09-16T08:21:32Z",
+        "license": {
+          "key": "other",
+          "name": "Other",
+          "spdx_id": "NOASSERTION",
+          "url": ""
+        },
+        "archived": false,
+        "disabled": false,
+        "fork": false
+      }
+    }
+  ]
+}

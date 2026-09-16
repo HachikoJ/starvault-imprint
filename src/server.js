@@ -27,23 +27,35 @@ const {
 const {
   applyMemoryToQueryProfiles,
   buildQueryProfiles,
+  clearGithubCooldown,
+  completePlanQuery,
+  createGithubCooldownError,
+  ensureGithubCooldownFresh,
   fetchTrendingRepositories,
   forkRepository,
   getAuthenticatedUser,
+  githubCooldownSnapshot,
   githubRepositorySearchCount,
   githubRateLimitStatus,
+  isGithubCooldownError,
   isGithubRateLimitError,
   listOwnRepositories,
   normalizeGithubOrGroups,
   repositoryOnlineTrends,
+  restoreGithubCooldown,
   sampleRepositorySearchResults,
   searchCandidateRepositories,
+  setGithubCooldownPersister,
   starRepository,
   unstarRepository
 } = require("./lib/github");
 const { enrichRepository } = require("./lib/scoring");
 const { createStorage } = require("./lib/storage");
-const { enrichTopProjectsWithExa, searchTopicSignals: searchExaTopicSignals } = require("./lib/exa");
+const {
+  enrichTopProjectsWithExa,
+  exaErrorFromResponse,
+  searchTopicSignals: searchExaTopicSignals
+} = require("./lib/exa");
 const { enrichTopProjectsWithTavily, searchTopicSignals: searchTavilyTopicSignals } = require("./lib/tavily");
 const { startScheduler } = require("./lib/scheduler");
 const {
@@ -59,6 +71,8 @@ const config = buildConfig();
 const storage = createStorage(config.storePath);
 let scheduler = null;
 let scanInProgress = false;
+// Live progress describes exactly one run, so it carries the plan that run
+// belongs to; status reads for any other plan are answered from stored state.
 let scanProgress = {
   status: "idle",
   stage: "idle",
@@ -67,27 +81,136 @@ let scanProgress = {
   completed: 0,
   total: 0,
   startedAt: null,
-  updatedAt: null
+  updatedAt: null,
+  observationPlanId: ""
 };
 let scanEta = null;
+let runningScanPlanId = "";
 const runningTasks = new Map();
 const MAX_DURABLE_TASK_CONCURRENCY = 2;
 let activeDurableTaskCount = 0;
+
+class ScanBusyError extends Error {
+  constructor() {
+    super("A scan is already running; the queued scan will start when it finishes.");
+    this.name = "ScanBusyError";
+    this.code = "SCAN_ALREADY_RUNNING";
+  }
+}
+
+const GITHUB_COOLDOWN_RUNTIME_KEY = "githubCooldown";
+let githubCooldownResumeTimer = null;
+
+function persistedGithubCooldown() {
+  return storage.getRuntimeState(GITHUB_COOLDOWN_RUNTIME_KEY) || null;
+}
+
+function clearPersistedGithubCooldown() {
+  const current = persistedGithubCooldown();
+  if (!current || !current.active) return;
+  // setRuntimeState merges, so every field must be overwritten explicitly or a
+  // stale `until` keeps the account cooling after a restart.
+  storage.setRuntimeState(GITHUB_COOLDOWN_RUNTIME_KEY, {
+    active: false,
+    until: "",
+    remainingSeconds: 0,
+    reason: "",
+    message: "",
+    clearedAt: new Date().toISOString()
+  });
+}
+
+function scheduleGithubCooldownResume(cooldown = null) {
+  if (githubCooldownResumeTimer) {
+    clearTimeout(githubCooldownResumeTimer);
+    githubCooldownResumeTimer = null;
+  }
+  const snapshot = cooldown || githubCooldownSnapshot();
+  if (!snapshot.active) return;
+  const delay = Math.max(1000, Number(snapshot.remainingSeconds || 0) * 1000 + 1000);
+  githubCooldownResumeTimer = setTimeout(() => {
+    githubCooldownResumeTimer = null;
+    const fresh = ensureGithubCooldownFresh();
+    if (fresh.active) {
+      scheduleGithubCooldownResume(fresh);
+      return;
+    }
+    clearPersistedGithubCooldown();
+    pumpDurableTaskQueue();
+  }, delay);
+  githubCooldownResumeTimer.unref?.();
+}
+
+function persistGithubCooldownState(snapshot = {}) {
+  if (snapshot.active) {
+    storage.setRuntimeState(GITHUB_COOLDOWN_RUNTIME_KEY, snapshot);
+  } else {
+    clearPersistedGithubCooldown();
+  }
+  scheduleGithubCooldownResume(snapshot);
+}
+
+function restoreGithubCooldownState() {
+  setGithubCooldownPersister(persistGithubCooldownState);
+  const stored = persistedGithubCooldown();
+  const restored = restoreGithubCooldown(stored);
+  if (restored.active) scheduleGithubCooldownResume(restored);
+  else if (stored?.active) clearPersistedGithubCooldown();
+  return restored;
+}
+
+// Single entry point for reading the live cooldown: it expires the cooldown,
+// persists the release and lets queued work continue.
+function githubCooldownState() {
+  return ensureGithubCooldownFresh();
+}
+
+function activeGithubCooldown() {
+  const snapshot = githubCooldownState();
+  return snapshot.active ? snapshot : null;
+}
 
 function publicTask(task = {}) {
   return {
     id: task.id,
     type: task.type,
     key: task.key || "",
+    // The client needs the owning plan to tell "my scan finished" apart from
+    // "another plan's scan finished while I was looking somewhere else".
+    observationPlanId: task.input?.observationPlanId || "",
     status: task.status,
     attempts: Number(task.attempts || 0),
     result: task.status === "completed" ? task.result : null,
     error: task.status === "failed" ? task.error || "Task failed" : "",
+    cooldown: task.status === "failed" && task.cooldown?.active ? task.cooldown : null,
     createdAt: task.createdAt || "",
     startedAt: task.startedAt || "",
     finishedAt: task.finishedAt || "",
     updatedAt: task.updatedAt || ""
   };
+}
+
+// Every plan owns its own scan slot. A shared key made a switch to another plan
+// reuse the running plan's task, so the new plan was reported as scanned while
+// its own pool stayed empty.
+function scanTaskKey(planId = "") {
+  const id = String(planId || "").trim() || "default";
+  return `scan:${id}`;
+}
+
+// Scan status is read per observation plan. An unknown or now-deleted plan id
+// falls back to the active plan instead of leaking another plan's task state.
+function scanStatusPlanId(raw = "") {
+  const requested = String(raw || "").trim();
+  try {
+    return storage.getObservationPlan(requested).id;
+  } catch {
+    try {
+      return storage.getObservationPlan().id;
+    } catch {
+      return "default";
+    }
+  }
 }
 
 // Per-IP limits for expensive endpoints (protects GitHub/Tavily/Exa/LLM budgets).
@@ -149,12 +272,6 @@ function enforceCrawlerRateLimit(req) {
 function enforceSensitiveProbeLimit(req) {
   const limit = sensitiveProbeRateLimiter(`probe:${clientIp(req, config.trustProxy)}`);
   return limit.allowed ? null : { ...limit, scope: "probe" };
-}
-
-function dateDaysAgo(days) {
-  const date = new Date();
-  date.setUTCDate(date.getUTCDate() - days);
-  return date.toISOString().slice(0, 10);
 }
 
 function startScanEta(totalUnits = 100) {
@@ -220,9 +337,13 @@ function updateScanEta(completedUnits = 0) {
 function setScanProgress(next = {}) {
   const etaEstimate = next.etaSeconds === undefined ? updateScanEta(next.progressUnits) : null;
   const etaSeconds = next.etaSeconds === undefined ? etaEstimate?.seconds ?? null : next.etaSeconds;
+  const observationPlanId = String(
+    next.observationPlanId || runningScanPlanId || scanProgress.observationPlanId || ""
+  ).trim();
   scanProgress = {
     ...scanProgress,
     ...next,
+    observationPlanId,
     etaSeconds,
     etaMinSeconds: next.etaMinSeconds ?? etaEstimate?.minSeconds ?? null,
     etaMaxSeconds: next.etaMaxSeconds ?? etaEstimate?.maxSeconds ?? null,
@@ -326,20 +447,22 @@ async function validateExaKeyStatus(key) {
       body: JSON.stringify({
         query: "GitHub open source",
         type: "auto",
-        numResults: 1,
-        text: false
+        numResults: 1
       })
     });
     if (!response.ok) {
-      throw new Error(`Exa validation failed with ${response.status}`);
+      throw await exaErrorFromResponse(response);
     }
     return keyValidationResult(true, true);
   } catch (error) {
-    return keyValidationResult(true, false, "Exa Key 无效");
+    if (error?.exaResponseFailure) {
+      return keyValidationResult(true, false, error.message);
+    }
+    return keyValidationResult(true, false, "无法连接 Exa API，请检查网络后重试。");
   }
 }
 
-async function validateSavedServiceKeys() {
+async function validateSavedServiceKeys(options = {}) {
   const settings = storage.getSettings(true);
   const githubToken = settings.githubToken || config.githubToken || "";
   const tavilyKey = settings.tavilyKey || config.tavilyKey || "";
@@ -349,12 +472,99 @@ async function validateSavedServiceKeys() {
     validateTavilyKeyStatus(tavilyKey),
     validateExaKeyStatus(exaKey)
   ]);
+  const provider = options.includeProvider === false ? null : await validateSavedProviderStatus("deepseek");
   return {
     checkedAt: new Date().toISOString(),
     github,
     tavily,
-    exa
+    exa,
+    ...(provider ? { provider } : {})
   };
+}
+
+function isProviderAuthError(error) {
+  const status = Number(error?.status || error?.statusCode || 0);
+  const message = String(error?.message || "");
+  return (
+    Boolean(error?.providerAuthFailure) ||
+    status === 401 ||
+    /invalid[_\s-]*api[_\s-]*key|api key.*(?:invalid|expired)|unauthori[sz]ed|authentication|permission denied|bad credentials/i.test(message)
+  );
+}
+
+function providerAuthFailureMessage(provider = {}) {
+  return `${provider.name || "AI"} API Key 无效或已过期，请重新配置。`;
+}
+
+function providerFailureStatus(provider, error) {
+  return isProviderAuthError(error)
+    ? `auth-failed: ${providerAuthFailureMessage(provider)}`
+    : `failed: ${String(error?.message || "Provider request failed").slice(0, 300)}`;
+}
+
+function updateProviderStatus(providerId, patch = {}) {
+  const settings = storage.getSettings(true);
+  const provider = (settings.llmProviders || []).find((item) => item.id === providerId);
+  if (!provider) return null;
+  storage.updateSettings(mergeProviderUpdate(settings, providerId, patch));
+  return storage.getSettings(true);
+}
+
+async function validateSavedProviderStatus(providerId = "deepseek") {
+  const settings = storage.getSettings(true);
+  const provider = (settings.llmProviders || []).find((item) => item.id === providerId);
+  if (!provider || provider.enabled === false || !provider.apiKey) {
+    if (provider && (!provider.enabled || !provider.apiKey) && provider.testStatus) {
+      updateProviderStatus(providerId, {
+        lastTestAt: "",
+        testStatus: ""
+      });
+    }
+    return { providerId, configured: false, valid: null, authFailure: false };
+  }
+  try {
+    const networkProvider = await assertProviderNetworkTarget(provider);
+    const result = await testProviderConnection(networkProvider);
+    updateProviderStatus(providerId, {
+      models: result.models,
+      lastTestAt: result.checkedAt,
+      testStatus: "ok"
+    });
+    return { providerId, configured: true, valid: true, authFailure: false };
+  } catch (error) {
+    updateProviderStatus(providerId, {
+      lastTestAt: new Date().toISOString(),
+      testStatus: providerFailureStatus(provider, error)
+    });
+    return {
+      providerId,
+      configured: true,
+      valid: false,
+      authFailure: isProviderAuthError(error),
+      error: String(error?.message || "Provider request failed").slice(0, 300)
+    };
+  }
+}
+
+function markActiveProviderFailure(error) {
+  if (!isProviderAuthError(error)) return;
+  const settings = storage.getSettings(true);
+  const provider = activeProvider(settings);
+  if (!provider) return;
+  updateProviderStatus(provider.id, {
+    lastTestAt: new Date().toISOString(),
+    testStatus: providerFailureStatus(provider, error)
+  });
+}
+
+function markActiveProviderSuccess() {
+  const settings = storage.getSettings(true);
+  const provider = activeProvider(settings);
+  if (!provider) return;
+  updateProviderStatus(provider.id, {
+    lastTestAt: new Date().toISOString(),
+    testStatus: "ok"
+  });
 }
 
 function isGithubAuthError(error) {
@@ -376,6 +586,9 @@ function assertNoGithubBlockingErrors(errors = []) {
   assertNoGithubAuthErrors(errors);
   const rateLimitError = errors.find((error) => isGithubRateLimitError(error));
   if (rateLimitError) {
+    // Preserve the breaker payload (code + cooldown snapshot) so the caller can
+    // surface the countdown instead of a generic rate-limit message.
+    if (isGithubCooldownError(rateLimitError) || rateLimitError.cooldown) throw rateLimitError;
     throw new Error("GitHub API 调用已触发限流，请等待一段时间后再扫描，或降低检索条数后重试。");
   }
 }
@@ -626,7 +839,12 @@ function getProviderOrThrow(settings, providerId) {
 async function assertProviderNetworkTarget(provider = {}) {
   if (!provider.baseUrl) throw new Error("Provider base URL is empty");
   await assertSafeExternalUrl(provider.baseUrl, { allowPrivate: config.allowPrivateProviderUrls });
-  return provider;
+  return {
+    ...provider,
+    networkPolicy: {
+      allowPrivate: config.allowPrivateProviderUrls === true
+    }
+  };
 }
 
 function mergeProviderUpdate(settings, providerId, patch) {
@@ -824,6 +1042,36 @@ function mergeRepositoryCandidates(primary = [], auxiliary = [], maxRepos = 800)
   };
 }
 
+const SCAN_CHECKPOINT_STAGES = ["prepare", "github-search", "trending", "tavily", "exa", "persisted", "trends", "completed"];
+
+function checkpointStageReached(checkpoint, stage) {
+  const current = SCAN_CHECKPOINT_STAGES.indexOf(String(checkpoint?.stage || ""));
+  const target = SCAN_CHECKPOINT_STAGES.indexOf(stage);
+  return current >= 0 && target >= 0 && current >= target;
+}
+
+function serializeSignalMap(signalMap) {
+  return Object.fromEntries(Array.from(signalMap instanceof Map ? signalMap.entries() : []).map(([key, value]) => [key, value]));
+}
+
+function restoreSignalMap(value) {
+  return new Map(Object.entries(value || {}).map(([key, signals]) => [key, Array.isArray(signals) ? signals : []]));
+}
+
+function saveScanCheckpoint(taskId, checkpoint = {}) {
+  if (!taskId) return;
+  const task = storage.getTask(taskId);
+  if (!task || task.status !== "running") return;
+  storage.updateTask(taskId, {
+    checkpoint: {
+      ...(task.checkpoint || {}),
+      ...checkpoint,
+      version: 1,
+      updatedAt: new Date().toISOString()
+    }
+  });
+}
+
 function discoveryLogic() {
   const language = storage.getSettings(false).language || "zh";
   const activePlan = hydrateObservationPlanSearchLogic(storage.getObservationPlan(), language);
@@ -872,12 +1120,10 @@ function normalizeExportLanguage(value) {
 }
 
 const OBSERVATION_DEFAULT_PROFILE_COUNT = 55;
-const ABSTRACT_AI_NOISE = "-topic:agent -topic:agents -topic:ai-agent -topic:agentic -topic:multi-agent -topic:autonomous-agent -topic:swarm -topic:mcp";
-const RESEARCH_NOISE = "-topic:awesome -topic:tutorial -topic:course -topic:paper -topic:benchmark";
 
 function observationPlanExecutionCount(strategy = {}) {
   const customCount = Array.isArray(strategy.customQueries) ? strategy.customQueries.length : 0;
-  const mode = strategy.baseMode || "focused";
+  const mode = strategy.baseMode || "only";
   if (mode === "only") return customCount;
   if (mode === "blend") return customCount + OBSERVATION_DEFAULT_PROFILE_COUNT;
   return customCount + Math.min(10, OBSERVATION_DEFAULT_PROFILE_COUNT);
@@ -1710,28 +1956,12 @@ function isSpecificObservationTerm(term = "") {
   return !generic.has(lower) && (lower.length >= 4 || /\s/.test(lower) || specificAcronym);
 }
 
-function queryContainsObservationTerm(query = "", term = "") {
-  const lowerQuery = String(query || "").toLowerCase();
-  const lowerTerm = String(term || "").replace(/^["“]|["”]$/g, "").trim().toLowerCase();
-  if (!lowerQuery || !lowerTerm) return false;
-  if (/\s/.test(lowerTerm)) return lowerQuery.includes(lowerTerm) || lowerQuery.includes(`"${lowerTerm}"`);
-  return new RegExp(`(^|[^a-z0-9])${escapeRegExp(lowerTerm)}($|[^a-z0-9])`).test(lowerQuery);
-}
-
 function normalizeObservationExcludeTerm(term = "") {
   return String(term || "")
     .replace(/^-+/, "")
     .replace(/^["“]|["”]$/g, "")
     .replace(/\s+/g, " ")
     .trim();
-}
-
-function isSpecificObservationQuery(query = "", options = {}) {
-  const explicitTerms = explicitNeedTerms(options.need || "")
-    .filter(isSpecificObservationTerm)
-    .map((term) => term.toLowerCase());
-  if (!explicitTerms.length) return false;
-  return explicitTerms.some((term) => queryContainsObservationTerm(query, term));
 }
 
 function stripObservationAntiNoise(query = "") {
@@ -1743,56 +1973,13 @@ function stripObservationAntiNoise(query = "") {
     .trim();
 }
 
-function queryMatchesExplicitNeed(item = {}, need = "") {
-  const explicitTerms = explicitNeedTerms(need)
-    .filter(isSpecificObservationTerm)
-    .map((term) => term.toLowerCase());
-  if (!explicitTerms.length) return true;
-  const text = observationProfileText(item);
-  return explicitTerms.some((term) => queryContainsObservationTerm(text, term));
-}
-
-function observationQueryFreshnessDays(query = "", options = {}) {
-  const text = `${query || ""} ${options.need || ""}`.toLowerCase();
-  if (/\b(parser|converter|viewer|sdk|library|kernel|plugin|extension|addon|workbench|file format)\b/.test(text)) {
-    return 180;
-  }
-  return 90;
-}
-
-function normalizeObservationQueryFreshness(query = "", options = {}) {
-  const clean = String(query || "").replace(/\s+/g, " ").trim();
-  if (isSpecificObservationQuery(clean, options)) {
-    return stripObservationAntiNoise(clean)
-      .replace(/\bstars:[^\s]+/g, "")
-      .replace(/\bpushed:>=\d{4}-\d{2}-\d{2}\b/g, "")
-      .replace(/\s+/g, " ")
-      .trim();
-  }
-  const days = observationQueryFreshnessDays(clean, options);
-  if (days <= 90 || !/\bpushed:>=\d{4}-\d{2}-\d{2}\b/.test(clean)) return clean;
-  const relaxedDate = dateDaysAgo(days);
-  return clean.replace(/\bpushed:>=(\d{4}-\d{2}-\d{2})\b/g, (match, date) => (date > relaxedDate ? `pushed:>=${relaxedDate}` : match));
-}
-
-function completeObservationQuery(query = "", stars = 20, options = {}) {
+// The saved query is the contract the user reviews and the scan executes.
+// Completion only fills in missing GitHub qualifiers; stars/recency limits and
+// anti-noise exclusions declared by the plan are never silently rewritten here.
+// Controlled relaxation for sparse domains happens per profile during the scan.
+function completeObservationQuery(query = "", options = {}) {
   const clean = normalizeGithubOrGroups(String(query || "").replace(/\s+/g, " ").trim(), options.plan || {});
-  const cleanWithoutAntiNoise = stripObservationAntiNoise(clean);
-  if (!cleanWithoutAntiNoise) return "";
-  if (/in:name,description,readme/.test(cleanWithoutAntiNoise) && /archived:false/.test(cleanWithoutAntiNoise)) {
-    return normalizeObservationQueryFreshness(cleanWithoutAntiNoise, options);
-  }
-  const pushedDate = dateDaysAgo(observationQueryFreshnessDays(cleanWithoutAntiNoise, options));
-  const starValue = Math.max(0, Number(stars || 0));
-  const hasStars = /\bstars:/.test(cleanWithoutAntiNoise);
-  const looseExplicit = isSpecificObservationQuery(cleanWithoutAntiNoise, options);
-  const includeAntiNoise = options.includeAntiNoise === true && !looseExplicit;
-  const noise = includeAntiNoise ? [options.allowAbstractAi ? "" : ABSTRACT_AI_NOISE, options.allowResearch ? "" : RESEARCH_NOISE].filter(Boolean).join(" ") : "";
-  return `${cleanWithoutAntiNoise} in:name,description,readme ${hasStars || starValue <= 0 || looseExplicit ? "" : `stars:>${starValue}`} ${
-    looseExplicit ? "" : `pushed:>=${pushedDate}`
-  } archived:false mirror:false ${noise}`
-    .replace(/\s+/g, " ")
-    .trim();
+  return completePlanQuery(clean);
 }
 
 function completeObservationPlanQueries(plan = {}) {
@@ -1807,24 +1994,14 @@ function completeObservationPlanQueries(plan = {}) {
   const rawKeywordContext = [primaryNeedText, rawStrategyKeywords.join(" ")].filter(Boolean).join("\n") || `${plan.description || ""} ${plan.descriptionEn || ""}`;
   const needText = primaryNeedText || rawStrategyKeywords.join(" ") || `${plan.description || ""} ${plan.descriptionEn || ""}`;
   const strategyKeywordList = cleanObservationKeywordList(rawStrategyKeywords, needText || rawKeywordContext, OBSERVATION_KEYWORD_LIMIT);
-  const trustedTerms = uniqueStrings([...explicitNeedTerms(needText), ...strategyKeywordList], OBSERVATION_KEYWORD_LIMIT * 2);
-  const customQueries = Array.isArray(strategy.customQueries)
+  const planQueries = Array.isArray(strategy.customQueries)
     ? strategy.customQueries.map((item) => ({
         ...item,
-        query: completeObservationQuery(item.query || item.q || "", item.stars ?? strategy.minStars ?? 20, {
-          plan,
-          need: needText,
-          allowAbstractAi: /agent/i.test(`${item.query || ""} ${item.labelEn || item.label || ""}`)
-        })
+        query: completeObservationQuery(item.query || item.q || "", { plan })
       }))
     : [];
-  const relevantCustomQueries = compactObservationProfiles(
-    customQueries.filter((item) => {
-      if (!String(item.query || item.q || "").trim()) return false;
-      if (!trustedTerms.length) return true;
-      const text = observationProfileText(item);
-      return trustedTerms.some((term) => queryContainsObservationTerm(text, term));
-    }),
+  const customQueries = compactObservationProfiles(
+    planQueries.filter((item) => String(item.query || item.q || "").trim()),
     {},
     OBSERVATION_CUSTOM_QUERY_LIMIT
   );
@@ -1832,7 +2009,7 @@ function completeObservationPlanQueries(plan = {}) {
     ...strategy,
     excludeTerms: uniqueStrings((strategy.excludeTerms || []).map(normalizeObservationExcludeTerm).filter(Boolean), 12),
     keywords: strategyKeywordList,
-    customQueries: relevantCustomQueries
+    customQueries
   };
   return {
     ...plan,
@@ -2350,14 +2527,14 @@ async function executeProjectAnalysisTask(input = {}) {
   const settings = storage.getSettings(true);
   const provider = activeProvider(settings);
   if (!provider?.apiKey) throw new Error("请先在设置里配置并保存可用的 AI 模型 API Key");
-  await assertProviderNetworkTarget(provider);
+  const networkProvider = await assertProviderNetworkTarget(provider);
   const analysisContext = {
     method: String(input.method || "balanced").slice(0, 40),
     methodLabel: String(input.methodLabel || "").slice(0, 80),
     userNeed: String(input.userNeed || "").slice(0, 1000)
   };
   const analysis = await analyzeWithProvider({
-    provider,
+    provider: networkProvider,
     project,
     language: settings.language || "zh",
     context: analysisContext
@@ -2386,7 +2563,7 @@ async function executeObservationPlanGenerationTask(input = {}) {
   const latestNeed = uniqueStrings([input.idea, input.detailedNeed], 2).join("\n").trim();
   if (!planName || !latestNeed) throw new Error("方案名称和详细需求不能为空");
   if (!provider?.apiKey) throw new Error("请先在设置里配置并保存可用的 AI 模型 API Key 后再生成观察方案");
-  await assertProviderNetworkTarget(provider);
+  const networkProvider = await assertProviderNetworkTarget(provider);
 
   const requirementRecords = draftObservationRequirements(latestNeed);
   const combinedNeed = requirementRecords.map((item) => item.text).filter(Boolean).join("\n") || latestNeed;
@@ -2410,7 +2587,7 @@ async function executeObservationPlanGenerationTask(input = {}) {
   researchContext.metacognition = researchContext.domainModel;
   const promptResearchContext = compactObservationResearchContextForPrompt(researchContext);
   const result = await generateObservationPlanWithProvider({
-    provider,
+    provider: networkProvider,
     language,
     payload: {
       coreKeyword: planName,
@@ -2443,7 +2620,7 @@ async function executeObservationPlanGenerationTask(input = {}) {
 }
 
 function taskRunner(task = {}) {
-  if (task.type === "scan") return () => runScan(task.input || {});
+  if (task.type === "scan") return () => runScan({ ...(task.input || {}), taskId: task.id, checkpoint: task.checkpoint || null });
   if (task.type === "analysis") return () => executeProjectAnalysisTask(task.input || {});
   if (task.type === "plan-generation") return () => executeObservationPlanGenerationTask(task.input || {});
   return null;
@@ -2452,12 +2629,22 @@ function taskRunner(task = {}) {
 function startDurableTask(task) {
   if (!task?.id || runningTasks.has(task.id)) return task;
   if (activeDurableTaskCount >= MAX_DURABLE_TASK_CONCURRENCY) return storage.updateTask(task.id, { status: "queued" });
+  // While GitHub is cooling down the scan stays queued; other task types are
+  // unaffected because they do not touch the GitHub API budget.
+  if (task.type === "scan" && activeGithubCooldown()) {
+    return storage.updateTask(task.id, { status: "queued", cooldown: activeGithubCooldown() });
+  }
+  // Keep queued scans queued while another scan owns the single GitHub scan slot.
+  // This avoids consuming an attempt merely because the process-level worker
+  // pool has capacity for a different task type.
+  if (task.type === "scan" && scanInProgress) return task;
   const runner = taskRunner(task);
   if (!runner) return storage.updateTask(task.id, { status: "failed", error: `Unsupported task type: ${task.type}`, finishedAt: new Date().toISOString() });
   const startedAt = new Date().toISOString();
   const running = storage.updateTask(task.id, {
     status: "running",
     error: "",
+    cooldown: null,
     attempts: Number(task.attempts || 0) + 1,
     startedAt,
     finishedAt: ""
@@ -2465,22 +2652,41 @@ function startDurableTask(task) {
   activeDurableTaskCount += 1;
   const promise = Promise.resolve()
     .then(runner)
-    .then((result) =>
-      storage.updateTask(task.id, {
+    .then((result) => {
+      if (task.type === "analysis" || task.type === "plan-generation") {
+        markActiveProviderSuccess();
+      }
+      return storage.updateTask(task.id, {
         status: "completed",
         result,
         error: "",
         finishedAt: new Date().toISOString()
-      })
-    )
-    .catch((error) =>
-      storage.updateTask(task.id, {
+      });
+    })
+    .catch((error) => {
+      if (error?.code === "SCAN_ALREADY_RUNNING") {
+        return storage.updateTask(task.id, {
+          status: "queued",
+          attempts: Number(task.attempts || 0),
+          result: null,
+          error: "",
+          cooldown: null,
+          startedAt: "",
+          finishedAt: ""
+        });
+      }
+      if (task.type === "analysis" || task.type === "plan-generation") {
+        markActiveProviderFailure(error);
+      }
+      const cooldown = error?.cooldown?.active ? error.cooldown : isGithubCooldownError(error) ? error.cooldown : null;
+      return storage.updateTask(task.id, {
         status: "failed",
         result: null,
         error: error?.message || "Task failed",
+        cooldown,
         finishedAt: new Date().toISOString()
-      })
-    )
+      });
+    })
     .finally(() => {
       runningTasks.delete(task.id);
       activeDurableTaskCount = Math.max(0, activeDurableTaskCount - 1);
@@ -2492,8 +2698,11 @@ function startDurableTask(task) {
 
 function pumpDurableTaskQueue() {
   if (activeDurableTaskCount >= MAX_DURABLE_TASK_CONCURRENCY) return;
+  const cooling = Boolean(activeGithubCooldown());
   const queued = storage.listTasks({ status: "queued", limit: MAX_DURABLE_TASK_CONCURRENCY - activeDurableTaskCount });
-  queued.forEach(startDurableTask);
+  queued
+    .filter((task) => !(cooling && task.type === "scan"))
+    .forEach(startDurableTask);
 }
 
 function enqueueDurableTask(type, key, input = {}) {
@@ -2518,13 +2727,19 @@ async function waitForDurableTask(task) {
     current = storage.getTask(task.id);
   }
   const completed = current;
-  if (completed?.status === "failed") throw new Error(completed.error || "Task failed");
+  if (completed?.status === "failed") {
+    // Keep the breaker payload attached so callers that await a durable scan
+    // still see the cooldown countdown instead of a plain failure message.
+    const cooldown = completed.cooldown?.active ? completed.cooldown : null;
+    if (cooldown) throw createGithubCooldownError(cooldown);
+    throw new Error(completed.error || "Task failed");
+  }
   return completed?.result;
 }
 
 async function enqueueScheduledScan(options = {}) {
   const activePlan = storage.getObservationPlan();
-  const task = enqueueDurableTask("scan", "scan", {
+  const task = enqueueDurableTask("scan", scanTaskKey(activePlan.id), {
     ...options,
     observationPlanId: activePlan.id
   });
@@ -2547,20 +2762,33 @@ function resumeDurableTasks() {
       });
       continue;
     }
+    // Scans stay queued (not failed) while the account is cooling down; the
+    // resume timer plus pumpDurableTaskQueue restart them once it expires.
+    if (task.type === "scan" && activeGithubCooldown()) continue;
     startDurableTask(task);
   }
 }
 
 async function runScan(options = {}) {
+  const entryCooldown = activeGithubCooldown();
+  if (entryCooldown) throw createGithubCooldownError(entryCooldown);
   if (scanInProgress) {
-    return {
-      status: "already-running"
-    };
+    throw new ScanBusyError();
   }
 
   scanInProgress = true;
   const startedAt = new Date().toISOString();
   const githubToken = effectiveGithubToken();
+  const requestedPlanId = String(options.observationPlanId || "").trim();
+  const checkpoint = options.checkpoint && typeof options.checkpoint === "object" ? options.checkpoint : {};
+  const checkpointPlanId = String(checkpoint.planId || "");
+  let capturedPlanName = String(options.observationPlanName || "");
+  try {
+    capturedPlanName = storage.getObservationPlan(requestedPlanId).name || capturedPlanName;
+  } catch {
+    // The normal scan body will report a missing plan; retain the requested id
+    // in the failure record instead of silently attributing it to the active plan.
+  }
 
   try {
     await validateGithubScanToken(githubToken);
@@ -2568,8 +2796,13 @@ async function runScan(options = {}) {
     const pagesPerProfile = Math.max(1, Math.min(Number(options.pagesPerProfile ?? config.githubSearchPages), 8));
     const plannedTrendLimit = Math.max(0, Math.min(Number(options.trendCount ?? config.githubTrendLimit ?? 80), maxRepos));
     const language = storage.getSettings(false).language || "zh";
-    const requestedPlanId = String(options.observationPlanId || "").trim();
     const activePlan = hydrateObservationPlanSearchLogic(storage.getObservationPlan(requestedPlanId), language);
+    if (checkpointPlanId && checkpointPlanId !== activePlan.id) {
+      throw new Error("扫描任务检查点与观察方案不一致，请重新扫描。");
+    }
+    // Attribute every progress write below to the plan actually being scanned.
+    runningScanPlanId = activePlan.id;
+    saveScanCheckpoint(options.taskId, { planId: activePlan.id, stage: "prepare", scanStartedAt: startedAt });
     const isDefaultObservationPlan = activePlan.id === "default";
     let trendingMaxRepos = isDefaultObservationPlan ? Math.max(0, Math.min(Number(options.trendingCount ?? config.githubTrendingMaxRepos ?? 60), 120)) : 0;
     const trendingPerPeriod = Math.max(5, Math.min(Number(options.trendingPerPeriod ?? config.githubTrendingPerPeriod ?? 25), 50));
@@ -2621,25 +2854,42 @@ async function runScan(options = {}) {
       total: profiles.length * pagesPerProfile,
       progressUnits: 8
     });
-    const result = await searchCandidateRepositories({
-      token: githubToken,
-      maxRepos,
-      pagesPerProfile,
-      profiles,
-      onProgress: (progress) => {
-        setScanProgress({
-          stage: "github",
-          label: `检索 GitHub：${progress.completed}/${progress.total}`,
-          percent: stagePercent(8, 55, progress.completed, progress.total),
-          completed: progress.completed,
-          total: progress.total,
-          found: progress.found,
-          progressUnits: 8 + 47 * (progress.total > 0 ? progress.completed / progress.total : 0)
+    const result = checkpointStageReached(checkpoint, "github-search") && checkpoint.github
+      ? {
+          repositories: Array.isArray(checkpoint.github.repositories) ? checkpoint.github.repositories : [],
+          errors: Array.isArray(checkpoint.github.errors) ? checkpoint.github.errors : [],
+          profiles: Array.isArray(checkpoint.github.profiles) ? checkpoint.github.profiles : [],
+          relaxations: Array.isArray(checkpoint.github.relaxations) ? checkpoint.github.relaxations : []
+        }
+      : await searchCandidateRepositories({
+          token: githubToken,
+          maxRepos,
+          pagesPerProfile,
+          profiles,
+          onProgress: (progress) => {
+            setScanProgress({
+              stage: "github",
+              label: `检索 GitHub：${progress.completed}/${progress.total}`,
+              percent: stagePercent(8, 55, progress.completed, progress.total),
+              completed: progress.completed,
+              total: progress.total,
+              found: progress.found,
+              progressUnits: 8 + 47 * (progress.total > 0 ? progress.completed / progress.total : 0)
+            });
+          }
         });
-      }
-    });
     assertNoGithubBlockingErrors(result.errors);
     assertGithubSearchUsable(result);
+    saveScanCheckpoint(options.taskId, {
+      planId: activePlan.id,
+      stage: "github-search",
+      github: {
+        repositories: result.repositories,
+        errors: result.errors,
+        profiles: result.profiles,
+        relaxations: Array.isArray(result.relaxations) ? result.relaxations : []
+      }
+    });
     let trendingResult = {
       repositories: [],
       signals: new Map(),
@@ -2647,7 +2897,15 @@ async function runScan(options = {}) {
       profiles: [],
       found: 0
     };
-    if (trendingMaxRepos) {
+    if (checkpointStageReached(checkpoint, "trending") && checkpoint.trending) {
+      trendingResult = {
+        repositories: Array.isArray(checkpoint.trending.repositories) ? checkpoint.trending.repositories : [],
+        signals: restoreSignalMap(checkpoint.trending.signals),
+        errors: Array.isArray(checkpoint.trending.errors) ? checkpoint.trending.errors : [],
+        profiles: Array.isArray(checkpoint.trending.profiles) ? checkpoint.trending.profiles : [],
+        found: Number(checkpoint.trending.found || 0)
+      };
+    } else if (trendingMaxRepos) {
       setScanProgress({
         stage: "github",
         label: "读取 GitHub Trending",
@@ -2676,6 +2934,17 @@ async function runScan(options = {}) {
       });
       assertNoGithubBlockingErrors(trendingResult.errors || []);
     }
+    saveScanCheckpoint(options.taskId, {
+      planId: activePlan.id,
+      stage: "trending",
+      trending: {
+        repositories: trendingResult.repositories,
+        signals: serializeSignalMap(trendingResult.signals),
+        errors: trendingResult.errors,
+        profiles: trendingResult.profiles,
+        found: trendingResult.found
+      }
+    });
     const trendingSignals = mergeSignalMap(new Map(), trendingResult.signals);
     const combined = mergeRepositoryCandidates(result.repositories, trendingResult.repositories, maxRepos);
     const repositories = combined.repositories;
@@ -2692,21 +2961,28 @@ async function runScan(options = {}) {
       total: effectiveTavilyKey() ? Math.min(tavilyLimit, repositories.length) : 0,
       progressUnits: 64
     });
-    const externalSignals = await enrichTopProjectsWithTavily(
-      preScoredRepositories,
-      effectiveTavilyKey(),
-      tavilyLimit,
-      (progress) => {
-        setScanProgress({
-          stage: "tavily",
-          label: `补充 Tavily：${progress.completed}/${progress.total}`,
-          percent: stagePercent(64, 76, progress.completed, progress.total),
-          completed: progress.completed,
-          total: progress.total,
-          progressUnits: 64 + 12 * (progress.total > 0 ? progress.completed / progress.total : 0)
-        });
-      }
-    );
+    const externalSignals = checkpointStageReached(checkpoint, "tavily") && checkpoint.tavily
+      ? restoreSignalMap(checkpoint.tavily)
+      : await enrichTopProjectsWithTavily(
+          preScoredRepositories,
+          effectiveTavilyKey(),
+          tavilyLimit,
+          (progress) => {
+            setScanProgress({
+              stage: "tavily",
+              label: `补充 Tavily：${progress.completed}/${progress.total}`,
+              percent: stagePercent(64, 76, progress.completed, progress.total),
+              completed: progress.completed,
+              total: progress.total,
+              progressUnits: 64 + 12 * (progress.total > 0 ? progress.completed / progress.total : 0)
+            });
+          }
+        );
+    saveScanCheckpoint(options.taskId, {
+      planId: activePlan.id,
+      stage: "tavily",
+      tavily: serializeSignalMap(externalSignals)
+    });
     setScanProgress({
       stage: "exa",
       label: effectiveExaKey() ? "补充 Exa 语义信号" : "跳过 Exa",
@@ -2715,21 +2991,28 @@ async function runScan(options = {}) {
       total: effectiveExaKey() ? Math.min(exaLimit, repositories.length) : 0,
       progressUnits: 78
     });
-    const exaSignals = await enrichTopProjectsWithExa(
-      preScoredRepositories,
-      effectiveExaKey(),
-      exaLimit,
-      (progress) => {
-        setScanProgress({
-          stage: "exa",
-          label: `补充 Exa：${progress.completed}/${progress.total}`,
-          percent: stagePercent(78, 90, progress.completed, progress.total),
-          completed: progress.completed,
-          total: progress.total,
-          progressUnits: 78 + 12 * (progress.total > 0 ? progress.completed / progress.total : 0)
-        });
-      }
-    );
+    const exaSignals = checkpointStageReached(checkpoint, "exa") && checkpoint.exa
+      ? restoreSignalMap(checkpoint.exa)
+      : await enrichTopProjectsWithExa(
+          preScoredRepositories,
+          effectiveExaKey(),
+          exaLimit,
+          (progress) => {
+            setScanProgress({
+              stage: "exa",
+              label: `补充 Exa：${progress.completed}/${progress.total}`,
+              percent: stagePercent(78, 90, progress.completed, progress.total),
+              completed: progress.completed,
+              total: progress.total,
+              progressUnits: 78 + 12 * (progress.total > 0 ? progress.completed / progress.total : 0)
+            });
+          }
+        );
+    saveScanCheckpoint(options.taskId, {
+      planId: activePlan.id,
+      stage: "exa",
+      exa: serializeSignalMap(exaSignals)
+    });
 
     setScanProgress({
       stage: "score",
@@ -2756,26 +3039,38 @@ async function runScan(options = {}) {
       total: enriched.length,
       progressUnits: 92
     });
-    storage.upsertProjects(enriched, {
-      id: `scan-${Date.now()}`,
-      mode: options.mode || "manual",
-      status: scanErrors.length ? "completed-with-errors" : "completed",
-      observationPlanId: activePlan.id,
-      observationPlanName: activePlan.name,
-      profiles: [...result.profiles, ...(trendingResult.profiles || [])],
-      received: repositories.length,
-      githubSearchReceived: result.repositories.length,
-      githubTrendingFound: trendingResult.found || 0,
-      githubTrendingAdded: combined.added,
-      trendUpdated: 0,
-      trendLimit,
-      githubRateBudget: githubScanBudget,
-      errors: scanErrors,
-      startedAt,
-      replaceObservationPlanMatches: enriched.length > 0 || !scanErrors.length
-    });
+    const scanId = String(checkpoint.persisted?.scanId || options.scanId || `scan-${Date.now()}`);
+    if (!checkpointStageReached(checkpoint, "persisted") || !checkpoint.persisted) {
+      storage.upsertProjects(enriched, {
+        id: scanId,
+        mode: options.mode || "manual",
+        status: scanErrors.length ? "completed-with-errors" : "completed",
+        observationPlanId: activePlan.id,
+        observationPlanName: activePlan.name,
+        profiles: [...result.profiles, ...(trendingResult.profiles || [])],
+        received: repositories.length,
+        githubSearchReceived: result.repositories.length,
+        githubTrendingFound: trendingResult.found || 0,
+        githubTrendingAdded: combined.added,
+        relaxations: Array.isArray(result.relaxations) ? result.relaxations : [],
+        trendUpdated: 0,
+        trendLimit,
+        githubRateBudget: githubScanBudget,
+        errors: scanErrors,
+        startedAt,
+        taskId: options.taskId || "",
+        replaceObservationPlanMatches: enriched.length > 0 || !scanErrors.length
+      });
+      saveScanCheckpoint(options.taskId, {
+        planId: activePlan.id,
+        stage: "persisted",
+        persisted: { scanId, trendLimit, projectCount: enriched.length }
+      });
+    }
 
-    if (trendLimit && githubToken) {
+    if (checkpointStageReached(checkpoint, "trends") && checkpoint.trends) {
+      trendUpdated = Number(checkpoint.trends.updated || 0);
+    } else if (trendLimit && githubToken) {
       setScanProgress({
         stage: "score",
         label: `更新 GitHub 趋势缓存：${trendLimit} 个候选`,
@@ -2784,7 +3079,7 @@ async function runScan(options = {}) {
         total: trendLimit,
         progressUnits: 92
       });
-      const trendCandidates = storage.trendRefreshCandidates(trendLimit);
+      const trendCandidates = storage.trendRefreshCandidates(trendLimit, activePlan.id);
       const trendResult = await repositoryOnlineTrends(
         githubToken,
         trendCandidates.map((project) => project.fullName),
@@ -2810,6 +3105,11 @@ async function runScan(options = {}) {
         trendUpdated,
         trendLimit,
         status: scanErrors.length || trendResult.errors?.length ? "completed-with-errors" : "completed"
+      }, { id: scanId });
+      saveScanCheckpoint(options.taskId, {
+        planId: activePlan.id,
+        stage: "trends",
+        trends: { updated: trendUpdated, limit: trendLimit }
       });
       setScanProgress({
         stage: "score",
@@ -2863,6 +3163,13 @@ async function runScan(options = {}) {
       error: "",
       finishedAt: new Date().toISOString()
     });
+    saveScanCheckpoint(options.taskId, {
+      planId: activePlan.id,
+      stage: "completed",
+      completedAt: new Date().toISOString(),
+      projectCount: enriched.length,
+      trendUpdated
+    });
     return {
       status: "completed",
       observationPlan: activePlan,
@@ -2875,15 +3182,26 @@ async function runScan(options = {}) {
     };
   } catch (error) {
     storage.addScan({
+      id: `scan-failed-${options.taskId || Date.now()}`,
+      taskId: options.taskId || "",
       status: "failed",
       mode: options.mode || "manual",
+      observationPlanId: requestedPlanId || "",
+      observationPlanName: capturedPlanName,
+      startedAt,
       errors: [{ message: error.message }]
     });
+    if (isGithubCooldownError(error) && error.cooldown?.active) {
+      // Persist immediately so a crash or restart during the penalty window
+      // cannot hand the account straight back to GitHub.
+      persistGithubCooldownState(error.cooldown);
+    }
     setScanProgress({
       status: "failed",
       stage: "failed",
       label: "扫描失败",
       percent: 0,
+      observationPlanId: runningScanPlanId || requestedPlanId,
       error: error.message,
       etaSeconds: 0,
       etaMinSeconds: 0,
@@ -2896,6 +3214,7 @@ async function runScan(options = {}) {
   } finally {
     scanInProgress = false;
     scanEta = null;
+    runningScanPlanId = "";
   }
 }
 
@@ -2941,6 +3260,13 @@ async function routeStatic(req, res, url) {
       "Cache-Control": "public, max-age=86400"
     }));
     res.end();
+    return;
+  }
+  if (pathname === "/runtime-config.js") {
+    sendText(res, 200, 'window.__STARVAULT_DEPLOYMENT__ = "server";\n', {
+      "Content-Type": "text/javascript; charset=utf-8",
+      "Cache-Control": "no-cache"
+    });
     return;
   }
 
@@ -3010,6 +3336,7 @@ async function routeApi(req, res, url) {
           type: url.searchParams.get("type") || "",
           status: url.searchParams.get("status") || "",
           key: url.searchParams.get("key") || "",
+          observationPlanId: url.searchParams.get("observationPlanId") || "",
           limit: url.searchParams.get("limit") || 30
         })
         .map(publicTask)
@@ -3060,7 +3387,7 @@ async function routeApi(req, res, url) {
         if (provider.baseUrl) await assertProviderNetworkTarget(provider);
       }
       storage.updateSettings(body);
-      const keyValidation = await validateSavedServiceKeys();
+      const keyValidation = await validateSavedServiceKeys({ includeProvider: body.validateProvider !== false });
       sendJson(res, 200, {
         ...settingsResponse(),
         keyValidation
@@ -3468,8 +3795,7 @@ async function routeApi(req, res, url) {
     try {
       const harness = storage.evaluateMemoryHarness();
       const settings = storage.getSettings(true);
-      const provider = activeProvider(settings);
-      await assertProviderNetworkTarget(provider);
+      const provider = await assertProviderNetworkTarget(activeProvider(settings));
       const memory = storage.getMemory();
       const payload = {
         harness,
@@ -3564,19 +3890,31 @@ async function routeApi(req, res, url) {
 
   if (req.method === "POST" && url.pathname === "/api/scan") {
     try {
-      const body = await parseBody(req);
-      if (scanInProgress) {
-        const existing = storage.listTasks({ type: "scan", status: "running", limit: 1 })[0] || null;
-        sendJson(res, 200, { status: "already-running", task: existing ? publicTask(existing) : null });
+      const cooling = activeGithubCooldown();
+      if (cooling) {
+        // Reject before a task row is created so a rate-limited account cannot
+        // queue work that would fire the moment the cooldown lapses.
+        sendJson(res, 429, {
+          error: "GITHUB_COOLDOWN",
+          message: cooling.message,
+          cooldown: cooling
+        });
         return;
       }
+      const body = await parseBody(req);
       const activePlan = storage.getObservationPlan();
-      const task = enqueueDurableTask("scan", "scan", {
+      const task = enqueueDurableTask("scan", scanTaskKey(activePlan.id), {
         ...body,
         observationPlanId: activePlan.id,
         mode: body.mode || "manual"
       });
-      sendJson(res, 202, { status: "started", task });
+      // The plan id is echoed back because every plan owns its own scan slot
+      // and its own task key; the client uses it to scope status polling.
+      sendJson(res, 202, {
+        status: "started",
+        observationPlanId: activePlan.id,
+        task
+      });
     } catch (error) {
       sendError(res, isGithubAuthError(error) ? 401 : isGithubRateLimitError(error) ? 429 : 502, "Scan failed", { message: error.message });
     }
@@ -3584,11 +3922,93 @@ async function routeApi(req, res, url) {
   }
 
   if (req.method === "GET" && url.pathname === "/api/scan/status") {
-    const task = storage.listTasks({ type: "scan", limit: 1 })[0] || null;
+    const planId = scanStatusPlanId(url.searchParams.get("observationPlanId"));
+    const cooldown = githubCooldownState();
+    const task = storage.listTasks({ type: "scan", observationPlanId: planId, limit: 1 })[0] || null;
+    const lastScan = storage.latestScanForPlan(planId);
+    const taskPending = task?.status === "running" || task?.status === "queued";
+    // A cooling account is not scanning: report it as paused so the client
+    // shows the countdown instead of a live progress bar. This status read is
+    // also a safety net that releases a queued scan left behind by a missed
+    // resume timer.
+    const running = taskPending && !cooldown.active;
+    if (running && task?.status === "queued") {
+      pumpDurableTaskQueue();
+    }
+    const hasScan = Boolean(lastScan) || task?.status === "completed";
+    // Live progress is only meaningful for the plan that produced it; every
+    // other plan is answered from its own stored scan/task history.
+    const live = scanProgress.observationPlanId === planId ? scanProgress : null;
+    let payload;
+    if (running && live?.status === "running") {
+      payload = { ...live };
+    } else if (running) {
+      payload = {
+        status: "running",
+        stage: "github",
+        label: "扫描中",
+        percent: 12,
+        completed: 0,
+        total: 0,
+        startedAt: task?.startedAt || null,
+        updatedAt: task?.updatedAt || null,
+        error: ""
+      };
+    } else if (live && live.status !== "idle") {
+      payload = { ...live };
+    } else if (task?.status === "failed" && !hasScan) {
+      payload = {
+        status: "failed",
+        stage: "failed",
+        label: "扫描失败",
+        percent: 0,
+        startedAt: task.startedAt || null,
+        finishedAt: task.finishedAt || "",
+        updatedAt: task.updatedAt || null,
+        error: task.error || ""
+      };
+    } else if (lastScan) {
+      const failed = lastScan.status === "failed";
+      payload = {
+        status: failed ? "failed" : "completed",
+        stage: failed ? "failed" : "completed",
+        label: failed ? "扫描失败" : "完成",
+        percent: failed ? 0 : 100,
+        startedAt: lastScan.startedAt || lastScan.at || null,
+        finishedAt: lastScan.at || "",
+        updatedAt: lastScan.at || null,
+        error: lastScan.errors?.[0]?.message || ""
+      };
+    } else {
+      payload = {
+        status: "idle",
+        stage: "idle",
+        label: "空闲",
+        percent: 0,
+        completed: 0,
+        total: 0,
+        startedAt: null,
+        updatedAt: null,
+        error: ""
+      };
+    }
     sendJson(res, 200, {
-      ...scanProgress,
-      running: scanInProgress || task?.status === "running" || task?.status === "queued",
-      task: task ? publicTask(task) : null
+      ...payload,
+      observationPlanId: planId,
+      hasScan,
+      ...(cooldown.active
+        ? {
+            status: "cooling",
+            stage: "cooling",
+            label: "冷却中",
+            percent: 0
+          }
+        : {}),
+      running: running && !cooldown.active,
+      cooling: cooldown.active,
+      cooldown: cooldown.active ? cooldown : null,
+      task: task ? publicTask(task) : null,
+      updatedAt: payload.updatedAt || task?.updatedAt || lastScan?.at || null
     });
     return;
   }
@@ -3726,12 +4146,12 @@ async function routeApi(req, res, url) {
   }
 
   if (req.method === "POST" && url.pathname === "/api/provider-models") {
+    let body = {};
     try {
-      const body = await parseBody(req);
+      body = await parseBody(req);
       const providerId = body.providerId || "deepseek";
       const settings = storage.getSettings(true);
-      const provider = getProviderOrThrow(settings, providerId);
-      await assertProviderNetworkTarget(provider);
+      const provider = await assertProviderNetworkTarget(getProviderOrThrow(settings, providerId));
       const models = await listProviderModels(provider);
       const nextModel = models.includes(provider.model) ? provider.model : models[0] || provider.model || "";
       storage.updateSettings(
@@ -3747,7 +4167,20 @@ async function routeApi(req, res, url) {
         settings: settingsResponse()
       });
     } catch (error) {
-      sendError(res, 400, error.message);
+      const providerId = body.providerId || "deepseek";
+      const settings = storage.getSettings(true);
+      const provider = (settings.llmProviders || []).find((item) => item.id === providerId);
+      if (provider) {
+        storage.updateSettings(
+          mergeProviderUpdate(settings, providerId, {
+            lastTestAt: new Date().toISOString(),
+            testStatus: providerFailureStatus(provider, error)
+          })
+        );
+      }
+      sendError(res, isProviderAuthError(error) ? 401 : 400, error.message, {
+        settings: settingsResponse()
+      });
     }
     return;
   }
@@ -3758,8 +4191,7 @@ async function routeApi(req, res, url) {
       body = await parseBody(req);
       const providerId = body.providerId || "deepseek";
       const settings = storage.getSettings(true);
-      const provider = getProviderOrThrow(settings, providerId);
-      await assertProviderNetworkTarget(provider);
+      const provider = await assertProviderNetworkTarget(getProviderOrThrow(settings, providerId));
       const result = await testProviderConnection(provider);
       storage.updateSettings(
         mergeProviderUpdate(settings, providerId, {
@@ -3778,10 +4210,13 @@ async function routeApi(req, res, url) {
       storage.updateSettings(
         mergeProviderUpdate(settings, providerId, {
           lastTestAt: new Date().toISOString(),
-          testStatus: `failed: ${error.message}`
+          testStatus: providerFailureStatus(
+            (settings.llmProviders || []).find((item) => item.id === providerId) || {},
+            error
+          )
         })
       );
-      sendError(res, 400, error.message, {
+      sendError(res, isProviderAuthError(error) ? 401 : 400, error.message, {
         settings: settingsResponse()
       });
     }
@@ -3921,6 +4356,9 @@ let shutdownHandlersInstalled = false;
 
 function initializeRuntime() {
   if (runtimeInitialized) return;
+  // Restore the GitHub breaker before touching the queue: a restart during a
+  // penalty window must not resume scans against a rate-limited account.
+  restoreGithubCooldownState();
   resumeDurableTasks();
   runtimeInitialized = true;
 }

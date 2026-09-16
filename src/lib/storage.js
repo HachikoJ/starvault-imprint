@@ -2,13 +2,13 @@ const fs = require("node:fs");
 const path = require("node:path");
 const { createHash, randomUUID } = require("node:crypto");
 const { classifyRepository, inferUseCase } = require("./scoring");
-const { isNxCadRepository } = require("./domain-relevance");
+const { assignProfileIds, projectProfileMatches } = require("../../public/domain-core");
 const { buildQueryProfiles } = require("./github");
 const { isSqlitePath, readSqliteStore, writeSqliteStore } = require("./sqlite-store");
 
-// Passive browsing must stay weak; explicit actions carry the learning signal.
+// Passive browsing remains visible in recent behavior, but only explicit actions affect learning.
 const MEMORY_EVENT_WEIGHTS = {
-  select_project: 0.03,
+  select_project: 0,
   open_github: 0.12,
   copy_url: 0.16,
   ai_analyze: 1,
@@ -25,6 +25,9 @@ const MEMORY_EVENT_WEIGHTS = {
 };
 
 const DISMISSED_REASON_VERSION = 2;
+const DEFAULT_DEEPSEEK_MODEL = "deepseek-flash";
+const DEFAULT_DEEPSEEK_MODELS = [DEFAULT_DEEPSEEK_MODEL, "deepseek-v4-pro"];
+const LEGACY_DEEPSEEK_FLASH_MODELS = new Set(["deepseek-chat", "deepseek-v4-flash", "deepseek-v4.1-flash"]);
 
 function emptyPreferenceRoot() {
   return {
@@ -51,12 +54,26 @@ function defaultProviders() {
       region: "china",
       protocol: "openai-compatible",
       baseUrl: "https://api.deepseek.com",
-      model: "deepseek-v4-flash",
+      model: DEFAULT_DEEPSEEK_MODEL,
       apiKey: "",
       enabled: true,
-      models: []
+      models: [...DEFAULT_DEEPSEEK_MODELS]
     }
   ];
+}
+
+function normalizeDeepSeekProvider(provider = {}) {
+  const next = { ...provider };
+  if (next.id !== "deepseek") return next;
+  if (!next.model || LEGACY_DEEPSEEK_FLASH_MODELS.has(next.model)) {
+    next.model = DEFAULT_DEEPSEEK_MODEL;
+  }
+  const models = Array.isArray(next.models) ? next.models.filter(Boolean) : [];
+  const normalizedModels = models.map((model) => LEGACY_DEEPSEEK_FLASH_MODELS.has(model) ? DEFAULT_DEEPSEEK_MODEL : model);
+  next.models = normalizedModels.length
+    ? Array.from(new Set([DEFAULT_DEEPSEEK_MODEL, ...normalizedModels]))
+    : [...DEFAULT_DEEPSEEK_MODELS];
+  return next;
 }
 
 function defaultMemory() {
@@ -117,7 +134,7 @@ const DEFAULT_OBSERVATION_REQUIREMENTS = [
   "数据、知识和业务系统也要保留在默认观察里，包括数据看板、ETL/数据管道、知识库/RAG、文档搜索、CRM/客服、电商、内容管理、支付发票和增长运营。",
   "AI 相关不要泛泛搜概念，尽量找能落地的 AI 聊天产品、AI 工作台、RAG 产品、AI 设计/媒体工具、具体 Agent 产品和模型服务相关项目。",
   "入池项目要优先考虑近期有更新、有一定 Star/Fork 热度、许可边界更清楚、可维护性更好的项目；风险只在确实需要警觉时提醒。",
-  "学习中枢要根据我的收藏、Star/Fork、研判、AI 分析、不合适/隐藏这些明确行为调整项目池和榜单，普通点开看看不要给太高权重。",
+  "学习中枢要根据我的收藏、Star/Fork、研判、AI 分析、不合适/隐藏这些明确行为调整项目池和榜单，普通点开看看不参与偏好学习。",
   "默认观察就当作通用起步方案，先保持只读；如果我要看 CAD、PS、CRM、AI 硬件这类具体领域，再单独新建观察方案。"
 ];
 
@@ -268,8 +285,13 @@ function readStore(filePath) {
   if (isSqlitePath(filePath)) {
     const stored = readSqliteStore(filePath);
     if (stored) return normalizeStoreData(stored);
-    const legacyPath = path.join(path.dirname(filePath), "store.json");
-    const imported = fs.existsSync(legacyPath) ? JSON.parse(fs.readFileSync(legacyPath, "utf8")) : emptyStore();
+    const basePath = filePath.replace(/\.(?:db|sqlite3?)$/i, "");
+    const legacyCandidates = [
+      `${basePath}.json`,
+      path.join(path.dirname(filePath), "store.json")
+    ];
+    const legacyPath = legacyCandidates.find((candidate, index) => legacyCandidates.indexOf(candidate) === index && fs.existsSync(candidate));
+    const imported = legacyPath ? JSON.parse(fs.readFileSync(legacyPath, "utf8")) : emptyStore();
     const normalized = normalizeStoreData(imported);
     return writeSqliteStore(filePath, normalized, { force: true });
   }
@@ -355,6 +377,101 @@ function normalizeObservationPlanId(value = "") {
     .slice(0, 48);
 }
 
+// Content ids have to match the browser build byte for byte: the same plan
+// name must resolve to the same id whether it was created against the server
+// or in local mode, otherwise a portable export/import pair forks into two
+// plans. This mirrors public/domain-core.js `stableHash` (FNV-1a, base36).
+function stableContentHash(value = "") {
+  let hash = 2166136261;
+  for (const character of String(value)) {
+    hash ^= character.charCodeAt(0);
+    hash = Math.imul(hash, 16777619);
+  }
+  return (hash >>> 0).toString(36);
+}
+
+// Slugging for generated ids mirrors public/domain-core.js `normalizedId` so
+// both builds derive the same id from the same plan name.
+function planSlug(value = "") {
+  return String(value || "")
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "")
+    .slice(0, 72);
+}
+
+// Plan ids double as storage keys and durable-task keys, so they must stay
+// ASCII-safe. Chinese-only names such as「抖音」normalize to an empty string;
+// deriving the id from the name keeps re-saving the same plan idempotent
+// instead of minting a fresh `plan-<timestamp>` (and an empty project pool)
+// on every save.
+function stableObservationPlanId(plan = {}, fallbackName = "") {
+  const explicit = normalizeObservationPlanId(plan?.id);
+  if (explicit) return explicit;
+  const name = String(plan?.name || fallbackName || "").replace(/\s+/g, " ").trim();
+  const nameEn = String(plan?.nameEn || "").replace(/\s+/g, " ").trim();
+  const seed = (name || nameEn || "observation-plan").toLowerCase().slice(0, 160);
+  // A name that survives slugging untouched already is a fine id (this keeps
+  // ids such as `photoshop` readable); anything lossy gets a content hash so
+  // two different names can never collide on the same id.
+  const slug = planSlug(seed);
+  if (slug && slug === seed && slug !== "default") return slug;
+  const hash = stableContentHash(seed);
+  return slug && slug !== "default" ? `${slug.slice(0, 40)}-${hash}` : `plan-${hash}`;
+}
+
+// Scans recorded before per-plan scanning existed carry no plan id; they were
+// produced by the default matrix, so they belong to the built-in plan.
+function scanPlanId(scan = {}) {
+  return String(scan?.observationPlanId || scan?.planId || "").trim() || "default";
+}
+
+function latestScanInStore(store, planId = "") {
+  const target = String(planId || "").trim() || "default";
+  return (store?.scans || []).find((scan) => scanPlanId(scan) === target) || null;
+}
+
+function normalizePlanName(value = "") {
+  return String(value || "")
+    .replace(/\s+/g, " ")
+    .trim()
+    .toLowerCase();
+}
+
+// A draft saved without an explicit id must adopt the plan that already owns
+// its name. Plans created before stable ids were keyed by `plan-<timestamp>`,
+// so regenerating「抖音」used to mint a second, empty plan next to the one that
+// already held the scanned pool. The richest same-name plan wins: scan history
+// first, then pool size, then the most recent edit.
+function sameNameObservationPlanId(store, plan = {}) {
+  const target = normalizePlanName(plan?.name || plan?.nameEn || "");
+  if (!target) return "";
+  const candidates = Object.values(store?.observationPlans || {}).filter(
+    (candidate) =>
+      candidate &&
+      candidate.id !== "default" &&
+      !candidate.builtIn &&
+      normalizePlanName(candidate.name || candidate.nameEn || "") === target
+  );
+  if (!candidates.length) return "";
+  const scans = Array.isArray(store?.scans) ? store.scans : [];
+  const projects = Object.values(store?.projects || {});
+  const ranked = candidates
+    .map((candidate) => ({
+      id: candidate.id,
+      hasScan: scans.some((scan) => scanPlanId(scan) === candidate.id) ? 1 : 0,
+      projectCount: projects.filter((project) => project?.observationPlanMatches?.[candidate.id]).length,
+      updatedAt: String(candidate.updatedAt || "")
+    }))
+    .sort(
+      (a, b) =>
+        b.hasScan - a.hasScan ||
+        b.projectCount - a.projectCount ||
+        b.updatedAt.localeCompare(a.updatedAt)
+    );
+  return ranked[0].id;
+}
+
 function normalizePlanUserData(data = {}) {
   return {
     watchlist: plainObject(data.watchlist),
@@ -389,7 +506,7 @@ function normalizeObservationRequirements(requirements = []) {
   const now = new Date().toISOString();
   const seen = new Set();
   return source
-    .map((item, index) => {
+    .map((item) => {
       const text = typeof item === "string" ? item : item?.text;
       const normalizedText = String(text || "")
         .replace(/\s+/g, " ")
@@ -400,7 +517,12 @@ function normalizeObservationRequirements(requirements = []) {
       if (seen.has(key)) return null;
       seen.add(key);
       return {
-        id: normalizeObservationPlanId(item?.id || normalizedText.slice(0, 40)) || `req-${Date.now()}-${index}`,
+        // Non-Latin requirements cannot become an ASCII slug, so fall back to a
+        // content hash: the same requirement keeps the same id across saves.
+        id:
+          normalizeObservationPlanId(item?.id) ||
+          normalizeObservationPlanId(normalizedText.slice(0, 40)) ||
+          `req-${stableContentHash(normalizedText)}`,
         text: normalizedText,
         createdAt: item?.createdAt || now,
         updatedAt: item?.updatedAt || now
@@ -420,15 +542,15 @@ const MAX_OBSERVATION_CUSTOM_QUERIES = 30;
 
 function observationExecutionProfileCount(strategy = {}) {
   const customCount = Array.isArray(strategy.customQueries) ? strategy.customQueries.length : 0;
-  const mode = strategy.baseMode || "focused";
+  const mode = strategy.baseMode || "only";
   if (mode === "only") return customCount;
   if (mode === "blend") return customCount + DEFAULT_OBSERVATION_PROFILE_COUNT;
   return customCount + Math.min(10, DEFAULT_OBSERVATION_PROFILE_COUNT);
 }
 
-function normalizeObservationPlan(plan = {}, fallbackMemory = defaultMemory()) {
+function normalizeObservationPlan(plan = {}, fallbackMemory = defaultMemory(), previousPlan = null) {
   const now = new Date().toISOString();
-  const id = normalizeObservationPlanId(plan.id) || `plan-${Date.now()}`;
+  const id = stableObservationPlanId(plan, previousPlan?.name);
   const builtIn = id === "default" || Boolean(plan.builtIn);
   const defaults = id === "default" ? defaultObservationPlan(fallbackMemory) : {};
   const requirementSource = id === "default" ? defaults.requirements || [] : plan.requirements || defaults.requirements || [];
@@ -444,26 +566,38 @@ function normalizeObservationPlan(plan = {}, fallbackMemory = defaultMemory()) {
     createdAt: plan.createdAt || now,
     updatedAt: plan.updatedAt || now,
     requirements: normalizeObservationRequirements(requirementSource),
-    strategy: normalizeObservationStrategy(plan.searchLogic || plan.strategy || defaults.strategy || {}),
-    searchLogic: normalizeObservationStrategy(plan.searchLogic || plan.strategy || defaults.strategy || {}),
+    strategy: normalizeObservationStrategy(
+      plan.searchLogic || plan.strategy || defaults.strategy || {},
+      id,
+      previousPlan?.searchLogic || previousPlan?.strategy || {}
+    ),
+    searchLogic: normalizeObservationStrategy(
+      plan.searchLogic || plan.strategy || defaults.strategy || {},
+      id,
+      previousPlan?.searchLogic || previousPlan?.strategy || {}
+    ),
     userData: normalizePlanUserData(plan.userData || defaults.userData || {}),
-    memory: normalizeMemory(plan.memory || fallbackMemory)
+    // The legacy store.memory projection belongs only to the built-in plan.
+    // A custom plan without its own memory must start from a clean bucket so
+    // preferences cannot silently cross plan boundaries during migration.
+    memory: normalizeMemory(plan.memory || (id === "default" ? fallbackMemory : defaultMemory()))
   };
 }
 
-function normalizeObservationStrategy(strategy = {}) {
+function normalizeObservationStrategy(strategy = {}, planId = "default", previousStrategy = {}) {
   const stringList = (value, limit = 40) =>
     (Array.isArray(value) ? value : String(value || "").split(/[,，;\n]/))
       .map((item) => String(item || "").trim())
       .filter(Boolean)
       .slice(0, limit);
   const customQueries = Array.isArray(strategy.customQueries)
-    ? strategy.customQueries
+    ? assignProfileIds(planId, strategy.customQueries, previousStrategy.customQueries || [])
         .map((item) => {
           if (typeof item === "string") {
             return { label: item.slice(0, 80), query: item.slice(0, 240) };
           }
           return {
+            profileId: String(item?.profileId || "").slice(0, 96),
             label: String(item?.label || item?.name || item?.query || "").slice(0, 80),
             labelEn: String(item?.labelEn || item?.label || item?.name || "").slice(0, 80),
             labelZh: String(item?.labelZh || item?.label || item?.name || "").slice(0, 80),
@@ -474,7 +608,14 @@ function normalizeObservationStrategy(strategy = {}) {
         .filter((item) => item.query)
         .slice(0, MAX_OBSERVATION_CUSTOM_QUERIES)
     : [];
-  const baseMode = ["focused", "blend", "only", "default"].includes(strategy.baseMode) ? strategy.baseMode : "focused";
+  // A custom plan without an explicit mode stays focused on its own queries.
+  // Mixing default profiles in is an explicit user choice (focused/blend), not
+  // a silent fallback for plans saved by older versions.
+  const baseMode = ["focused", "blend", "only", "default"].includes(strategy.baseMode)
+    ? strategy.baseMode
+    : planId === "default"
+      ? "default"
+      : "only";
   return {
     baseMode,
     keywords: stringList(strategy.keywords || strategy.focusTerms, 30),
@@ -492,7 +633,12 @@ function normalizeObservationPlans(savedPlans, legacyMemory, defaultPlans = {}) 
   const plans = {};
   const source = savedPlans && typeof savedPlans === "object" ? savedPlans : {};
   for (const [id, plan] of Object.entries(source)) {
-    plans[id] = normalizeObservationPlan({ ...plan, id }, legacyMemory || defaultMemory());
+    const previous = { ...plan, id };
+    plans[id] = normalizeObservationPlan(
+      previous,
+      normalizeObservationPlanId(id) === "default" ? legacyMemory || defaultMemory() : defaultMemory(),
+      previous
+    );
   }
   if (!plans.default) {
     plans.default = normalizeObservationPlan(defaultObservationPlan(normalizeMemory(legacyMemory || defaultMemory())));
@@ -503,10 +649,22 @@ function normalizeObservationPlans(savedPlans, legacyMemory, defaultPlans = {}) 
   return plans;
 }
 
+function observationPlanIdFor(store, requestedPlanId = "", strict = false) {
+  const rawRequested = String(requestedPlanId || "").trim();
+  if (rawRequested) {
+    const normalized = normalizeObservationPlanId(rawRequested);
+    if (normalized && store.observationPlans?.[normalized]) return normalized;
+    if (strict) throw new Error("Observation plan not found");
+  }
+  const activeId = normalizeObservationPlanId(store.settings?.activeObservationPlanId || "default") || "default";
+  return store.observationPlans?.[activeId] ? activeId : "default";
+}
+
 function activeObservationPlan(store) {
-  const activeId = store.settings?.activeObservationPlanId || "default";
+  const activeId = observationPlanIdFor(store);
   const plan = store.observationPlans?.[activeId] || store.observationPlans?.default || normalizeObservationPlan(defaultObservationPlan(store.memory));
-  return normalizeObservationPlan(plan, store.memory);
+  const fallbackMemory = activeId === "default" ? store.memory : defaultMemory();
+  return normalizeObservationPlan(plan, fallbackMemory, plan);
 }
 
 function activeObservationPlanId(store) {
@@ -514,18 +672,20 @@ function activeObservationPlanId(store) {
 }
 
 function observationPlanMemory(store, requestedPlanId = "") {
-  const planId = requestedPlanId ? normalizeObservationPlanId(requestedPlanId) : activeObservationPlanId(store);
-  const plan = store.observationPlans?.[planId] || activeObservationPlan(store);
-  const fallback = planId === activeObservationPlanId(store) ? store.memory : defaultMemory();
+  const planId = observationPlanIdFor(store, requestedPlanId, Boolean(String(requestedPlanId || "").trim()));
+  const plan = store.observationPlans?.[planId];
+  if (!plan) throw new Error("Observation plan not found");
+  const fallback = planId === "default" ? store.memory : defaultMemory();
   return normalizeMemory(plan.memory || fallback);
 }
 
 function syncPlanMemory(store, memory, requestedPlanId = "") {
-  const planId = requestedPlanId ? normalizeObservationPlanId(requestedPlanId) : activeObservationPlanId(store);
+  const planId = observationPlanIdFor(store, requestedPlanId, Boolean(String(requestedPlanId || "").trim()));
   store.observationPlans = store.observationPlans || {};
-  const isActive = planId === activeObservationPlanId(store);
-  const plan = normalizeObservationPlan(store.observationPlans[planId] || { id: planId }, isActive ? store.memory : defaultMemory());
-  const normalized = normalizeMemory(memory || plan.memory || (isActive ? store.memory : defaultMemory()));
+  const isActive = planId === observationPlanIdFor(store);
+  const fallback = planId === "default" ? store.memory : defaultMemory();
+  const plan = normalizeObservationPlan(store.observationPlans[planId], fallback, store.observationPlans[planId]);
+  const normalized = normalizeMemory(memory || plan.memory || fallback);
   if (isActive) store.memory = normalized;
   store.observationPlans[planId] = {
     ...plan,
@@ -540,12 +700,10 @@ function syncActivePlanMemory(store, memory) {
 }
 
 function planUserData(store, requestedPlanId = "") {
-  const planId = requestedPlanId ? normalizeObservationPlanId(requestedPlanId) : activeObservationPlanId(store);
+  const planId = observationPlanIdFor(store, requestedPlanId, Boolean(String(requestedPlanId || "").trim()));
   store.observationPlans = store.observationPlans || {};
-  const plan = normalizeObservationPlan(
-    store.observationPlans[planId] || { id: planId },
-    planId === activeObservationPlanId(store) ? store.memory : defaultMemory()
-  );
+  const fallback = planId === "default" ? store.memory : defaultMemory();
+  const plan = normalizeObservationPlan(store.observationPlans[planId], fallback, store.observationPlans[planId]);
   const userData = normalizePlanUserData(plan.userData || {});
   store.observationPlans[planId] = {
     ...plan,
@@ -676,13 +834,10 @@ function mergeProviders(defaults, saved) {
   const savedById = new Map(saved.map((provider) => [provider.id, provider]));
   const merged = defaults.map((provider) => {
     const savedProvider = savedById.get(provider.id) || {};
-    const nextProvider = {
+    const nextProvider = normalizeDeepSeekProvider({
       ...provider,
       ...savedProvider
-    };
-    if (nextProvider.id === "deepseek" && nextProvider.model === "deepseek-chat") {
-      nextProvider.model = "deepseek-v4-flash";
-    }
+    });
     return nextProvider;
   });
   for (const provider of saved) {
@@ -694,7 +849,7 @@ function mergeProviders(defaults, saved) {
 }
 
 function normalizeMemory(saved = {}, defaults = defaultMemory()) {
-  return {
+  const memory = {
     ...defaults,
     ...(saved || {}),
     shortTerm: Array.isArray(saved?.shortTerm) ? saved.shortTerm : [],
@@ -836,6 +991,16 @@ function normalizeMemory(saved = {}, defaults = defaultMemory()) {
       runs: Array.isArray(saved?.harness?.runs) ? saved.harness.runs : []
     }
   };
+  const migrateBucketKey = (bucket, oldKey, nextKey) => {
+    if (!bucket || bucket[oldKey] === undefined) return;
+    bucket[nextKey] = Number(bucket[nextKey] || 0) + Number(bucket[oldKey] || 0);
+    delete bucket[oldKey];
+  };
+  for (const root of [memory.preferences, memory.negativePreferences, memory.manualPreferences, memory.manualNegativePreferences]) {
+    migrateBucketKey(root?.categories, "engineering-cad-nx", "engineering-design");
+    migrateBucketKey(root?.useCases, "engineering-cad-nx-automation", "engineering-design-automation");
+  }
+  return memory;
 }
 
 function maskProvider(provider, includeSecrets = false) {
@@ -865,7 +1030,7 @@ function plainObject(value) {
 }
 
 function portableProvider(provider = {}) {
-  return {
+  return normalizeDeepSeekProvider({
     id: String(provider.id || "").trim(),
     name: String(provider.name || "").trim(),
     region: String(provider.region || "").trim(),
@@ -877,7 +1042,7 @@ function portableProvider(provider = {}) {
     lastModelSyncAt: provider.lastModelSyncAt || "",
     lastTestAt: provider.lastTestAt || "",
     testStatus: provider.testStatus || ""
-  };
+  });
 }
 
 function portableSettings(settings = {}) {
@@ -935,8 +1100,8 @@ function mergePortableSettings(existing = {}, imported = {}) {
   };
 }
 
-function writeStore(filePath, store) {
-  if (isSqlitePath(filePath)) return writeSqliteStore(filePath, store);
+function writeStore(filePath, store, options = {}) {
+  if (isSqlitePath(filePath)) return writeSqliteStore(filePath, store, options);
   ensureDir(filePath);
   const next = {
     ...store,
@@ -1044,10 +1209,10 @@ function normalizeTopicKey(value) {
 
 const CAPABILITY_TAG_RULES = [
   {
-    key: "engineering-cad-nx",
-    labelZh: "工程 CAD/NX 自动化",
-    labelEn: "Engineering CAD/NX automation",
-    pattern: /\bugnx\b|ug\s*nx|siemens\s+nx|nx\s*open\b|nxopen(?!api|gl)|ugopen|unigraphics|postbuilder|post\s*processor|\bmom\b/i
+    key: "engineering-design",
+    labelZh: "工程设计与制造",
+    labelEn: "Engineering design and manufacturing",
+    pattern: /\b(?:cad|cam|cae|cnc)\b|computer[-\s]?aided|parametric (?:design|model)|mechanical (?:design|engineering)|manufacturing automation|\b(?:dwg|dxf|iges|step|stl)\b/i
   },
   {
     key: "content-creation",
@@ -1184,7 +1349,7 @@ const CAPABILITY_TAG_RULES = [
 ];
 
 const CATEGORY_CAPABILITY_FALLBACKS = {
-  "engineering-cad-nx": "engineering-cad-nx",
+  "engineering-design": "engineering-design",
   "product-starters": "product-template",
   "ai-native-products": "ai-assistant",
   "developer-productivity": "developer-tooling",
@@ -1203,6 +1368,7 @@ const CATEGORY_CAPABILITY_FALLBACKS = {
 const CAPABILITY_TAG_BY_KEY = new Map(CAPABILITY_TAG_RULES.map((rule) => [rule.key, rule]));
 
 function projectCapabilityTags(project) {
+  if (Array.isArray(project?._capabilityTags)) return project._capabilityTags;
   const topics = (project.topics || []).map(normalizeTopicKey);
   const haystack = [
     project.fullName,
@@ -1224,13 +1390,7 @@ function projectCapabilityTags(project) {
   ]
     .filter(Boolean)
     .join(" ");
-  let matched = CAPABILITY_TAG_RULES.filter((rule) => rule.pattern.test(haystack));
-  if (isNxCadRepository(project)) {
-    const nxTag = CAPABILITY_TAG_BY_KEY.get("engineering-cad-nx");
-    const genericNoise = new Set(["content-creation", "knowledge-search", "ai-assistant", "ai-workflow", "ai-coding", "data-analytics"]);
-    matched = matched.filter((rule) => !genericNoise.has(rule.key));
-    if (nxTag) matched.unshift(nxTag);
-  }
+  const matched = CAPABILITY_TAG_RULES.filter((rule) => rule.pattern.test(haystack));
   const fallback = CAPABILITY_TAG_BY_KEY.get(CATEGORY_CAPABILITY_FALLBACKS[project.category?.key || ""]);
   if (fallback) matched.push(fallback);
   const unique = new Map();
@@ -1286,8 +1446,14 @@ function withComputedUseCase(project) {
     semantic: projectSemanticPayload({ ...computed, _semanticProfile: semanticProfile }),
     trend: cachedTrend(project)
   };
+  const capabilityTags = projectCapabilityTags(next);
   Object.defineProperty(next, "_semanticProfile", {
     value: semanticProfile,
+    enumerable: false,
+    configurable: true
+  });
+  Object.defineProperty(next, "_capabilityTags", {
+    value: capabilityTags,
     enumerable: false,
     configurable: true
   });
@@ -1683,18 +1849,17 @@ function applyMemorySignal(memory, project, weight = 1, eventType = "") {
   return keys;
 }
 
-function adjustDiscoveryProfileSignal(memory, project, weight = 0, eventType = "", direction = 1) {
-  const profileKey = String(project?.profileKey || "").trim();
-  if (!profileKey) return;
+function adjustDiscoveryProfileSignal(memory, project, weight = 0, eventType = "", direction = 1, planId = "") {
+  const profiles = projectProfileMatches(project, planId);
+  if (!profiles.length) return;
   const semanticScale = eventType === "dismiss_project" ? dismissProjectSignalScales(project).semantic : 1;
-  const delta = Number(weight || 0) * semanticScale * direction;
-  const current = Number(memory.discoveryProfiles?.[profileKey] || 0);
-  const next = Math.max(-40, Math.min(40, current + delta));
   memory.discoveryProfiles = memory.discoveryProfiles || {};
-  if (Math.abs(next) < 0.005) {
-    delete memory.discoveryProfiles[profileKey];
-  } else {
-    memory.discoveryProfiles[profileKey] = Number(next.toFixed(3));
+  const delta = (Number(weight || 0) * semanticScale * direction) / profiles.length;
+  for (const profile of profiles) {
+    const current = Number(memory.discoveryProfiles?.[profile.key] || 0);
+    const next = Math.max(-40, Math.min(40, current + delta));
+    if (Math.abs(next) < 0.005) delete memory.discoveryProfiles[profile.key];
+    else memory.discoveryProfiles[profile.key] = Number(next.toFixed(3));
   }
 }
 
@@ -1705,7 +1870,30 @@ function rollbackMemorySignal(memory, project, event = {}) {
   const preferences = memory.preferences || defaultMemory().preferences;
   const negative = memory.negativePreferences || defaultMemory().negativePreferences;
   const absWeight = Math.abs(Number(weight || 0));
-  adjustDiscoveryProfileSignal(memory, project, weight, eventType, -1);
+  adjustDiscoveryProfileSignal(
+    memory,
+    {
+      ...project,
+      profileMatches: event.profileMatches || project.profileMatches,
+      profileKey: event.profileKey || project.profileKey,
+      profileLabel: event.profileLabel || project.profileLabel,
+      observationPlanMatches: event.profileMatches?.length
+        ? {
+            ...(project.observationPlanMatches || {}),
+            [event.observationPlanId || "default"]: {
+              planId: event.observationPlanId || "default",
+              profileMatches: event.profileMatches,
+              profileKey: event.profileKey || "",
+              profileLabel: event.profileLabel || ""
+            }
+          }
+        : project.observationPlanMatches
+    },
+    weight,
+    eventType,
+    -1,
+    event.observationPlanId || ""
+  );
   const restoreIfPresent = (bucket, key, delta, max) => {
     if (Number(bucket?.[key] || 0) > 0) {
       adjustPreferenceBucket(bucket, key, delta, max);
@@ -1746,6 +1934,7 @@ function rollbackMemorySignal(memory, project, event = {}) {
 }
 
 function eventWeight(eventType, override) {
+  if (eventType === "select_project") return 0;
   if (override !== undefined) return Number(override);
   return MEMORY_EVENT_WEIGHTS[eventType] ?? 0.5;
 }
@@ -1769,7 +1958,7 @@ function appendMemoryEvent(store, project, eventType, options = {}) {
   const computed = withComputedUseCase(project);
   const weight = eventWeight(eventType, options.weight);
   const keys = applyMemorySignal(memory, computed, weight, eventType);
-  adjustDiscoveryProfileSignal(memory, computed, weight, eventType, 1);
+  adjustDiscoveryProfileSignal(memory, computed, weight, eventType, 1, planId);
   const at = new Date().toISOString();
   const entry = {
     at,
@@ -1784,6 +1973,8 @@ function appendMemoryEvent(store, project, eventType, options = {}) {
     risk: keys.risk,
     profileKey: String(computed.profileKey || ""),
     profileLabel: String(computed.profileLabel || ""),
+    profileMatches: projectProfileMatches(computed, planId),
+    observationPlanId: planId,
     source: options.source || "system"
   };
 
@@ -1799,8 +1990,9 @@ function appendMemoryEvent(store, project, eventType, options = {}) {
   return entry;
 }
 
-function removeLatestMemoryEvent(store, fullName, eventType) {
-  const memory = observationPlanMemory(store);
+function removeLatestMemoryEvent(store, fullName, eventType, requestedPlanId = "") {
+  const planId = observationPlanIdFor(store, requestedPlanId, Boolean(String(requestedPlanId || "").trim()));
+  const memory = observationPlanMemory(store, planId);
   const key = projectKey(fullName);
   const project = store.projects[key];
   if (!project) return false;
@@ -1823,7 +2015,7 @@ function removeLatestMemoryEvent(store, fullName, eventType) {
   memory.stats = memory.stats || { eventCounts: {} };
   memory.stats.eventCounts = eventCounts(memory.events);
   memory.stats.lastEventAt = memory.events[0]?.at || memory.shortTerm[0]?.at || "";
-  syncActivePlanMemory(store, memory);
+  syncPlanMemory(store, memory, planId);
   return true;
 }
 
@@ -2067,7 +2259,7 @@ function previousDateKey(dateKey) {
   return todayKey(date);
 }
 
-function rememberProject(store, project, reason, weight) {
+function rememberProject(store, project, reason, weight, observationPlanId = "") {
   const eventType =
     reason === "favorite"
       ? "favorite"
@@ -2085,6 +2277,7 @@ function rememberProject(store, project, reason, weight) {
   appendMemoryEvent(store, project, eventType, {
     reason,
     ...(weight !== undefined ? { weight } : {}),
+    ...(observationPlanId ? { observationPlanId } : {}),
     source: "legacy"
   });
 }
@@ -2525,9 +2718,9 @@ const SEMANTIC_TERM_GROUPS = [
 ];
 
 const SEMANTIC_KEY_PATTERNS = {
-  "cad-nx-automation": /\bugnx\b|ug\s*nx|siemens\s+nx|nx\s*open\b|nxopen(?!api|gl)|ugopen|unigraphics|postbuilder|post\s*processor|\bmom\b|nx cad|nx cam|nx cae/i,
-  "audience-cad-engineering-users": /\bugnx\b|ug\s*nx|siemens\s+nx|nx\s*open\b|nxopen(?!api|gl)|ugopen|unigraphics|cad|cam|cae|cnc|mechanical engineering|manufacturing/i,
-  "shape-cad-nx-plugin": /\bugnx\b|ug\s*nx|siemens\s+nx|nx\s*open\b|nxopen(?!api|gl)|ugopen|unigraphics|postbuilder|post\s*processor|nx\s+(?:cad|cam|cae|plugin|extension|addon|workbench|journal|automation)|(?:plugin|extension|addon|workbench|journal|automation).{0,80}\b(?:ugnx|ug\s*nx|siemens\s+nx|nxopen|nx\s*open|ugopen|unigraphics)\b/i,
+  "engineering-design-automation": /\b(?:cad|cam|cae|cnc)\b|computer[-\s]?aided|parametric (?:design|model)|mechanical (?:design|engineering)|manufacturing automation|\b(?:dwg|dxf|iges|step|stl)\b/i,
+  "audience-engineering-design-users": /\b(?:cad|cam|cae|cnc)\b|mechanical engineering|manufacturing|industrial design|product design/i,
+  "shape-engineering-plugin": /(?:plugin|extension|addon|workbench|automation|converter|viewer|editor).{0,80}\b(?:cad|cam|cae|cnc|dwg|dxf|iges|step|stl)\b|\b(?:cad|cam|cae|cnc|dwg|dxf|iges|step|stl)\b.{0,80}(?:plugin|extension|addon|workbench|automation|converter|viewer|editor)/i,
 
   "ai-role-library": /agency[-\s_]?agents|agent definitions?|expert roles?|personas?|prompt library|prompt collection|即插即用的 AI 专家角色/i,
   "content-page-generation": /html[-\s_]?anything|agentic html editor|magazine pages|posters?|rednote|x posts?|tweet|data reports?|page generation|content page/i,
@@ -2625,7 +2818,7 @@ const SEMANTIC_KEY_PATTERNS = {
 
 const SEMANTIC_KEY_RULES = {
   problem: [
-    "cad-nx-automation",
+    "engineering-design-automation",
     "ai-role-library",
     "content-page-generation",
     "knowledge-graph",
@@ -2661,7 +2854,7 @@ const SEMANTIC_KEY_RULES = {
     "ai-assistant-automation"
   ],
   audience: [
-    "audience-cad-engineering-users",
+    "audience-engineering-design-users",
     "audience-ai-builders",
     "audience-design-system-maintainers",
     "audience-design-frontend-devs",
@@ -2686,7 +2879,7 @@ const SEMANTIC_KEY_RULES = {
     "audience-individual-users"
   ],
   shape: [
-    "shape-cad-nx-plugin",
+    "shape-engineering-plugin",
     "shape-browser-plugin",
     "shape-plugin-extension-tool",
     "shape-design-governance-tool",
@@ -2717,7 +2910,7 @@ const SEMANTIC_KEY_RULES = {
 
 const SEMANTIC_FILTER_CORE_KEYS = {
   problem: [
-    "cad-nx-automation",
+    "engineering-design-automation",
     "knowledge-search",
     "document-extraction",
     "data-visualization",
@@ -2736,7 +2929,7 @@ const SEMANTIC_FILTER_CORE_KEYS = {
     "security-compliance"
   ],
   audience: [
-    "audience-cad-engineering-users",
+    "audience-engineering-design-users",
     "audience-creators",
     "audience-design-content-teams",
     "audience-design-frontend-devs",
@@ -2752,7 +2945,7 @@ const SEMANTIC_FILTER_CORE_KEYS = {
     "audience-individual-users"
   ],
   shape: [
-    "shape-cad-nx-plugin",
+    "shape-engineering-plugin",
     "shape-web-workspace",
     "shape-creative-editor",
     "shape-ui-generation-editor",
@@ -2773,7 +2966,7 @@ const SEMANTIC_FILTER_CORE_KEYS = {
 
 const SEMANTIC_LABELS = {
   problem: {
-    "cad-nx-automation": ["工程 CAD/NX 自动化", "Engineering CAD/NX automation"],
+    "engineering-design-automation": ["工程设计与制造自动化", "Engineering design automation"],
     "ai-role-library": ["专家角色与提示词复用", "Expert role reuse"],
     "content-page-generation": ["内容页面与原型生成", "Content page generation"],
     "knowledge-graph": ["代码与资料结构理解", "Code and knowledge mapping"],
@@ -2809,7 +3002,7 @@ const SEMANTIC_LABELS = {
     "ai-assistant-automation": ["任务自动化与 AI 助手", "AI automation"]
   },
   audience: {
-    "audience-cad-engineering-users": ["CAD/CAM 工程用户", "CAD/CAM engineering users"],
+    "audience-engineering-design-users": ["工程设计与制造用户", "Engineering design and manufacturing users"],
     "audience-ai-builders": ["AI 应用搭建者", "AI builders"],
     "audience-design-system-maintainers": ["设计系统维护者", "Design system maintainers"],
     "audience-design-frontend-devs": ["设计师与前端开发者", "Designers and frontend developers"],
@@ -2834,7 +3027,7 @@ const SEMANTIC_LABELS = {
     "audience-individual-users": ["个人用户", "Individual users"]
   },
   shape: {
-    "shape-cad-nx-plugin": ["工程插件/自动化工具", "Engineering plugin/automation tool"],
+    "shape-engineering-plugin": ["工程插件/自动化工具", "Engineering plugin/automation tool"],
     "shape-browser-plugin": ["浏览器插件", "Browser plugin"],
     "shape-plugin-extension-tool": ["插件/扩展工具", "Plugin/extension tool"],
     "shape-design-governance-tool": ["设计规范工具", "Design governance tool"],
@@ -2991,7 +3184,7 @@ function semanticFallbackKey(project, kind = "") {
       "consumer-productivity": "file-transfer-sync",
       "commerce-growth-content": "commerce-growth",
       "learning-research-assets": "learning-assets",
-      "engineering-cad-nx": "cad-nx-automation"
+      "engineering-design": "engineering-design-automation"
     },
     audience: {
       "product-starters": "audience-developers",
@@ -3006,7 +3199,7 @@ function semanticFallbackKey(project, kind = "") {
       "consumer-productivity": "audience-individual-users",
       "commerce-growth-content": "audience-business-ops-teams",
       "learning-research-assets": "audience-research-knowledge-workers",
-      "engineering-cad-nx": "audience-cad-engineering-users"
+      "engineering-design": "audience-engineering-design-users"
     },
     shape: {
       "product-starters": "shape-template-project",
@@ -3021,7 +3214,7 @@ function semanticFallbackKey(project, kind = "") {
       "consumer-productivity": "shape-desktop-app",
       "commerce-growth-content": "shape-web-workspace",
       "learning-research-assets": "shape-learning-library",
-      "engineering-cad-nx": "shape-cad-nx-plugin"
+      "engineering-design": "shape-engineering-plugin"
     }
   };
   return map[kind]?.[category] || "";
@@ -3029,13 +3222,6 @@ function semanticFallbackKey(project, kind = "") {
 
 function projectSemanticProfile(project) {
   if (project?._semanticProfile) return project._semanticProfile;
-  if (project?.category?.key === "engineering-cad-nx" || isNxCadRepository(project)) {
-    return {
-      problem: "cad-nx-automation",
-      audience: "audience-cad-engineering-users",
-      shape: "shape-cad-nx-plugin"
-    };
-  }
   return {
     problem: projectSemanticKey(project, "problem") || semanticFallbackKey(project, "problem"),
     audience: projectSemanticKey(project, "audience") || semanticFallbackKey(project, "audience"),
@@ -3617,15 +3803,41 @@ function countSemanticFilterKind(projects = [], memory = {}, kind = "") {
 function buildHarnessScorecard(store) {
   const planId = activeObservationPlanId(store);
   const memory = observationPlanMemory(store);
+  const userData = activePlanUserData(store);
   const dailyArchive = planId === "default" ? store.leaderboards?.daily : store.leaderboards?.byPlan?.[planId]?.daily;
-  const todayArchive = dailyArchive?.[todayKey()];
-  const items = todayArchive?.items || [];
+  const cutoff = Date.now() - 30 * 86400000;
+  const recentArchives = Object.values(dailyArchive || {})
+    .filter((entry) => new Date(entry?.generatedAt || entry?.date || 0).getTime() >= cutoff)
+    .sort((a, b) => String(a?.generatedAt || a?.date || "").localeCompare(String(b?.generatedAt || b?.date || "")));
+  const items = recentArchives.at(-1)?.items || [];
   const events = recentEvents(memory, 30);
-  const positiveTypes = new Set(["favorite", "star", "fork", "triage_note", "ai_analyze", "leaderboard_positive", "leaderboard_strong_positive"]);
+  const positiveTypes = new Set(["favorite", "star", "fork", "leaderboard_positive", "leaderboard_strong_positive"]);
   const negativeTypes = new Set(["unfavorite", "unstar", "leaderboard_negative", "dismiss_project"]);
-  const positive = events.filter((event) => positiveTypes.has(event.type)).length;
-  const negative = events.filter((event) => negativeTypes.has(event.type)).length;
-  const feedbackTotal = positive + negative;
+  const exposedProjects = new Set(
+    recentArchives.flatMap((entry) => (entry?.items || []).map((item) => projectKey(item.fullName)).filter(Boolean))
+  );
+  events.forEach((event) => {
+    const key = projectKey(event.fullName);
+    if (key) exposedProjects.add(key);
+  });
+  const positiveProjects = new Set(
+    events.filter((event) => positiveTypes.has(event.type)).map((event) => projectKey(event.fullName)).filter(Boolean)
+  );
+  const negativeProjects = new Set(
+    events.filter((event) => negativeTypes.has(event.type)).map((event) => projectKey(event.fullName)).filter(Boolean)
+  );
+  Object.keys(userData.watchlist || {}).forEach((key) => positiveProjects.add(projectKey(key)));
+  Object.entries(userData.githubActions || {}).forEach(([key, action]) => {
+    if (action?.starred || action?.forked) positiveProjects.add(projectKey(key));
+  });
+  Object.entries(userData.notes || {}).forEach(([key, note]) => {
+    if (note?.status === "validate") positiveProjects.add(projectKey(key));
+    if (note?.status === "skip") negativeProjects.add(projectKey(key));
+  });
+  Object.keys(userData.dismissedProjects || {}).forEach((key) => negativeProjects.add(projectKey(key)));
+  positiveProjects.forEach((key) => exposedProjects.add(key));
+  negativeProjects.forEach((key) => exposedProjects.add(key));
+  const exposureCount = exposedProjects.size;
   const useCaseCoverage = uniqueCount(items, (item) => item.useCase?.key || item.category?.key);
   const useCaseCounts = {};
   for (const item of items) {
@@ -3643,14 +3855,18 @@ function buildHarnessScorecard(store) {
 
   const scorecard = {
     evaluatedAt: new Date().toISOString(),
+    proxyOnly: true,
     sample: {
       rankedItems: items.length,
+      archivedDays30d: recentArchives.length,
+      exposedProjects30d: exposureCount,
       events30d: events.length,
-      positiveSignals: positive,
-      negativeSignals: negative
+      positiveProjects: positiveProjects.size,
+      negativeProjects: negativeProjects.size
     },
     metrics: {
-      relevanceHitRate: scorePercent(feedbackTotal ? (positive / feedbackTotal) * 100 : 50),
+      positiveYield: exposureCount ? scorePercent((positiveProjects.size / exposureCount) * 100) : null,
+      negativeRate: exposureCount ? scorePercent((negativeProjects.size / exposureCount) * 100) : null,
       diversityCoverage: scorePercent(items.length ? (useCaseCoverage / Math.min(8, items.length)) * 100 : 0),
       repetitionControl: scorePercent((1 - maxShare) * 100),
       actionabilityFit: scorePercent(actionabilityAverage),
@@ -3658,14 +3874,20 @@ function buildHarnessScorecard(store) {
       explorationFit: scorePercent((1 - Math.min(1, explorationDiff / 0.35)) * 100)
     }
   };
-  const metricValues = Object.values(scorecard.metrics);
+  const metricValues = [
+    scorecard.metrics.diversityCoverage,
+    scorecard.metrics.repetitionControl,
+    scorecard.metrics.actionabilityFit,
+    scorecard.metrics.licenseReadiness,
+    scorecard.metrics.explorationFit
+  ];
   scorecard.overall = scorePercent(metricValues.reduce((sum, value) => sum + value, 0) / Math.max(1, metricValues.length));
 
   const recommendations = [];
   if (scorecard.metrics.diversityCoverage < 55 || scorecard.metrics.repetitionControl < 60) {
     recommendations.push("提高探索比例或压低重复用途权重，避免同类项目连续霸榜。");
   }
-  if (negative > positive && feedbackTotal >= 3) {
+  if (negativeProjects.size > positiveProjects.size && events.length >= 3) {
     recommendations.push("近期负反馈偏多，应把对应分类和用途写入负向偏好，降低相似项目密度。");
   }
   if (scorecard.metrics.actionabilityFit < 55) {
@@ -3738,6 +3960,7 @@ function createStorage(filePath) {
 
   function projectPoolCacheVersion(store) {
     const plan = activeObservationPlan(store);
+    const latestScan = latestScanInStore(store, plan.id);
     const userData = normalizePlanUserData(plan.userData || {});
     return [
       plan.id,
@@ -3747,8 +3970,8 @@ function createStorage(filePath) {
       Object.keys(userData.analysis || {}).length,
       Object.keys(userData.dismissedProjects || {}).length,
       Object.keys(userData.githubActions || {}).length,
-      store.scans?.[0]?.id || "",
-      store.scans?.[0]?.at || "",
+      latestScan?.id || "",
+      latestScan?.at || "",
       plan.memory?.stats?.lastEventAt || "",
       plan.memory?.context?.compressedAt || ""
     ].join(":");
@@ -3756,6 +3979,7 @@ function createStorage(filePath) {
 
   function leaderboardCacheVersion(store, planId) {
     const plan = store.observationPlans?.[planId] || store.observationPlans?.default || activeObservationPlan(store);
+    const latestScan = latestScanInStore(store, plan?.id || planId);
     const userData = normalizePlanUserData(plan?.userData || {});
     return [
       planId,
@@ -3765,8 +3989,8 @@ function createStorage(filePath) {
       Object.keys(userData.analysis || {}).length,
       Object.keys(userData.dismissedProjects || {}).length,
       Object.keys(userData.githubActions || {}).length,
-      store.scans?.[0]?.id || "",
-      store.scans?.[0]?.at || "",
+      latestScan?.id || "",
+      latestScan?.at || "",
       plan?.memory?.stats?.lastEventAt || "",
       plan?.memory?.context?.compressedAt || ""
     ].join(":");
@@ -3798,9 +4022,9 @@ function createStorage(filePath) {
     }
   }
 
-  function save(store) {
+  function save(store, options = {}) {
     syncActivePlanMemory(store, store.memory);
-    storeCache = writeStore(filePath, store);
+    storeCache = writeStore(filePath, store, options);
     storeCacheMtimeMs = fs.existsSync(filePath) ? fs.statSync(filePath).mtimeMs : Date.now();
     invalidateComputedProjectItems();
     return storeCache;
@@ -3819,6 +4043,7 @@ function createStorage(filePath) {
       result: task.result === undefined ? null : cloneJson(task.result, null),
       error: String(task.error || ""),
       attempts: Math.max(0, Number(task.attempts || 0)),
+      checkpoint: task.checkpoint === undefined ? null : cloneJson(task.checkpoint, null),
       createdAt: task.createdAt || now,
       updatedAt: now,
       startedAt: task.startedAt || "",
@@ -3828,7 +4053,7 @@ function createStorage(filePath) {
     store.tasks[id] = record;
     const ordered = Object.values(store.tasks).sort((a, b) => String(b.updatedAt || "").localeCompare(String(a.updatedAt || "")));
     store.tasks = Object.fromEntries(ordered.slice(0, 120).map((item) => [item.id, item]));
-    save(store);
+    save(store, { dirtyProjectKeys: [], leaderboardsChanged: false });
     return cloneJson(record, record);
   }
 
@@ -3844,10 +4069,11 @@ function createStorage(filePath) {
       type: current.type,
       input: patch.input === undefined ? current.input : cloneJson(patch.input, {}),
       result: patch.result === undefined ? current.result : cloneJson(patch.result, null),
+      checkpoint: patch.checkpoint === undefined ? current.checkpoint || null : cloneJson(patch.checkpoint, null),
       updatedAt: now
     };
     store.tasks[id] = next;
-    save(store);
+    save(store, { dirtyProjectKeys: [], leaderboardsChanged: false });
     return cloneJson(next, next);
   }
 
@@ -3856,10 +4082,19 @@ function createStorage(filePath) {
   }
 
   function listTasks(filters = {}) {
+    const planFilter = String(filters.observationPlanId || "").trim();
     return Object.values(load().tasks || {})
       .filter((task) => !filters.type || task.type === filters.type)
       .filter((task) => !filters.status || task.status === filters.status)
       .filter((task) => !filters.key || task.key === filters.key)
+      // Scan tasks are per observation plan; a plan without its own task must
+      // never inherit another plan's queued/running/completed state. Tasks
+      // created before per-plan scanning only exist for the default plan.
+      .filter((task) => {
+        if (!planFilter) return true;
+        const taskPlanId = String(task.input?.observationPlanId || "").trim();
+        return taskPlanId ? taskPlanId === planFilter : planFilter === "default";
+      })
       .sort((a, b) => String(b.updatedAt || "").localeCompare(String(a.updatedAt || "")))
       .slice(0, Math.max(1, Math.min(120, Number(filters.limit || 30))))
       .map((task) => cloneJson(task, task));
@@ -3877,7 +4112,7 @@ function createStorage(filePath) {
       task.error = "";
       recovered.push(cloneJson(task, task));
     }
-    if (recovered.length) save(store);
+    if (recovered.length) save(store, { dirtyProjectKeys: [], leaderboardsChanged: false });
     return recovered;
   }
 
@@ -3893,7 +4128,7 @@ function createStorage(filePath) {
       ...cloneJson(value, {}),
       updatedAt: new Date().toISOString()
     };
-    save(store);
+    save(store, { dirtyProjectKeys: [], leaderboardsChanged: false });
     return cloneJson(store.runtime[key], store.runtime[key]);
   }
 
@@ -3901,7 +4136,8 @@ function createStorage(filePath) {
     const store = load();
     const key = projectKey(fullName);
     const project = store.projects[key] || null;
-    const userData = planUserData(store, options.observationPlanId || "");
+    const planId = observationPlanIdFor(store, options.observationPlanId || "", Boolean(String(options.observationPlanId || "").trim()));
+    const userData = planUserData(store, planId);
     const note = userData.notes?.[key] || {};
     return project
       ? withComputedUseCase({
@@ -3917,14 +4153,16 @@ function createStorage(filePath) {
   }
 
   function projectItems(store, planId = activeObservationPlanId(store), plan = null) {
-    const userData = activePlanUserData(store);
-    const version = `${store.updatedAt || ""}:${planId}:${Object.keys(store.projects || {}).length}:${Object.keys(userData.watchlist || {}).length}:${Object.keys(userData.notes || {}).length}:${Object.keys(userData.analysis || {}).length}:${Object.keys(userData.dismissedProjects || {}).length}`;
+    const resolvedPlanId = observationPlanIdFor(store, planId, true);
+    const userData = planUserData(store, resolvedPlanId);
+    const planMemory = observationPlanMemory(store, resolvedPlanId);
+    const version = `${store.updatedAt || ""}:${resolvedPlanId}:${Object.keys(store.projects || {}).length}:${Object.keys(userData.watchlist || {}).length}:${Object.keys(userData.notes || {}).length}:${Object.keys(userData.analysis || {}).length}:${Object.keys(userData.dismissedProjects || {}).length}:${planMemory.stats?.lastEventAt || ""}:${planMemory.context?.compressedAt || ""}`;
     if (computedProjectItemsCache && computedProjectItemsVersion === version) {
       return computedProjectItemsCache.slice();
     }
-    const activePlan = plan || store.observationPlans?.[planId] || store.observationPlans?.default || null;
+    const activePlan = plan || store.observationPlans?.[resolvedPlanId] || null;
     computedProjectItemsCache = Object.values(store.projects)
-      .filter((project) => projectMatchesObservationPlan(project, planId, activePlan))
+      .filter((project) => projectMatchesObservationPlan(project, resolvedPlanId, activePlan))
       .map((project) => {
       const key = projectKey(project.fullName);
       const note = userData.notes?.[key] || {};
@@ -3943,9 +4181,9 @@ function createStorage(filePath) {
   }
 
   function projectPool(store, filters = {}, defaultLimit = 500) {
-    const planId = filters.observationPlanId || activeObservationPlanId(store);
-    const plan = store.observationPlans?.[planId] || store.observationPlans?.default || null;
-    const memory = observationPlanMemory(store);
+    const planId = observationPlanIdFor(store, filters.observationPlanId || "", Boolean(String(filters.observationPlanId || "").trim()));
+    const plan = store.observationPlans?.[planId] || null;
+    const memory = observationPlanMemory(store, planId);
     let items = projectItems(store, planId, plan);
     if (filters.includeDismissed !== "true" && filters.includeDismissed !== true) {
       items = items.filter((project) => !project.dismissed);
@@ -4115,11 +4353,13 @@ function createStorage(filePath) {
     };
   }
 
-  function trendRefreshCandidates(limit = 80) {
+  function trendRefreshCandidates(limit = 80, requestedPlanId = "") {
     const store = load();
+    const planId = observationPlanIdFor(store, requestedPlanId, Boolean(String(requestedPlanId || "").trim()));
     const result = projectPool(
       store,
       {
+        observationPlanId: planId,
         sort: store.settings.defaultSort || "opportunity",
         diversify: "true",
         limit: Math.max(1, Number(limit || 80)),
@@ -4152,8 +4392,16 @@ function createStorage(filePath) {
   function saveObservationPlan(plan = {}) {
     const store = load();
     syncActivePlanMemory(store, store.memory);
-    const requestedId = normalizeObservationPlanId(plan.id || plan.nameEn || plan.name);
-    const id = requestedId && requestedId !== "default" ? requestedId : `plan-${Date.now()}`;
+    const requestedId = normalizeObservationPlanId(plan.id);
+    // A generated draft arrives without an id. Deriving it from the plan name
+    // keeps「抖音」stable across saves instead of creating a new empty plan
+    // (and a new empty project pool) every time the draft is saved. An existing
+    // plan with the same name takes precedence so the saved logic lands on the
+    // pool that was already scanned for that requirement.
+    const id =
+      requestedId && requestedId !== "default"
+        ? requestedId
+        : sameNameObservationPlanId(store, plan) || stableObservationPlanId(plan);
     const previous = store.observationPlans?.[id] || {};
     if (previous.builtIn) {
       throw new Error("Built-in observation plan cannot be overwritten");
@@ -4169,10 +4417,11 @@ function createStorage(filePath) {
         updatedAt: new Date().toISOString(),
         memory: plan.memory || previous.memory || defaultMemory()
       },
-      previous.memory || defaultMemory()
+      previous.memory || defaultMemory(),
+      previous
     );
     store.observationPlans[id] = normalized;
-    const saved = save(store);
+    const saved = save(store, { dirtyProjectKeys: [], leaderboardsChanged: false });
     return observationPlanPublicView(saved.observationPlans[id], activeObservationPlanId(saved), true);
   }
 
@@ -4191,7 +4440,7 @@ function createStorage(filePath) {
       requirements: normalizeObservationRequirements(requirements),
       updatedAt: new Date().toISOString()
     };
-    const saved = save(store);
+    const saved = save(store, { dirtyProjectKeys: [], leaderboardsChanged: false });
     return observationPlanPublicView(saved.observationPlans[planId], activeObservationPlanId(saved), true);
   }
 
@@ -4204,8 +4453,15 @@ function createStorage(filePath) {
     if (!store.observationPlans?.[planId]) {
       throw new Error("Observation plan not found");
     }
+    const activeTask = Object.values(store.tasks || {}).find(
+      (task) => task?.input?.observationPlanId === planId && ["queued", "running"].includes(task.status)
+    );
+    if (activeTask) {
+      throw new Error("Observation plan has a running task; wait for it to finish before deleting the plan");
+    }
     syncActivePlanMemory(store, store.memory);
     delete store.observationPlans[planId];
+    const dirtyProjectKeys = new Set();
     for (const [key, project] of Object.entries(store.projects || {})) {
       const nextMatches = { ...observationPlanMatchMap(project) };
       if (!nextMatches[planId]) continue;
@@ -4218,13 +4474,19 @@ function createStorage(filePath) {
           observationPlanMatches: nextMatches
         };
       }
+      dirtyProjectKeys.add(key);
+    }
+    store.scans = (store.scans || []).filter((scan) => scan.observationPlanId !== planId);
+    if (store.leaderboards?.byPlan) delete store.leaderboards.byPlan[planId];
+    for (const [taskId, task] of Object.entries(store.tasks || {})) {
+      if (task.input?.observationPlanId === planId) delete store.tasks[taskId];
     }
     if (store.settings?.activeObservationPlanId === planId) {
       store.settings.activeObservationPlanId = "default";
       store.memory = normalizeMemory(store.observationPlans.default?.memory || store.memory);
     }
     store.projectRevision = new Date().toISOString();
-    const saved = save(store);
+    const saved = save(store, { dirtyProjectKeys: Array.from(dirtyProjectKeys), leaderboardsChanged: true });
     return {
       ok: true,
       activeObservationPlanId: activeObservationPlanId(saved),
@@ -4250,7 +4512,7 @@ function createStorage(filePath) {
       memory: store.memory,
       updatedAt: new Date().toISOString()
     };
-    const saved = save(store);
+    const saved = save(store, { dirtyProjectKeys: [], leaderboardsChanged: false });
     buildLeaderboard("daily", { limit: 20, persist: true });
     return {
       previousId,
@@ -4300,7 +4562,7 @@ function createStorage(filePath) {
       store.settings.activeObservationPlanId = payload.activeObservationPlanId;
       store.memory = normalizeMemory(store.observationPlans[payload.activeObservationPlanId].memory || defaultMemory());
     }
-    const saved = save(store);
+    const saved = save(store, { dirtyProjectKeys: [], leaderboardsChanged: false });
     return {
       imported,
       activeObservationPlanId: activeObservationPlanId(saved),
@@ -4505,7 +4767,7 @@ function createStorage(filePath) {
       updatedAt: new Date().toISOString()
     };
 
-    const saved = save(store);
+    const saved = save(store, { dirtyProjectKeys: [], leaderboardsChanged: false });
     return {
       imported: {
         plans: importedPlans,
@@ -4520,44 +4782,67 @@ function createStorage(filePath) {
   function updateProjectTrends(trends = {}) {
     const store = load();
     let updated = 0;
+    const dirtyProjectKeys = new Set();
     for (const [fullName, trend] of Object.entries(trends || {})) {
       const key = projectKey(fullName);
       if (!store.projects[key] || !trend) continue;
       store.projects[key].trend = trend;
+      dirtyProjectKeys.add(key);
       if (!trend.error) updated += 1;
     }
     if (updated || Object.keys(trends || {}).length) store.projectRevision = new Date().toISOString();
-    save(store);
+    save(store, { dirtyProjectKeys: Array.from(dirtyProjectKeys), leaderboardsChanged: false });
     buildLeaderboard("daily", { limit: 20 });
     return updated;
   }
 
-  function updateLatestScan(patch = {}) {
+  function updateLatestScan(patch = {}, options = {}) {
     const store = load();
     if (!store.scans?.length) return null;
-    store.scans[0] = {
-      ...store.scans[0],
+    const targeted = Boolean(options.id || options.taskId || options.observationPlanId);
+    const targetIndex = targeted
+      ? store.scans.findIndex((scan) =>
+          (options.id && scan.id === options.id) ||
+          (options.taskId && scan.taskId === options.taskId) ||
+          (options.observationPlanId && scanPlanId(scan) === options.observationPlanId)
+        )
+      : 0;
+    // A targeted update that matches nothing must stay a no-op instead of
+    // silently patching whichever scan happens to sit at index 0.
+    if (targetIndex < 0) return null;
+    const index = targetIndex;
+    store.scans[index] = {
+      ...store.scans[index],
       ...patch
     };
-    return save(store).scans[0];
+    return save(store, { dirtyProjectKeys: [], leaderboardsChanged: false }).scans[index];
   }
 
   function upsertProjects(projects, scanMeta = {}) {
     const store = load();
     const now = new Date().toISOString();
-    const planId = scanMeta.observationPlanId || activeObservationPlanId(store);
-    const userData = activePlanUserData(store);
+    const requestedPlanId = String(scanMeta.observationPlanId || "").trim();
+    const planId = observationPlanIdFor(store, requestedPlanId, Boolean(requestedPlanId));
+    const plan = store.observationPlans?.[planId];
+    if (!plan) throw new Error("Observation plan not found");
+    const userData = planUserData(store, planId);
     const incomingKeys = new Set(projects.map((project) => projectKey(project.fullName)).filter(Boolean));
+    const dirtyProjectKeys = new Set(incomingKeys);
 
-    if (scanMeta.replaceObservationPlanMatches && planId !== "default") {
+    if (scanMeta.replaceObservationPlanMatches) {
       for (const [key, project] of Object.entries(store.projects || {})) {
         const nextMatches = { ...observationPlanMatchMap(project) };
         if (!nextMatches[planId] || incomingKeys.has(key)) continue;
         delete nextMatches[planId];
-        store.projects[key] = {
-          ...project,
-          observationPlanMatches: nextMatches
-        };
+        if (Object.keys(nextMatches).length === 0) {
+          delete store.projects[key];
+        } else {
+          store.projects[key] = {
+            ...project,
+            observationPlanMatches: nextMatches
+          };
+        }
+        dirtyProjectKeys.add(key);
       }
     }
 
@@ -4572,7 +4857,8 @@ function createStorage(filePath) {
           firstSeenAt: previousMatches[planId]?.firstSeenAt || now,
           lastSeenAt: now,
           profileKey: project.profileKey || "",
-          profileLabel: project.profileLabel || ""
+          profileLabel: project.profileLabel || "",
+          profileMatches: projectProfileMatches(project, planId)
         }
       };
       const snapshot = {
@@ -4585,18 +4871,31 @@ function createStorage(filePath) {
         risk: project.scores?.risk || 0
       };
 
+      const globalProjection = planId === "default"
+        ? {
+            note: userData.notes?.[key]?.text || "",
+            triageStatus: userData.notes?.[key]?.status || "",
+            noteUpdatedAt: userData.notes?.[key]?.updatedAt || "",
+            analysis: userData.analysis?.[key] || null,
+            watched: Boolean(userData.watchlist?.[key]),
+            dismissed: Boolean(userData.dismissedProjects?.[key])
+          }
+        : {
+            note: previous?.note || "",
+            triageStatus: previous?.triageStatus || "",
+            noteUpdatedAt: previous?.noteUpdatedAt || "",
+            analysis: previous?.analysis || null,
+            watched: Boolean(previous?.watched),
+            dismissed: Boolean(previous?.dismissed)
+          };
       store.projects[key] = {
         ...(previous || {}),
         ...project,
         firstSeenAt: previous?.firstSeenAt || now,
         lastSeenAt: now,
         snapshots: [...(previous?.snapshots || []), snapshot].slice(-180),
-        note: userData.notes?.[key]?.text || "",
-        triageStatus: userData.notes?.[key]?.status || "",
-        noteUpdatedAt: userData.notes?.[key]?.updatedAt || "",
-        analysis: userData.analysis?.[key] || null,
+        ...globalProjection,
         trend: project.trend || previous?.trend || onlineTrendPlaceholder(),
-        watched: Boolean(userData.watchlist?.[key]),
         observationPlanMatches
       };
     }
@@ -4604,6 +4903,8 @@ function createStorage(filePath) {
     store.scans.unshift({
       id: scanMeta.id || `scan-${Date.now()}`,
       at: now,
+      startedAt: scanMeta.startedAt || "",
+      taskId: scanMeta.taskId || "",
       status: scanMeta.status || "completed",
       mode: scanMeta.mode || "broad",
       observationPlanId: planId,
@@ -4616,13 +4917,16 @@ function createStorage(filePath) {
       githubSearchReceived: scanMeta.githubSearchReceived || 0,
       githubTrendingFound: scanMeta.githubTrendingFound || 0,
       githubTrendingAdded: scanMeta.githubTrendingAdded || 0,
-      errors: scanMeta.errors || []
+      errors: scanMeta.errors || [],
+      // Controlled sparse-domain relaxations actually executed during this scan.
+      // The saved query is never rewritten; each entry records the extra pass.
+      relaxations: Array.isArray(scanMeta.relaxations) ? scanMeta.relaxations : []
     });
 
     store.scans = store.scans.slice(0, 120);
     store.projectRevision = now;
-    const saved = save(store);
-    buildLeaderboard("daily", { limit: 20 });
+    const saved = save(store, { dirtyProjectKeys: Array.from(dirtyProjectKeys), leaderboardsChanged: false });
+    buildLeaderboard("daily", { limit: 20, observationPlanId: planId });
     return saved;
   }
 
@@ -4634,13 +4938,14 @@ function createStorage(filePath) {
       ...scan
     });
     store.scans = store.scans.slice(0, 120);
-    return save(store);
+    return save(store, { dirtyProjectKeys: [], leaderboardsChanged: false });
   }
 
-  function setWatch(fullName, watched) {
+  function setWatch(fullName, watched, options = {}) {
     const store = load();
     const key = projectKey(fullName);
-    const userData = activePlanUserData(store);
+    const planId = observationPlanIdFor(store, options.observationPlanId || "", Boolean(String(options.observationPlanId || "").trim()));
+    const userData = planUserData(store, planId);
     if (watched) {
       userData.watchlist[key] = {
         fullName,
@@ -4650,24 +4955,26 @@ function createStorage(filePath) {
       delete userData.watchlist[key];
     }
     if (store.projects[key]) {
-      store.projects[key].watched = Boolean(watched);
+      if (planId === "default") store.projects[key].watched = Boolean(watched);
       if (watched) {
-        rememberProject(store, withComputedUseCase(store.projects[key]), "favorite");
+        rememberProject(store, withComputedUseCase(store.projects[key]), "favorite", undefined, planId);
       } else {
-        rememberProject(store, withComputedUseCase(store.projects[key]), "unfavorite");
+        rememberProject(store, withComputedUseCase(store.projects[key]), "unfavorite", undefined, planId);
       }
     }
-    return save(store).projects[key] || null;
+    save(store, { dirtyProjectKeys: [key], leaderboardsChanged: false });
+    return getProject(fullName, { observationPlanId: planId });
   }
 
-  function setProjectDismissed(fullName, dismissed) {
+  function setProjectDismissed(fullName, dismissed, options = {}) {
     const store = load();
     const key = projectKey(fullName);
     const project = store.projects[key];
     if (!project) {
       throw new Error("Project not found");
     }
-    const userData = activePlanUserData(store);
+    const planId = observationPlanIdFor(store, options.observationPlanId || "", Boolean(String(options.observationPlanId || "").trim()));
+    const userData = planUserData(store, planId);
     const now = new Date().toISOString();
     const alreadyDismissed = Boolean(userData.dismissedProjects?.[key]);
     let restoredNoteDraft = null;
@@ -4677,47 +4984,47 @@ function createStorage(filePath) {
         userData.dismissedProjects[key] = {
           fullName,
           dismissedAt: now,
-          systemReason: likelyDismissedReason(computed, observationPlanMemory(store))
+          systemReason: likelyDismissedReason(computed, observationPlanMemory(store, planId))
         };
         appendMemoryEvent(store, computed, "dismiss_project", {
           source: "project_pool",
-          reason: "not_fit"
+          reason: "not_fit",
+          observationPlanId: planId
         });
       }
     } else if (alreadyDismissed) {
       delete userData.dismissedProjects[key];
-      removeLatestMemoryEvent(store, fullName, "dismiss_project");
+      removeLatestMemoryEvent(store, fullName, "dismiss_project", planId);
       const note = userData.notes?.[key] || null;
-      const shouldClearSkipTriage = note?.status === "skip" || project.triageStatus === "skip";
+      const shouldClearSkipTriage = note?.status === "skip" || (planId === "default" && project.triageStatus === "skip");
       if (shouldClearSkipTriage) {
         restoredNoteDraft = {
-          text: note?.text || project.note || "",
+          text: note?.text || (planId === "default" ? project.note : "") || "",
           status: ""
         };
         delete userData.notes[key];
-        project.note = "";
-        project.triageStatus = "";
-        project.noteUpdatedAt = "";
-        removeLatestMemoryEvent(store, fullName, "triage_note");
+        if (planId === "default") {
+          project.note = "";
+          project.triageStatus = "";
+          project.noteUpdatedAt = "";
+        }
+        removeLatestMemoryEvent(store, fullName, "triage_note", planId);
       }
     }
-    project.dismissed = Boolean(dismissed);
-    const saved = save(store);
-    buildLeaderboard("daily", { limit: 20 });
-    const savedProject = saved.projects[key] || project;
-    const result = withComputedUseCase({
-      ...savedProject,
-      dismissed: Boolean(dismissed)
-    });
+    if (planId === "default") project.dismissed = Boolean(dismissed);
+    save(store, { dirtyProjectKeys: [key], leaderboardsChanged: false });
+    buildLeaderboard("daily", { limit: 20, observationPlanId: planId });
+    const result = getProject(fullName, { observationPlanId: planId }) || withComputedUseCase(project);
     if (restoredNoteDraft) {
       result.restoredNoteDraft = restoredNoteDraft;
     }
     return result;
   }
 
-  function dismissedProjectView(store, key, entry = {}) {
+  function dismissedProjectView(store, key, entry = {}, requestedPlanId = "") {
     const project = store.projects[key];
     if (!project) return null;
+    const planId = observationPlanIdFor(store, requestedPlanId, Boolean(String(requestedPlanId || "").trim()));
     const computed = withComputedUseCase(project);
     return {
       fullName: computed.fullName,
@@ -4730,7 +5037,7 @@ function createStorage(filePath) {
       language: computed.language,
       licensePolicy: computed.licensePolicy,
       semantic: computed.semantic || {},
-      negativeLearning: dismissedNegativeLearning(computed, entry, observationPlanMemory(store)),
+      negativeLearning: dismissedNegativeLearning(computed, entry, observationPlanMemory(store, planId)),
       dismissedAt: entry.dismissedAt || "",
       feedback: normalizeDismissedFeedback(entry.feedback || {}),
       feedbackUpdatedAt: entry.feedbackUpdatedAt || ""
@@ -4739,17 +5046,19 @@ function createStorage(filePath) {
 
   function listDismissedProjects() {
     const store = load();
-    const userData = activePlanUserData(store);
+    const planId = activeObservationPlanId(store);
+    const userData = planUserData(store, planId);
     return Object.entries(userData.dismissedProjects || {})
-      .map(([key, entry]) => dismissedProjectView(store, projectKey(key), entry))
+      .map(([key, entry]) => dismissedProjectView(store, projectKey(key), entry, planId))
       .filter(Boolean)
       .sort((a, b) => String(b.dismissedAt || "").localeCompare(String(a.dismissedAt || "")));
   }
 
-  function updateDismissedProjectFeedback(fullName, feedback = {}) {
+  function updateDismissedProjectFeedback(fullName, feedback = {}, options = {}) {
     const store = load();
     const key = projectKey(fullName);
-    const userData = activePlanUserData(store);
+    const planId = observationPlanIdFor(store, options.observationPlanId || "", Boolean(String(options.observationPlanId || "").trim()));
+    const userData = planUserData(store, planId);
     const entry = userData.dismissedProjects?.[key];
     if (!entry) {
       throw new Error("Dismissed project not found");
@@ -4759,7 +5068,7 @@ function createStorage(filePath) {
       throw new Error("Project not found");
     }
     const computed = withComputedUseCase(project);
-    const memory = observationPlanMemory(store);
+    const memory = observationPlanMemory(store, planId);
     if (Array.isArray(entry.reasonLearning?.deltas)) {
       applyReasonCorrectionDeltas(memory, entry.reasonLearning.deltas, -1);
     }
@@ -4791,7 +5100,7 @@ function createStorage(filePath) {
           : [])
       ].slice(-120)
     };
-    syncActivePlanMemory(store, memory);
+    syncPlanMemory(store, memory, planId);
     userData.dismissedProjects[key] = {
       ...entry,
       fullName: entry.fullName || fullName,
@@ -4805,9 +5114,9 @@ function createStorage(filePath) {
           }
         : null
     };
-    const saved = save(store);
-    const savedUserData = activePlanUserData(saved);
-    return dismissedProjectView(saved, key, savedUserData.dismissedProjects?.[key] || {});
+    const saved = save(store, { dirtyProjectKeys: [], leaderboardsChanged: false });
+    const savedUserData = planUserData(saved, planId);
+    return dismissedProjectView(saved, key, savedUserData.dismissedProjects?.[key] || {}, planId);
   }
 
   function getGithubActions() {
@@ -4826,24 +5135,26 @@ function createStorage(filePath) {
       ...patch,
       updatedAt: new Date().toISOString()
     };
-    save(store);
+    save(store, { dirtyProjectKeys: [], leaderboardsChanged: false });
     return userData.githubActions[key];
   }
 
-  function setNote(fullName, text, status = "") {
+  function setNote(fullName, text, status = "", options = {}) {
     const store = load();
     const key = projectKey(fullName);
-    const userData = activePlanUserData(store);
+    const planId = observationPlanIdFor(store, options.observationPlanId || "", Boolean(String(options.observationPlanId || "").trim()));
+    const userData = planUserData(store, planId);
     const nextText = String(text || "").slice(0, 4000);
     const nextStatus = String(status || "").slice(0, 80);
     if (!nextText && !nextStatus) {
       delete userData.notes[key];
-      if (store.projects[key]) {
+      if (store.projects[key] && planId === "default") {
         store.projects[key].note = "";
         store.projects[key].triageStatus = "";
         store.projects[key].noteUpdatedAt = "";
       }
-      return save(store).projects[key] || null;
+      save(store, { dirtyProjectKeys: [key], leaderboardsChanged: false });
+      return getProject(fullName, { observationPlanId: planId });
     }
     userData.notes[key] = {
       fullName,
@@ -4851,13 +5162,16 @@ function createStorage(filePath) {
       status: nextStatus,
       updatedAt: new Date().toISOString()
     };
-    if (store.projects[key]) {
+    if (store.projects[key] && planId === "default") {
       store.projects[key].note = userData.notes[key].text;
       store.projects[key].triageStatus = userData.notes[key].status;
       store.projects[key].noteUpdatedAt = userData.notes[key].updatedAt;
-      rememberProject(store, withComputedUseCase(store.projects[key]), "triage-note");
+      rememberProject(store, withComputedUseCase(store.projects[key]), "triage-note", undefined, planId);
+    } else if (store.projects[key]) {
+      rememberProject(store, withComputedUseCase(store.projects[key]), "triage-note", undefined, planId);
     }
-    return save(store).projects[key] || null;
+    save(store, { dirtyProjectKeys: [key], leaderboardsChanged: false });
+    return getProject(fullName, { observationPlanId: planId });
   }
 
   function setAnalysis(fullName, result = {}, meta = {}) {
@@ -4867,7 +5181,7 @@ function createStorage(filePath) {
       throw new Error("Project not found");
     }
     const now = new Date().toISOString();
-    const planId = meta.observationPlanId || activeObservationPlanId(store);
+    const planId = observationPlanIdFor(store, meta.observationPlanId || "", Boolean(String(meta.observationPlanId || "").trim()));
     const userData = planUserData(store, planId);
     userData.analysis[key] = {
       fullName,
@@ -4880,17 +5194,20 @@ function createStorage(filePath) {
       updatedAt: now,
       runCount: Number(userData.analysis[key]?.runCount || 0) + 1
     };
-    store.projects[key].analysis = userData.analysis[key];
+    if (planId === "default") store.projects[key].analysis = userData.analysis[key];
     appendMemoryEvent(store, store.projects[key], "ai_analyze", {
       source: meta.provider || "llm",
       observationPlanId: planId
     });
-    const saved = save(store);
-    buildLeaderboard("daily", { limit: 20 });
-    return withComputedUseCase({
-      ...saved.projects[key],
-      analysis: normalizePlanUserData(saved.observationPlans?.[planId]?.userData || {}).analysis?.[key] || null
-    });
+    save(store, { dirtyProjectKeys: [key], leaderboardsChanged: false });
+    buildLeaderboard("daily", { limit: 20, observationPlanId: planId });
+    return getProject(fullName, { observationPlanId: planId });
+  }
+
+  function latestScanForPlan(planId = "") {
+    const store = load();
+    const target = String(planId || "").trim() || activeObservationPlanId(store);
+    return cloneJson(latestScanInStore(store, target), null);
   }
 
   function summary(filters = {}) {
@@ -4905,6 +5222,9 @@ function createStorage(filePath) {
     }
     const planId = activeObservationPlanId(store);
     const plan = store.observationPlans?.[planId] || store.observationPlans?.default || null;
+    // Scans belong to the plan that produced them: switching plans must not
+    // report another plan's scan as this plan's latest run.
+    const planScans = (store.scans || []).filter((scan) => scanPlanId(scan) === planId).slice(0, 10);
     const memory = observationPlanMemory(store);
     const allProjects = projectItems(store, planId, plan);
     const totalProjects = allProjects.length;
@@ -4930,23 +5250,16 @@ function createStorage(filePath) {
       if (!value || value === "all") return projects;
       return projectPool(store, { ...semanticBaseFilters, [filterKey]: "all" }, "all").items;
     };
-    const semanticFilters = {
-      problem: countSemanticFilterKind(
-        semanticProjectsFor("semanticProblem"),
-        memory,
-        "problem"
-      ),
-      audience: countSemanticFilterKind(
-        semanticProjectsFor("semanticAudience"),
-        memory,
-        "audience"
-      ),
-      shape: countSemanticFilterKind(
-        semanticProjectsFor("semanticShape"),
-        memory,
-        "shape"
-      )
-    };
+    const hasSemanticFilter = ["semanticProblem", "semanticAudience", "semanticShape"].some(
+      (key) => filters?.[key] && filters[key] !== "all"
+    );
+    const semanticFilters = hasSemanticFilter
+      ? {
+          problem: countSemanticFilterKind(semanticProjectsFor("semanticProblem"), memory, "problem"),
+          audience: countSemanticFilterKind(semanticProjectsFor("semanticAudience"), memory, "audience"),
+          shape: countSemanticFilterKind(semanticProjectsFor("semanticShape"), memory, "shape")
+        }
+      : countSemanticFilters(projects, memory);
     const semanticCatalog = countSemanticFilters(allProjects, memory);
     const byCategory = {};
     const byLicense = {};
@@ -5127,8 +5440,9 @@ function createStorage(filePath) {
       poolLimit: pool.limit,
       poolSort: pool.sort,
       watched: Object.keys(userData.watchlist || {}).length,
-      scans: store.scans.slice(0, 10),
-      lastScan: store.scans[0] || null,
+      scans: planScans,
+      lastScan: planScans[0] || null,
+      hasScan: planScans.length > 0,
       byCategory,
       byLicense,
       byRisk,
@@ -5159,7 +5473,7 @@ function createStorage(filePath) {
         seenToday,
         licenseReview,
         highTrend,
-        scanErrors: store.scans[0]?.errors || []
+        scanErrors: planScans[0]?.errors || []
       },
       top
     };
@@ -5194,11 +5508,11 @@ function createStorage(filePath) {
         const note = userData.notes?.[key] || {};
         return withComputedUseCase({
           ...project,
-          note: note.text || project.note || "",
-          triageStatus: note.status || project.triageStatus || "",
-          noteUpdatedAt: note.updatedAt || project.noteUpdatedAt || "",
+          note: note.text || (planId === "default" ? project.note : "") || "",
+          triageStatus: note.status || (planId === "default" ? project.triageStatus : "") || "",
+          noteUpdatedAt: note.updatedAt || (planId === "default" ? project.noteUpdatedAt : "") || "",
           watched: Boolean(userData.watchlist?.[key]),
-          analysis: userData.analysis?.[key] || project.analysis || null,
+          analysis: userData.analysis?.[key] || (planId === "default" ? project.analysis : null) || null,
           dismissed: Boolean(userData.dismissedProjects?.[key])
         });
       });
@@ -5274,7 +5588,7 @@ function createStorage(filePath) {
         observationPlan: result.observationPlan,
         items: result.items
       };
-      save(store);
+      save(store, { dirtyProjectKeys: [], leaderboardsChanged: true });
     }
 
     rememberLeaderboardCache(cacheKey, result);
@@ -5296,11 +5610,12 @@ function createStorage(filePath) {
       throw new Error("Project not found");
     }
 
-    rememberProject(store, withComputedUseCase(project), `leaderboard-${feedback}`);
-    const saved = save(store);
-    buildLeaderboard("daily", { limit: 20 });
+    const planId = activeObservationPlanId(store);
+    rememberProject(store, withComputedUseCase(project), `leaderboard-${feedback}`, undefined, planId);
+    const saved = save(store, { dirtyProjectKeys: [], leaderboardsChanged: false });
+    buildLeaderboard("daily", { limit: 20, observationPlanId: planId });
     return {
-      memory: observationPlanMemory(saved)
+      memory: observationPlanMemory(saved, planId)
     };
   }
 
@@ -5358,7 +5673,7 @@ function createStorage(filePath) {
     memory.events = [entry, ...(memory.events || [])].slice(0, Number(context.rawEventLimit || 300));
     compactMemoryContextInPlace(memory, { force: false });
     syncActivePlanMemory(store, enforceManualFloors(memory));
-    const saved = save(store);
+    const saved = save(store, { dirtyProjectKeys: [], leaderboardsChanged: false });
     buildLeaderboard("daily", { limit: 20 });
     return observationPlanMemory(saved);
   }
@@ -5379,7 +5694,7 @@ function createStorage(filePath) {
       memory.antiBubble.noveltyRatio = Math.max(0.05, memory.antiBubble.noveltyRatio);
     }
     syncActivePlanMemory(store, enforceManualFloors(memory));
-    const saved = save(store);
+    const saved = save(store, { dirtyProjectKeys: [], leaderboardsChanged: false });
     buildLeaderboard("daily", { limit: 20 });
     return observationPlanMemory(saved);
   }
@@ -5391,8 +5706,10 @@ function createStorage(filePath) {
 
   function clearMemoryEvents(range = "1d") {
     const store = load();
-    const memory = observationPlanMemory(store);
-    const userData = activePlanUserData(store);
+    const planId = activeObservationPlanId(store);
+    const isDefaultPlan = planId === "default";
+    const memory = observationPlanMemory(store, planId);
+    const userData = planUserData(store, planId);
     const normalizedRange = String(range || "1d");
     const removeAll = normalizedRange === "all";
     const duration = MEMORY_CLEAR_RANGES[normalizedRange];
@@ -5417,7 +5734,7 @@ function createStorage(filePath) {
         const type = event.type || legacyMemoryEventType(event.reason);
         if (type === "manual_memory_edit") continue;
         const project = store.projects[projectKey(event.fullName)];
-        if (project) rollbackMemorySignal(memory, withComputedUseCase(project), { ...event, type });
+        if (project) rollbackMemorySignal(memory, withComputedUseCase(project), { ...event, type, observationPlanId: planId });
       }
     }
 
@@ -5432,39 +5749,35 @@ function createStorage(filePath) {
     };
 
     const inlineAnalysisKeys = new Set();
-    for (const [key, project] of Object.entries(store.projects || {})) {
-      if (project.analysis?.result || project.analysis?.raw || project.analysis?.updatedAt) {
-        inlineAnalysisKeys.add(key);
+    if (isDefaultPlan) {
+      for (const [key, project] of Object.entries(store.projects || {})) {
+        if (project.analysis?.result || project.analysis?.raw || project.analysis?.updatedAt) inlineAnalysisKeys.add(key);
+        project.analysis = null;
       }
-      project.analysis = null;
     }
     const analysisKeys = new Set([...Object.keys(userData.analysis || {}), ...inlineAnalysisKeys]);
     userData.analysis = {};
     cleared.analysis = analysisKeys.size;
 
     const noteKeys = new Set(Object.keys(userData.notes || {}));
-    for (const [key, project] of Object.entries(store.projects || {})) {
-      if (project.note || project.triageStatus || project.noteUpdatedAt) {
-        noteKeys.add(key);
+    if (isDefaultPlan) {
+      for (const [key, project] of Object.entries(store.projects || {})) {
+        if (project.note || project.triageStatus || project.noteUpdatedAt) noteKeys.add(key);
+        project.note = "";
+        project.triageStatus = "";
+        project.noteUpdatedAt = "";
       }
-      project.note = "";
-      project.triageStatus = "";
-      project.noteUpdatedAt = "";
     }
     userData.notes = {};
     cleared.notes = noteKeys.size;
 
     cleared.favorites = Object.keys(userData.watchlist || {}).length;
     userData.watchlist = {};
-    for (const project of Object.values(store.projects || {})) {
-      project.watched = false;
-    }
+    if (isDefaultPlan) for (const project of Object.values(store.projects || {})) project.watched = false;
 
     cleared.dismissedProjects = Object.keys(userData.dismissedProjects || {}).length;
     userData.dismissedProjects = {};
-    for (const project of Object.values(store.projects || {})) {
-      project.dismissed = false;
-    }
+    if (isDefaultPlan) for (const project of Object.values(store.projects || {})) project.dismissed = false;
 
     cleared.githubActions = Object.keys(userData.githubActions || {}).length;
     userData.githubActions = {};
@@ -5500,11 +5813,14 @@ function createStorage(filePath) {
       eventCounts: eventCounts(memory.events),
       lastEventAt: memory.events[0]?.at || memory.shortTerm[0]?.at || ""
     };
-    syncActivePlanMemory(store, memory);
-    const saved = save(store);
-    buildLeaderboard("daily", { limit: 20 });
+    syncPlanMemory(store, memory, planId);
+    const saved = save(store, {
+      dirtyProjectKeys: isDefaultPlan ? Object.keys(store.projects || {}) : [],
+      leaderboardsChanged: false
+    });
+    buildLeaderboard("daily", { limit: 20, observationPlanId: planId });
     return {
-      memory: observationPlanMemory(saved),
+      memory: observationPlanMemory(saved, planId),
       cleared,
       range: normalizedRange
     };
@@ -5519,7 +5835,7 @@ function createStorage(filePath) {
       keepRecentEvents: options.keepRecentEvents
     });
     syncActivePlanMemory(store, memory);
-    const saved = save(store);
+    const saved = save(store, { dirtyProjectKeys: [], leaderboardsChanged: false });
     const savedMemory = observationPlanMemory(saved);
     return {
       compacted: result.compacted,
@@ -5539,7 +5855,7 @@ function createStorage(filePath) {
       ...options,
       source: options.source || "ui"
     });
-    const saved = save(store);
+    const saved = save(store, { dirtyProjectKeys: [], leaderboardsChanged: false });
     buildLeaderboard("daily", { limit: 20 });
     return observationPlanMemory(saved);
   }
@@ -5567,7 +5883,7 @@ function createStorage(filePath) {
       ].slice(0, 30)
     };
     syncActivePlanMemory(store, memory);
-    const saved = save(store);
+    const saved = save(store, { dirtyProjectKeys: [], leaderboardsChanged: false });
     return observationPlanMemory(saved).harness;
   }
 
@@ -5591,7 +5907,7 @@ function createStorage(filePath) {
       }
     };
     syncActivePlanMemory(store, memory);
-    const saved = save(store);
+    const saved = save(store, { dirtyProjectKeys: [], leaderboardsChanged: false });
     buildLeaderboard("daily", { limit: 20 });
     return observationPlanMemory(saved);
   }
@@ -5627,13 +5943,13 @@ function createStorage(filePath) {
           if (provider.clearApiKey) {
             apiKey = "";
           }
-          return {
+          return normalizeDeepSeekProvider({
             ...previous,
             ...provider,
             apiKey,
             clearApiKey: undefined,
             enabled: Boolean(provider.enabled)
-          };
+          });
         })
       : store.settings.llmProviders;
 
@@ -5662,7 +5978,7 @@ function createStorage(filePath) {
       llmProviders: providers
     };
 
-    save(store);
+    save(store, { dirtyProjectKeys: [], leaderboardsChanged: false });
     return getSettings(false);
   }
 
@@ -5689,6 +6005,7 @@ function createStorage(filePath) {
     importObservationPlans,
     importPortableData,
     leaderboardArchives,
+    latestScanForPlan,
     listDismissedProjects,
     listObservationPlans,
     listProjects,

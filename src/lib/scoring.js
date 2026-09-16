@@ -1,4 +1,4 @@
-const { isNxCadRepository, nxCadMatchedTerms } = require("./domain-relevance");
+const { classifyLicensePolicy } = require("../../public/domain-core");
 
 const CATEGORY_RULES = [
   {
@@ -169,6 +169,31 @@ const CATEGORY_RULES = [
       "incident"
     ],
     productWeight: 1.09
+  },
+  {
+    key: "engineering-design",
+    label: "Engineering Design & Manufacturing",
+    keywords: [
+      "cad",
+      "cam",
+      "cae",
+      "cnc",
+      "parametric",
+      "3d-model",
+      "3d modeling",
+      "mechanical",
+      "manufacturing",
+      "geometry",
+      "mesh",
+      "finite-element",
+      "bim",
+      "dwg",
+      "dxf",
+      "iges",
+      "step",
+      "stl"
+    ],
+    productWeight: 1.08
   },
   {
     key: "frontend-creative",
@@ -387,6 +412,21 @@ const USE_CASE_RULES = [
     summaryZh: "面向终端用户的桌面或移动应用，可评估成独立工具产品",
     summaryEn: "End-user desktop or mobile app that can become a standalone tool",
     patterns: [/desktop app/i, /mobile app/i, /electron/i, /tauri/i, /react native/i, /flutter/i]
+  },
+  {
+    key: "engineering-design-automation",
+    label: "Engineering design automation",
+    labelZh: "工程设计自动化",
+    summaryZh: "围绕 CAD/CAM/CAE、制造、模型转换或工程插件构建自动化工作流",
+    summaryEn: "Automate CAD/CAM/CAE, manufacturing, model conversion, or engineering plugin workflows",
+    patterns: [
+      /\b(?:cad|cam|cae|cnc)\b/i,
+      /computer[-\s]?aided/i,
+      /parametric (?:design|model)/i,
+      /mechanical (?:design|engineering)/i,
+      /(?:dwg|dxf|iges|step|stl) (?:viewer|editor|converter|parser)/i,
+      /manufacturing automation/i
+    ]
   },
   {
     key: "browser-automation",
@@ -638,51 +678,6 @@ const USE_CASE_RULES = [
   }
 ];
 
-const PERMISSIVE_COMMERCIAL = new Set([
-  "mit",
-  "apache-2.0",
-  "bsd-2-clause",
-  "bsd-3-clause",
-  "isc",
-  "unlicense",
-  "0bsd",
-  "zlib"
-]);
-
-const CONDITIONAL_COMMERCIAL = new Set([
-  "mpl-2.0",
-  "lgpl-2.1",
-  "lgpl-2.1-only",
-  "lgpl-2.1-or-later",
-  "lgpl-3.0",
-  "lgpl-3.0-only",
-  "lgpl-3.0-or-later",
-  "epl-2.0",
-  "eupl-1.2",
-  "cc-by-4.0"
-]);
-
-const DISTRIBUTION_COPYLEFT = new Set([
-  "gpl-2.0",
-  "gpl-2.0-only",
-  "gpl-2.0-or-later",
-  "gpl-3.0",
-  "gpl-3.0-only",
-  "gpl-3.0-or-later"
-]);
-
-const NETWORK_COPYLEFT = new Set([
-  "agpl-3.0",
-  "agpl-3.0-only",
-  "agpl-3.0-or-later",
-  "sspl-1.0",
-  "osl-3.0"
-]);
-
-const RESTRICTED_NONCOMMERCIAL = new Set([
-  "cc-by-nc-4.0"
-]);
-
 const KEYWORD_WEIGHTS = {
   "product-starters": {
     starter: 5,
@@ -913,26 +908,6 @@ function keywordMatches(haystack, keyword) {
   return haystack.includes(normalized);
 }
 
-function nxCadCategory(repo) {
-  return {
-    key: "engineering-cad-nx",
-    label: "Engineering CAD & NX Automation",
-    productWeight: 1.18,
-    matchedKeywords: nxCadMatchedTerms(repo).slice(0, 6)
-  };
-}
-
-function nxCadUseCase() {
-  return {
-    key: "engineering-cad-nx-automation",
-    label: "Engineering CAD/NX automation",
-    labelZh: "工程 CAD/NX 自动化",
-    labelEn: "Engineering CAD/NX automation",
-    summaryZh: "围绕 Siemens NX、NXOpen、UGOpen、CAM 后处理或 CAD 模型转换的工程自动化项目",
-    summaryEn: "Automate Siemens NX, NXOpen, UGOpen, CAM postprocessing, or CAD model conversion workflows"
-  };
-}
-
 function scoreSignalRules(haystack, rules, maxScore) {
   const matched = [];
   let score = 0;
@@ -978,10 +953,6 @@ function productizationSignals(repo, category) {
 }
 
 function classifyRepository(repo) {
-  if (isNxCadRepository(repo)) {
-    return nxCadCategory(repo);
-  }
-
   const haystack = normalizeText(repo);
   const matches = CATEGORY_RULES.map((rule) => {
     const matchedKeywords = rule.keywords.filter((keyword) => keywordMatches(haystack, keyword));
@@ -1011,10 +982,6 @@ function classifyRepository(repo) {
 }
 
 function inferUseCase(repo, category = null) {
-  if (category?.key === "engineering-cad-nx" || isNxCadRepository(repo)) {
-    return nxCadUseCase();
-  }
-
   const haystack = normalizeText(repo);
   const match = USE_CASE_RULES.find((rule) => rule.patterns.some((pattern) => pattern.test(haystack)));
   if (match) {
@@ -1085,6 +1052,14 @@ function inferUseCase(repo, category = null) {
       summaryZh: "安全检测、隐私保护、审计或合规治理",
       summaryEn: "Security checks, privacy protection, audit, or compliance"
     },
+    "engineering-design": {
+      key: "engineering-design-automation",
+      label: "Engineering design automation",
+      labelZh: "工程设计自动化",
+      labelEn: "Engineering design automation",
+      summaryZh: "围绕工程设计、制造、模型转换或插件构建自动化工作流",
+      summaryEn: "Automate engineering design, manufacturing, model conversion, or plugin workflows"
+    },
     "frontend-creative": {
       key: "frontend-creative",
       label: "Frontend creative",
@@ -1125,7 +1100,6 @@ function inferUseCase(repo, category = null) {
       summaryZh: "特定行业场景的业务流程或自动化问题",
       summaryEn: "Industry-specific workflows or automation problems"
 	    },
-    "engineering-cad-nx": nxCadUseCase(),
     "systems-runtime-edge": {
       key: "systems-runtime-edge",
       label: "Systems and edge",
@@ -1155,112 +1129,7 @@ function inferUseCase(repo, category = null) {
 }
 
 function getLicensePolicy(license) {
-  const key = license?.spdxId || license?.spdx_id || license?.key || "NOASSERTION";
-  const normalized = String(key || "NOASSERTION").toLowerCase();
-  const name = license?.name || key || "No license detected";
-
-  if (!license || normalized === "noassertion" || normalized === "other") {
-    return {
-      key: normalized,
-      name,
-      bucket: "unknown-no-license",
-      label: "No license: monitor only",
-      labelZh: "无许可：仅监控",
-      labelEn: "No license: monitor only",
-      risk: 82,
-      practiceBoundary: "Monitor and study direction only. Do not copy, modify, or redistribute code before legal review.",
-      practiceBoundaryZh: "只能监控和研究方向。未经人工确认前不要复制、修改或分发代码。",
-      note: "No recognized SPDX license was detected. GitHub public visibility does not grant reuse rights."
-    };
-  }
-
-  if (PERMISSIVE_COMMERCIAL.has(normalized)) {
-    return {
-      key: normalized,
-      name,
-      bucket: "permissive-commercial",
-      label: "Low-friction license",
-      labelZh: "低摩擦许可",
-      labelEn: "Low-friction license",
-      risk: 14,
-      practiceBoundary: "Deeper adoption is usually practical with notice preservation.",
-      practiceBoundaryZh: "通常便于深入采用或集成，但要保留版权声明和许可文本。",
-      note: "Keep copyright notices and license text."
-    };
-  }
-
-  if (CONDITIONAL_COMMERCIAL.has(normalized)) {
-    return {
-      key: normalized,
-      name,
-      bucket: "conditional-commercial",
-      label: "License with obligations",
-      labelZh: "需履约许可",
-      labelEn: "License with obligations",
-      risk: 46,
-      practiceBoundary: "Use with architectural separation and license-specific obligations.",
-      practiceBoundaryZh: "可以考虑深入采用，但要按许可证履约，尤其注意文件级开源、链接、署名或再分发义务。",
-      note: "Use may be possible, but redistribution obligations need review."
-    };
-  }
-
-  if (DISTRIBUTION_COPYLEFT.has(normalized)) {
-    return {
-      key: normalized,
-      name,
-      bucket: "distribution-copyleft",
-      label: "Distribution may require source release",
-      labelZh: "分发需开源",
-      labelEn: "Distribution may require source release",
-      risk: 70,
-      practiceBoundary: "Distribution may require source release; review obligations before deeper adoption.",
-      practiceBoundaryZh: "如果分发衍生软件，通常要承担同许可证开源义务；深入采用前需复核边界。",
-      note: "Treat as high-friction for closed-source distribution."
-    };
-  }
-
-  if (NETWORK_COPYLEFT.has(normalized)) {
-    return {
-      key: normalized,
-      name,
-      bucket: "network-copyleft",
-      label: "SaaS source-release risk",
-      labelZh: "SaaS 高风险",
-      labelEn: "SaaS source-release risk",
-      risk: 88,
-      practiceBoundary: "Monitor and study behavior first. Avoid service wrapping without legal review.",
-      practiceBoundaryZh: "网络服务也可能触发源码开放义务。适合先监控和研究，不宜未经复核直接封装服务。",
-      note: "Network copyleft is high-friction for hosted services."
-    };
-  }
-
-  if (RESTRICTED_NONCOMMERCIAL.has(normalized)) {
-    return {
-      key: normalized,
-      name,
-      bucket: "restricted-noncommercial",
-      label: "Restricted use",
-      labelZh: "受限用途",
-      labelEn: "Restricted use",
-      risk: 90,
-      practiceBoundary: "Monitor only unless the exact license grants your intended use.",
-      practiceBoundaryZh: "默认仅监控。除非人工确认许可允许你的用途，否则不要深入采用。",
-      note: "Some intended uses may be prohibited or restricted."
-    };
-  }
-
-  return {
-    key: normalized,
-    name,
-    bucket: "manual-review",
-    label: "Manual review first",
-    labelZh: "先人工复核",
-    labelEn: "Manual review first",
-    risk: 58,
-    practiceBoundary: "Monitor and review exact license text before copying or redistributing.",
-    practiceBoundaryZh: "可以监控，但复制、修改或分发前必须人工阅读完整许可文本。",
-    note: "Recognized as a license, but not in the low-risk allowlist."
-  };
+  return classifyLicensePolicy(license);
 }
 
 function scoreRepository(repo, previous = null, externalSignals = []) {

@@ -1,13 +1,14 @@
 (function () {
   const DB_NAME = "starvault-imprint";
-  const DB_VERSION = 4;
+  const DB_VERSION = 5;
   const STORES = {
     kv: "kv",
     meta: "meta",
     projects: "projects",
     plans: "plans",
     scans: "scans",
-    leaderboards: "leaderboards"
+    leaderboards: "leaderboards",
+    taskArtifacts: "taskArtifacts"
   };
   const SNAPSHOT_KEY = "localSnapshot";
   const SNAPSHOT_META_KEY = "localSnapshotMeta";
@@ -23,9 +24,29 @@
   let persistedCoreHash = "";
   let cachedSnapshotHasProjects = false;
   let cachedSnapshotHasLeaderboards = false;
+  let cachedProjectsByPlan = new Map();
+  let persistenceRequest = null;
 
   function isSupported() {
     return typeof window !== "undefined" && typeof window.indexedDB !== "undefined";
+  }
+
+  async function requestPersistentStorage() {
+    if (persistenceRequest) return persistenceRequest;
+    persistenceRequest = (async () => {
+      const storage = window.navigator?.storage;
+      if (!storage?.persisted) return { supported: false, persisted: false };
+      const alreadyPersisted = await storage.persisted();
+      const persisted = alreadyPersisted || (storage.persist ? await storage.persist() : false);
+      const estimate = storage.estimate ? await storage.estimate() : {};
+      return {
+        supported: true,
+        persisted: Boolean(persisted),
+        usage: Number(estimate.usage || 0),
+        quota: Number(estimate.quota || 0)
+      };
+    })().catch(() => ({ supported: true, persisted: false, usage: 0, quota: 0 }));
+    return persistenceRequest;
   }
 
   function requestToPromise(request) {
@@ -45,6 +66,15 @@
 
   function stableJson(value) {
     return JSON.stringify(value ?? null);
+  }
+
+  function cloneValue(value, fallback = null) {
+    try {
+      if (typeof structuredClone === "function") return structuredClone(value);
+      return JSON.parse(JSON.stringify(value ?? fallback));
+    } catch {
+      return fallback;
+    }
   }
 
   function projectPlanIds(project = {}) {
@@ -116,7 +146,7 @@
   function snapshotMeta(snapshot) {
     const store = snapshot?.store || {};
     return {
-      storageSchema: "starvault-indexeddb/v4",
+      storageSchema: "starvault-indexeddb/v5",
       schema: snapshot?.schema || "",
       exportedAt: snapshot?.exportedAt || "",
       savedAt: new Date().toISOString(),
@@ -169,6 +199,10 @@
       leaderboards.createIndex("planId", "planId");
       leaderboards.createIndex("date", "date");
     }
+    const taskArtifacts = db.objectStoreNames.contains(STORES.taskArtifacts)
+      ? upgradeTransaction?.objectStore(STORES.taskArtifacts)
+      : db.createObjectStore(STORES.taskArtifacts, { keyPath: "id" });
+    if (taskArtifacts) ensureIndex(taskArtifacts, "taskId", "taskId");
   }
 
   function backfillProjectScopes(upgradeTransaction) {
@@ -189,23 +223,37 @@
   }
 
   function cachePersistedState(snapshot, options = {}) {
-    cachedSnapshot = snapshot;
+    cachedSnapshot = cloneValue(snapshot, snapshot);
     cachedSnapshotHasProjects = options.hasProjects !== false;
     cachedSnapshotHasLeaderboards = options.hasLeaderboards !== false;
     if (cachedSnapshotHasProjects) {
       persistedProjectHashes = new Map(
-        Object.entries(snapshot?.store?.projects || {}).map(([key, project]) => [key, stableJson(project)])
+        Object.entries(cachedSnapshot?.store?.projects || {}).map(([key, project]) => [key, stableJson(project)])
       );
+      cachedProjectsByPlan = new Map();
+      for (const project of Object.values(cachedSnapshot?.store?.projects || {})) {
+        const planIds = projectPlanIds(project);
+        for (const planId of planIds.length ? planIds : ["default"]) {
+          const list = cachedProjectsByPlan.get(planId) || [];
+          list.push(project);
+          cachedProjectsByPlan.set(planId, list);
+        }
+      }
+    } else {
+      // A core-only read must never reuse a project-by-plan result built from
+      // an earlier full snapshot. The records remain in IndexedDB and will be
+      // queried again on demand.
+      cachedProjectsByPlan = new Map();
     }
     persistedPlanHashes = new Map(
-      Object.entries(snapshot?.store?.observationPlans || {}).map(([id, plan]) => [id, stableJson(plan)])
+      Object.entries(cachedSnapshot?.store?.observationPlans || {}).map(([id, plan]) => [id, stableJson(plan)])
     );
     persistedScanHashes = new Map(
-      (snapshot?.store?.scans || []).map((scan) => [String(scan.id || ""), stableJson(scan)])
+      (cachedSnapshot?.store?.scans || []).map((scan) => [String(scan.id || ""), stableJson(scan)])
     );
     if (cachedSnapshotHasLeaderboards) {
       persistedLeaderboardHashes = new Map(
-        leaderboardRecords(snapshot?.store?.leaderboards || {}).map((record) => [record.id, stableJson(record.value)])
+        leaderboardRecords(cachedSnapshot?.store?.leaderboards || {}).map((record) => [record.id, stableJson(record.value)])
       );
     }
     persistedCoreHash = stableJson(snapshotCore(snapshot));
@@ -282,14 +330,17 @@
     await transactionDone(tx);
 
     const previousSnapshot = cachedSnapshot;
-    cachedSnapshot = snapshot;
+    const cachedNextSnapshot = cloneValue(snapshot, snapshot);
+    cachedSnapshot = cachedNextSnapshot;
     if (!preserveProjects) {
       persistedProjectHashes = nextProjectHashes;
       cachedSnapshotHasProjects = true;
+      cachedProjectsByPlan = new Map();
     } else if (cachedSnapshotHasProjects && previousSnapshot?.store?.projects) {
       cachedSnapshot.store.projects = previousSnapshot.store.projects;
     } else {
       cachedSnapshotHasProjects = false;
+      cachedProjectsByPlan = new Map();
     }
     if (!preserveLeaderboards) {
       persistedLeaderboardHashes = nextLeaderboardHashes;
@@ -303,6 +354,10 @@
     persistedScanHashes = nextScanHashes;
     persistedCoreHash = coreHash;
     return snapshotMeta(snapshot);
+  }
+
+  function invalidateProjectPlanCache() {
+    cachedProjectsByPlan = new Map();
   }
 
   async function migrateLegacySnapshot(db) {
@@ -355,6 +410,7 @@
             await migrateLegacySnapshot(db);
             await migrateLegacyLeaderboards(db);
             resolve(db);
+            requestPersistentStorage().catch(() => {});
           } catch (error) {
             db.close();
             dbPromise = null;
@@ -392,6 +448,58 @@
     await transactionDone(tx);
   }
 
+  function taskArtifactId(taskId, key) {
+    return `${encodeURIComponent(String(taskId || ""))}|${encodeURIComponent(String(key || ""))}`;
+  }
+
+  async function putTaskArtifact(taskId, key, value) {
+    const safeTaskId = String(taskId || "");
+    const safeKey = String(key || "");
+    if (!safeTaskId || !safeKey) throw new Error("Task artifact requires a task id and key");
+    const db = await openDb();
+    const updatedAt = new Date().toISOString();
+    const tx = db.transaction(STORES.taskArtifacts, "readwrite");
+    tx.objectStore(STORES.taskArtifacts).put({
+      id: taskArtifactId(safeTaskId, safeKey),
+      taskId: safeTaskId,
+      key: safeKey,
+      value,
+      updatedAt
+    });
+    await transactionDone(tx);
+    return { taskId: safeTaskId, key: safeKey, updatedAt };
+  }
+
+  async function getTaskArtifacts(taskId) {
+    const safeTaskId = String(taskId || "");
+    if (!safeTaskId) return {};
+    const db = await openDb();
+    const tx = db.transaction(STORES.taskArtifacts, "readonly");
+    const keyRange = (window.IDBKeyRange || globalThis.IDBKeyRange).only(safeTaskId);
+    const records = await requestToPromise(tx.objectStore(STORES.taskArtifacts).index("taskId").getAll(keyRange));
+    await transactionDone(tx);
+    return Object.fromEntries(records.map((record) => [record.key, cloneValue(record.value, null)]));
+  }
+
+  async function clearTaskArtifacts(taskId) {
+    const safeTaskId = String(taskId || "");
+    if (!safeTaskId) return { deleted: 0 };
+    const db = await openDb();
+    const tx = db.transaction(STORES.taskArtifacts, "readwrite");
+    const keyRange = (window.IDBKeyRange || globalThis.IDBKeyRange).only(safeTaskId);
+    const request = tx.objectStore(STORES.taskArtifacts).index("taskId").openCursor(keyRange);
+    let deleted = 0;
+    request.onsuccess = () => {
+      const cursor = request.result;
+      if (!cursor) return;
+      cursor.delete();
+      deleted += 1;
+      cursor.continue();
+    };
+    await transactionDone(tx);
+    return { deleted };
+  }
+
   async function getSnapshot(options = {}) {
     const includeProjects = options.includeProjects !== false;
     const includeLeaderboards = options.includeLeaderboards !== false;
@@ -400,7 +508,11 @@
       (!includeProjects || cachedSnapshotHasProjects) &&
       (!includeLeaderboards || cachedSnapshotHasLeaderboards)
     ) {
-      return cachedSnapshot;
+      if (!includeProjects) invalidateProjectPlanCache();
+      const result = cloneValue(cachedSnapshot, null);
+      if (result?.store && includeProjects === false) result.store.projects = {};
+      if (result?.store && includeLeaderboards === false) result.store.leaderboards = { daily: {}, byPlan: {} };
+      return result;
     }
     const db = await openDb();
     const tx = db.transaction([STORES.meta, STORES.projects, STORES.plans, STORES.scans, STORES.leaderboards], "readonly");
@@ -421,7 +533,7 @@
     snapshot.store.scans = scanRecords.map((record) => record.value).sort((a, b) => String(b.at || "").localeCompare(String(a.at || "")));
     snapshot.store.leaderboards = includeLeaderboards ? assembleLeaderboards(leaderboardEntries) : { daily: {}, byPlan: {} };
     cachePersistedState(snapshot, { hasProjects: includeProjects, hasLeaderboards: includeLeaderboards });
-    return snapshot;
+    return cloneValue(snapshot, snapshot);
   }
 
   async function putSnapshot(snapshot, options = {}) {
@@ -429,7 +541,11 @@
       throw new Error("Invalid StarVault IndexedDB snapshot");
     }
     const db = await openDb();
-    if (!cachedSnapshot) {
+    if (
+      !cachedSnapshot ||
+      (options.preserveProjects !== true && !cachedSnapshotHasProjects) ||
+      (options.preserveLeaderboards !== true && !cachedSnapshotHasLeaderboards)
+    ) {
       await getSnapshot({
         includeProjects: options.preserveProjects !== true,
         includeLeaderboards: options.preserveLeaderboards !== true
@@ -443,7 +559,7 @@
     const tx = db.transaction(STORES.projects, "readonly");
     const record = await requestToPromise(tx.objectStore(STORES.projects).get(String(key || "").toLowerCase()));
     await transactionDone(tx);
-    return record?.value || null;
+    return cloneValue(record?.value, null);
   }
 
   async function getProjects(keys = []) {
@@ -454,17 +570,44 @@
     const store = tx.objectStore(STORES.projects);
     const records = await Promise.all(uniqueKeys.map((key) => requestToPromise(store.get(key))));
     await transactionDone(tx);
-    return records.filter(Boolean).map((record) => record.value);
+    return records.filter(Boolean).map((record) => cloneValue(record.value, null));
   }
 
   async function getProjectsByPlan(planId = "default") {
+    const safePlanId = String(planId || "default");
+    if (cachedProjectsByPlan.has(safePlanId)) return cachedProjectsByPlan.get(safePlanId).map((project) => cloneValue(project, project));
     const db = await openDb();
     const tx = db.transaction(STORES.projects, "readonly");
     const index = tx.objectStore(STORES.projects).index("scopePlanIds");
-    const keyRange = (window.IDBKeyRange || globalThis.IDBKeyRange).only(String(planId || "default"));
+    const keyRange = (window.IDBKeyRange || globalThis.IDBKeyRange).only(safePlanId);
     const records = await requestToPromise(index.getAll(keyRange));
     await transactionDone(tx);
-    return records.map((record) => record.value);
+    const projects = records.map((record) => cloneValue(record.value, null)).filter(Boolean);
+    cachedProjectsByPlan.set(safePlanId, projects);
+    return projects.map((project) => cloneValue(project, project));
+  }
+
+  async function getProjectPageByPlan(planId = "default", options = {}) {
+    const safePlanId = String(planId || "default");
+    const offset = Math.max(0, Number(options.offset || 0));
+    const limit = Math.max(1, Math.min(500, Number(options.limit || 50)));
+    const db = await openDb();
+    const keyRange = (window.IDBKeyRange || globalThis.IDBKeyRange).only(safePlanId);
+    const tx = db.transaction(STORES.projects, "readonly");
+    const index = tx.objectStore(STORES.projects).index("scopePlanIds");
+    const items = [];
+    const request = index.openCursor(keyRange);
+    let position = 0;
+    request.onsuccess = () => {
+      const cursor = request.result;
+      if (!cursor) return;
+      if (position >= offset && items.length < limit) items.push(cloneValue(cursor.value.value, null));
+      position += 1;
+      cursor.continue();
+    };
+    const totalRequest = index.count(keyRange);
+    const [total] = await Promise.all([requestToPromise(totalRequest), transactionDone(tx)]);
+    return { items, total: Number(total || 0), offset, limit };
   }
 
   async function putProjects(projects = []) {
@@ -473,15 +616,20 @@
     const db = await openDb();
     const tx = db.transaction(STORES.projects, "readwrite");
     const store = tx.objectStore(STORES.projects);
+    const committed = [];
     for (const project of entries) {
       const key = String(project?.fullName || project?.key || "").toLowerCase();
       if (!key) continue;
       store.put(projectRecord(key, project));
-      persistedProjectHashes.set(key, stableJson(project));
-      if (cachedSnapshotHasProjects && cachedSnapshot?.store?.projects) cachedSnapshot.store.projects[key] = project;
+      committed.push([key, project]);
     }
     await transactionDone(tx);
-    return { updated: entries.length };
+    for (const [key, project] of committed) {
+      persistedProjectHashes.set(key, stableJson(project));
+      if (cachedSnapshotHasProjects && cachedSnapshot?.store?.projects) cachedSnapshot.store.projects[key] = cloneValue(project, project);
+    }
+    invalidateProjectPlanCache();
+    return { updated: committed.length };
   }
 
   async function putLeaderboardRecords(records = []) {
@@ -490,6 +638,7 @@
     const db = await openDb();
     const tx = db.transaction(STORES.leaderboards, "readwrite");
     const store = tx.objectStore(STORES.leaderboards);
+    const committed = [];
     for (const record of entries) {
       store.put({
         id: String(record.id),
@@ -498,11 +647,12 @@
         generatedAt: String(record.generatedAt || record.value?.generatedAt || ""),
         value: record.value
       });
-      persistedLeaderboardHashes.set(String(record.id), stableJson(record.value));
+      committed.push(record);
     }
     await transactionDone(tx);
+    for (const record of committed) persistedLeaderboardHashes.set(String(record.id), stableJson(record.value));
     cachedSnapshotHasLeaderboards = false;
-    return { updated: entries.length };
+    return { updated: committed.length };
   }
 
   async function deleteLeaderboardsExcept(ids = []) {
@@ -511,18 +661,20 @@
     const tx = db.transaction(STORES.leaderboards, "readwrite");
     const store = tx.objectStore(STORES.leaderboards);
     let deleted = 0;
+    const deletedIds = [];
     const request = store.openCursor();
     request.onsuccess = () => {
       const cursor = request.result;
       if (!cursor) return;
       if (!retained.has(String(cursor.key))) {
-        persistedLeaderboardHashes.delete(String(cursor.key));
+        deletedIds.push(String(cursor.key));
         cursor.delete();
         deleted += 1;
       }
       cursor.continue();
     };
     await transactionDone(tx);
+    deletedIds.forEach((id) => persistedLeaderboardHashes.delete(id));
     cachedSnapshotHasLeaderboards = false;
     return { deleted, retained: retained.size };
   }
@@ -541,19 +693,24 @@
     const tx = db.transaction(STORES.projects, "readwrite");
     const store = tx.objectStore(STORES.projects);
     let deleted = 0;
+    const deletedKeys = [];
     const request = store.openCursor();
     request.onsuccess = () => {
       const cursor = request.result;
       if (!cursor) return;
       if (!retained.has(String(cursor.key))) {
-        persistedProjectHashes.delete(String(cursor.key));
-        if (cachedSnapshotHasProjects && cachedSnapshot?.store?.projects) delete cachedSnapshot.store.projects[String(cursor.key)];
+        deletedKeys.push(String(cursor.key));
         cursor.delete();
         deleted += 1;
       }
       cursor.continue();
     };
     await transactionDone(tx);
+    for (const key of deletedKeys) {
+      persistedProjectHashes.delete(key);
+      if (cachedSnapshotHasProjects && cachedSnapshot?.store?.projects) delete cachedSnapshot.store.projects[key];
+    }
+    invalidateProjectPlanCache();
     return { deleted, retained: retained.size };
   }
 
@@ -596,6 +753,7 @@
     const existingByKey = new Map(existing.map((record) => [record.key, record.value]));
     const writeTx = db.transaction(STORES.projects, "readwrite");
     const store = writeTx.objectStore(STORES.projects);
+    const committed = new Map();
 
     for (const record of existing) {
       if (incoming.has(record.key)) continue;
@@ -604,12 +762,11 @@
       const hadExplicitMatch = projectPlanIds(record.value).includes(safePlanId);
       if (hadExplicitMatch && remainingPlanIds.length === 0) {
         store.delete(record.key);
-        persistedProjectHashes.delete(record.key);
-        if (cachedSnapshotHasProjects && cachedSnapshot?.store?.projects) delete cachedSnapshot.store.projects[record.key];
+        committed.set(record.key, null);
       } else if (hadExplicitMatch) {
         const updated = { ...record.value, observationPlanMatches: remainingMatches };
         store.put(projectRecord(record.key, updated));
-        persistedProjectHashes.set(record.key, stableJson(updated));
+        committed.set(record.key, updated);
       }
     }
 
@@ -633,11 +790,74 @@
         observationPlanMatches: nextMatches
       };
       store.put(projectRecord(key, updated));
-      persistedProjectHashes.set(key, stableJson(updated));
-      if (cachedSnapshotHasProjects && cachedSnapshot?.store?.projects) cachedSnapshot.store.projects[key] = updated;
+      committed.set(key, updated);
     }
     await transactionDone(writeTx);
+    for (const [key, project] of committed) {
+      if (!project) {
+        persistedProjectHashes.delete(key);
+        if (cachedSnapshotHasProjects && cachedSnapshot?.store?.projects) delete cachedSnapshot.store.projects[key];
+        continue;
+      }
+      persistedProjectHashes.set(key, stableJson(project));
+      if (cachedSnapshotHasProjects && cachedSnapshot?.store?.projects) cachedSnapshot.store.projects[key] = cloneValue(project, project);
+    }
+    invalidateProjectPlanCache();
     return { updated: incoming.size };
+  }
+
+  async function deletePlanData(planId = "") {
+    const safePlanId = String(planId || "");
+    if (!safePlanId || safePlanId === "default") throw new Error("Default observation plan cannot be deleted");
+    const db = await openDb();
+    const readTx = db.transaction(STORES.projects, "readonly");
+    const index = readTx.objectStore(STORES.projects).index("scopePlanIds");
+    const keyRange = (window.IDBKeyRange || globalThis.IDBKeyRange).only(safePlanId);
+    const projectRecords = await requestToPromise(index.getAll(keyRange));
+    await transactionDone(readTx);
+
+    const tx = db.transaction([STORES.projects, STORES.plans, STORES.scans, STORES.leaderboards], "readwrite");
+    const projectStore = tx.objectStore(STORES.projects);
+    for (const record of projectRecords) {
+      const remainingMatches = withoutPlanMatch(record.value, safePlanId);
+      const remainingPlanIds = projectPlanIds({ observationPlanMatches: remainingMatches });
+      if (!remainingPlanIds.length) {
+        projectStore.delete(record.key);
+      } else {
+        const updated = { ...record.value, observationPlanMatches: remainingMatches };
+        projectStore.put(projectRecord(record.key, updated));
+      }
+    }
+    tx.objectStore(STORES.plans).delete(safePlanId);
+    const scanCursor = tx.objectStore(STORES.scans).index("observationPlanId").openCursor((window.IDBKeyRange || globalThis.IDBKeyRange).only(safePlanId));
+    scanCursor.onsuccess = () => {
+      const cursor = scanCursor.result;
+      if (!cursor) return;
+      cursor.delete();
+      cursor.continue();
+    };
+    const leaderboardCursor = tx.objectStore(STORES.leaderboards).index("planId").openCursor((window.IDBKeyRange || globalThis.IDBKeyRange).only(safePlanId));
+    leaderboardCursor.onsuccess = () => {
+      const cursor = leaderboardCursor.result;
+      if (!cursor) return;
+      cursor.delete();
+      cursor.continue();
+    };
+    await transactionDone(tx);
+    // The operation spans projects, plans, scans and leaderboards. Force the
+    // next read to rebuild every in-memory view from the committed transaction
+    // instead of exposing a partially updated cached snapshot.
+    cachedSnapshot = null;
+    cachedSnapshotHasProjects = false;
+    cachedSnapshotHasLeaderboards = false;
+    cachedProjectsByPlan = new Map();
+    persistedProjectHashes = new Map();
+    persistedPlanHashes = new Map();
+    persistedScanHashes = new Map();
+    persistedLeaderboardHashes = new Map();
+    persistedCoreHash = "";
+    invalidateProjectPlanCache();
+    return { planId: safePlanId, affectedProjects: projectRecords.length };
   }
 
   async function countProjects() {
@@ -662,9 +882,13 @@
     return Date.now() - new Date(meta.savedAt).getTime() > Number(minAgeMs || 0);
   }
 
+  async function storageStatus() {
+    return requestPersistentStorage();
+  }
+
   async function clearSnapshot() {
     const db = await openDb();
-    const tx = db.transaction([STORES.meta, STORES.projects, STORES.plans, STORES.scans, STORES.leaderboards], "readwrite");
+    const tx = db.transaction([STORES.meta, STORES.projects, STORES.plans, STORES.scans, STORES.leaderboards, STORES.taskArtifacts], "readwrite");
     tx.objectStore(STORES.meta).delete(CORE_KEY);
     tx.objectStore(STORES.meta).delete(LEGACY_LEADERBOARDS_KEY);
     tx.objectStore(STORES.meta).delete(SNAPSHOT_META_KEY);
@@ -672,10 +896,12 @@
     tx.objectStore(STORES.plans).clear();
     tx.objectStore(STORES.scans).clear();
     tx.objectStore(STORES.leaderboards).clear();
+    tx.objectStore(STORES.taskArtifacts).clear();
     await transactionDone(tx);
     cachedSnapshot = null;
     cachedSnapshotHasProjects = false;
     cachedSnapshotHasLeaderboards = false;
+    cachedProjectsByPlan = new Map();
     persistedProjectHashes = new Map();
     persistedPlanHashes = new Map();
     persistedScanHashes = new Map();
@@ -688,20 +914,27 @@
     getValue,
     putValue,
     removeValue,
+    putTaskArtifact,
+    getTaskArtifacts,
+    clearTaskArtifacts,
     putSnapshot,
     getSnapshot,
     getSnapshotMeta,
     getProject,
     getProjects,
     getProjectsByPlan,
+    getProjectPageByPlan,
     putProjects,
     putLeaderboardRecords,
     deleteProjectsExcept,
     deleteLeaderboardsExcept,
     replaceProjectsForPlan,
+    deletePlanData,
     countProjects,
     countLeaderboards,
     shouldSyncSnapshot,
+    requestPersistentStorage,
+    storageStatus,
     clearSnapshot
   };
 })();
