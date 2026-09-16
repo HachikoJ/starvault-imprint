@@ -27,7 +27,7 @@
 
 静态版的自动化证据：`tests/local-api.test.js` 覆盖快照 schema、25 个唯一公开仓库、无凭据字段、空库首次装载、已有数据跳过、并发只装载一次、Pages 子路径解析、静态部署直接路由 IndexedDB、缺失快照降级，以及对携带凭据字段快照的拒绝；`npm run check:static` 在 Chromium 中用 `/starvault-imprint/` 子路径跑桌面与移动端无后端验收、刷新去重、资源 200 和横向溢出检查；`tests/security-audit.test.js` 覆盖密钥扫描能发现仅存在于 Git 历史的 Token 与敏感路径；`.github/workflows/pages.yml` 在 `main` 推送后跑 `npm run ci`、`npm run check:static` 再发布 `public/`。
 
-线上发布证据：Actions run `35078067145` 的 build 与 deploy 均通过；真实地址返回 200，核心脚本、示例快照、OG 图和 favicon 均返回 200；全新桌面与移动 Chromium 上下文均装载 `demo-content`、25 个项目、20 条榜单和 1 条扫描，横向溢出、console、失败请求与 HTTP 错误均为 0。
+线上发布证据：Actions run `35078067145` 与含返回顶部版本的 run `35079291722` 的 build 与 deploy 均通过；真实地址返回 200，核心脚本、示例快照、OG 图和 favicon 均返回 200；全新桌面与移动 Chromium 上下文均装载 `demo-content`、25 个项目、20 条榜单和 1 条扫描，横向溢出、console、失败请求与 HTTP 错误均为 0，并验证了返回顶部按钮的出现、可聚焦、键盘触发和滚动归零。
 
 ## 本轮整改证据
 
