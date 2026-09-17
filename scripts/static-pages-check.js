@@ -128,7 +128,7 @@ async function readSiteFooter(page) {
   });
 }
 
-function assertSiteFooter(assert, label, footer) {
+function assertSiteFooter(assert, label, footer, language = "zh") {
   const links = footer.links || [];
   const hrefs = links.map((link) => link.href);
   assert(footer.found, `${label} site footer was not rendered`);
@@ -141,7 +141,19 @@ function assertSiteFooter(assert, label, footer) {
     !/ICP|备案|beian/i.test(footer.text) && !hrefs.some((href) => /beian\.miit\.gov\.cn/.test(href)),
     `${label} footer shipped filing info, which is injected per deployment target instead: ${footer.text}`
   );
-  assert(!/©|StarVault Imprint/.test(footer.text), `${label} footer kept the verbose copyright line: ${footer.text}`);
+  if (language === "en") {
+    assert(
+      footer.text.includes("© 2026 StarVault Imprint · MIT open source"),
+      `${label} English footer missed its localized copyright notice: ${footer.text}`
+    );
+    assert(!footer.text.includes("星仓印记"), `${label} English footer retained the Chinese product name: ${footer.text}`);
+  } else {
+    assert(
+      footer.text.includes("© 2026 星仓印记 · MIT 开源"),
+      `${label} Chinese footer missed its localized copyright notice: ${footer.text}`
+    );
+    assert(!footer.text.includes("StarVault Imprint"), `${label} Chinese footer retained the English product name: ${footer.text}`);
+  }
   assert(
     footer.hasDeploymentLinkSlot,
     `${label} footer lost the deployment link slot used to inject target-specific links`
@@ -202,6 +214,15 @@ async function exerciseBackToTop(page) {
   return { ...setup, focused, label, ...settled };
 }
 
+async function switchLanguage(page, language) {
+  if (await page.evaluate(() => document.documentElement.classList.contains("guide-tour-open"))) {
+    await page.keyboard.press("Escape");
+    await page.waitForFunction(() => !document.documentElement.classList.contains("guide-tour-open"));
+  }
+  await page.locator(`[data-language="${language}"]`).click();
+  await page.waitForFunction((nextLanguage) => document.documentElement.lang === nextLanguage, language);
+}
+
 async function main() {
   const { server, requests, port } = await startStaticServer();
   fs.mkdirSync(OUTPUT_DIR, { recursive: true });
@@ -243,7 +264,7 @@ async function main() {
     assert(desktop.consoleErrors.length === 0, `desktop console errors: ${desktop.consoleErrors.join(" | ")}`);
     assert(desktop.failedRequests.length === 0, `desktop failed requests: ${desktop.failedRequests.join(" | ")}`);
     assert(desktop.httpErrors.length === 0, `desktop HTTP errors: ${desktop.httpErrors.join(" | ")}`);
-    assertSiteFooter(assert, "desktop", desktopFooter);
+    assertSiteFooter(assert, "desktop", desktopFooter, "zh");
     assert(desktopFooter.inViewport, "desktop site footer was not visible without scrolling");
     const desktopBackToTop = await exerciseBackToTop(desktop.page);
     evidence.backToTop = { desktop: desktopBackToTop };
@@ -254,6 +275,11 @@ async function main() {
     assert(desktopBackToTop.maxScrollTop <= 8, `desktop back-to-top left scroll offset ${desktopBackToTop.maxScrollTop}`);
     assert(desktopBackToTop.hidden === true, "desktop back-to-top button stayed visible at the top");
     await desktop.page.screenshot({ path: path.join(OUTPUT_DIR, "desktop.png"), fullPage: true });
+    await switchLanguage(desktop.page, "en");
+    const desktopFooterEn = await readSiteFooter(desktop.page);
+    evidence.siteFooter.desktopEnglish = desktopFooterEn.links;
+    assertSiteFooter(assert, "desktop English", desktopFooterEn, "en");
+    await switchLanguage(desktop.page, "zh");
 
     // Reload must not re-seed or duplicate scans and archive entries.
     await desktop.page.reload({ waitUntil: "domcontentloaded" });
@@ -293,7 +319,7 @@ async function main() {
     await mobile.page.waitForTimeout(200);
     const mobileFooter = await readSiteFooter(mobile.page);
     evidence.siteFooter.mobile = mobileFooter.links;
-    assertSiteFooter(assert, "mobile", mobileFooter);
+    assertSiteFooter(assert, "mobile", mobileFooter, "zh");
     assert(mobileFooter.inViewport, "mobile site footer was not visible after scrolling to the page end");
     await mobile.page.screenshot({ path: path.join(OUTPUT_DIR, "mobile.png"), fullPage: true });
     await mobile.context.close();
