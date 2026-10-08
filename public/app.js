@@ -57,6 +57,7 @@ const I18N = {
     totalProjects: "项目总数",
     watchlist: "收藏",
     lastScan: "最近扫描",
+    scanCoverageIncomplete: "检索不完整，已保留旧成员",
     search: "搜索",
     searchPlaceholder: "仓库、主题、语言",
     filterIntent: "筛选意图",
@@ -769,6 +770,7 @@ const I18N = {
     totalProjects: "Total projects",
     watchlist: "Favorites",
     lastScan: "Last scan",
+    scanCoverageIncomplete: "Search incomplete; previous members retained",
     search: "Search",
     searchPlaceholder: "repo, topic, language",
     filterIntent: "Filter intent",
@@ -2778,6 +2780,7 @@ const elements = {
   metricTotal: document.querySelector("#metric-total"),
   metricWatch: document.querySelector("#metric-watch"),
   metricScan: document.querySelector("#metric-scan"),
+  metricScanCoverage: document.querySelector("#metric-scan-coverage"),
   projectCount: document.querySelector("#project-count"),
   projectRows: document.querySelector("#project-rows"),
   detailPanel: document.querySelector("#detail-panel"),
@@ -7197,6 +7200,15 @@ function renderSummary(summary) {
   elements.metricTotal.textContent = fmtNumber(summary.totalProjects);
   elements.metricWatch.textContent = fmtNumber(summary.watched);
   elements.metricScan.textContent = summary.lastScan ? fmtDate(summary.lastScan.at) : "-";
+  if (summary.lastScan?.discoveryCoverage?.complete === false) {
+    elements.metricScan.title = (summary.lastScan.discoveryCoverage.reasons || []).join("\n");
+  } else {
+    elements.metricScan.title = "";
+  }
+  if (elements.metricScanCoverage) {
+    elements.metricScanCoverage.hidden = summary.lastScan?.discoveryCoverage?.complete !== false;
+    elements.metricScanCoverage.textContent = elements.metricScanCoverage.hidden ? "" : t("scanCoverageIncomplete");
+  }
 
   const distribution = summary.distribution || {};
   const coverage = distribution.coverage || {};

@@ -1543,6 +1543,7 @@ async function searchCandidateRepositories(options) {
       try {
         const json = await fetchJson(url.toString(), token);
         const reportedTotal = Number(json?.total_count || 0);
+        if (json?.incomplete_results === true) errors.push({ profile: profile.key, page, message: "GitHub search returned incomplete results" });
         profileTotals.set(profile.key, Math.max(Number(profileTotals.get(profile.key) || 0), reportedTotal));
         for (const item of json.items || []) {
           const normalized = normalizeRepo(item, profile);

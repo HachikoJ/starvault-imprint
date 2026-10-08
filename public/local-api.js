@@ -1023,6 +1023,7 @@
       date: new Date().toISOString().slice(0, 10),
       generatedAt: nowIso(),
       limit,
+      discoveryCoverage: clone((snapshot.store.scans || []).find((scan) => String(scan.observationPlanId || "default") === planId)?.discoveryCoverage),
       memory,
       observationPlan: publicPlan(activePlan(snapshot), snapshot.activeObservationPlanId, false),
       items,
@@ -1827,6 +1828,7 @@
         page: "1"
       });
       const result = await githubFetch(`/search/repositories?${params.toString()}`);
+      if (result?.incomplete_results === true) errors.push("GitHub search returned incomplete results");
       totalCount = Number(result?.total_count || 0);
       let localAccepted = 0;
       for (const repo of result?.items || []) {
@@ -1901,6 +1903,11 @@
       }
       applyBrowserScanArtifact(seen, errors, relaxations, artifact, plan.id);
     }
+    const discoveryCoverage = {
+      complete: errors.length === 0,
+      memberPolicy: errors.length ? "retain" : "replace",
+      reasons: [...errors]
+    };
     if (!seen.size && errors.length) throw new Error(errors[0]);
     const externalArtifactKey = "external-discovery";
     let externalArtifact = checkpoint.externalCompleted ? artifacts[externalArtifactKey] : null;
@@ -1988,7 +1995,7 @@
             complete: false
           };
     }
-    await storage().replaceProjectsForPlan(plan.id, projects);
+    await storage().replaceProjectsForPlan(plan.id, projects, { replace: discoveryCoverage.complete });
     checkpoint = await persistBrowserScanCheckpoint(snapshot, task, checkpoint, { stage: "persisted" });
     const scanId = task ? `browser-scan-${task.id}` : `browser-scan-${Date.now()}`;
     const scan = {
@@ -2002,6 +2009,7 @@
       insertedOrUpdated: seen.size,
       profiles: profiles.map((profile) => profile.key),
       errors,
+      discoveryCoverage,
       // Controlled sparse-domain relaxations actually executed by this scan.
       relaxations
     };

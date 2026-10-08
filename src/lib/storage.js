@@ -4965,6 +4965,7 @@ function createStorage(filePath) {
       githubTrendingFound: scanMeta.githubTrendingFound || 0,
       githubTrendingAdded: scanMeta.githubTrendingAdded || 0,
       errors: scanMeta.errors || [],
+      discoveryCoverage: cloneJson(scanMeta.discoveryCoverage || null, null),
       // Controlled sparse-domain relaxations actually executed during this scan.
       // The saved query is never rewritten; each entry records the extra pass.
       relaxations: Array.isArray(scanMeta.relaxations) ? scanMeta.relaxations : []
@@ -5613,6 +5614,7 @@ function createStorage(filePath) {
       date: dateKey,
       generatedAt: new Date().toISOString(),
       limit,
+      discoveryCoverage: cloneJson(latestScanInStore(store, planId)?.discoveryCoverage || null, null),
       memory,
       observationPlan: observationPlanPublicView(plan, planId, false),
       items: selected.map((project, index) => hydrateLeaderboardRecordState(leaderboardItem(project, index + 1, period, memory, previousRanks), userData)),
@@ -5633,6 +5635,7 @@ function createStorage(filePath) {
         generatedAt: result.generatedAt,
         limit: result.limit,
         observationPlan: result.observationPlan,
+        discoveryCoverage: result.discoveryCoverage,
         items: result.items
       };
       save(store, { dirtyProjectKeys: [], leaderboardsChanged: true });

@@ -2949,6 +2949,11 @@ async function runScan(options = {}) {
     const combined = mergeRepositoryCandidates(result.repositories, trendingResult.repositories, maxRepos);
     const repositories = combined.repositories;
     const scanErrors = [...result.errors, ...(trendingResult.errors || [])];
+    const discoveryCoverage = {
+      complete: scanErrors.length === 0,
+      memberPolicy: scanErrors.length ? "retain" : "replace",
+      reasons: scanErrors.map((error) => String(error.message || error))
+    };
     const preScoredRepositories = repositories.map((repo) => enrichRepository(repo, previous.get(repo.fullName), signalsForRepository(trendingSignals, repo.fullName)));
     const tavilyLimit = Math.max(0, Number(options.tavilyCount ?? 24));
     const exaLimit = Math.max(0, Number(options.exaCount ?? 24));
@@ -3057,9 +3062,10 @@ async function runScan(options = {}) {
         trendLimit,
         githubRateBudget: githubScanBudget,
         errors: scanErrors,
+        discoveryCoverage,
         startedAt,
         taskId: options.taskId || "",
-        replaceObservationPlanMatches: enriched.length > 0 || !scanErrors.length
+        replaceObservationPlanMatches: discoveryCoverage.complete
       });
       saveScanCheckpoint(options.taskId, {
         planId: activePlan.id,

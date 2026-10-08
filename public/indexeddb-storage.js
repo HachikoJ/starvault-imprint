@@ -983,7 +983,7 @@
     );
   }
 
-  async function replaceProjectsForPlan(planId = "default", projects = []) {
+  async function replaceProjectsForPlan(planId = "default", projects = [], options = {}) {
     const safePlanId = String(planId || "default");
     const incoming = new Map(
       (projects || [])
@@ -1007,6 +1007,7 @@
       ]);
       const previousByKey = new Map(keys.map((key, index) => [key, incomingRecords[index]?.value || {}]));
       for (const record of existing) {
+        if (options.replace === false) continue;
         if (incoming.has(record.key)) continue;
         const remainingMatches = withoutPlanMatch(record.value, safePlanId);
         const remainingPlanIds = projectPlanIds({ observationPlanMatches: remainingMatches });
