@@ -53,7 +53,7 @@ process.on("message", message => {
     const result = storage[message.method](...message.args);
     process.send({ id: message.id, result });
   } catch (error) {
-    process.send({ id: message.id, error: { name: error.name, code: error.code, message: error.message } });
+    process.send({ id: message.id, error: { name: error.name, code: error.code, message: error.message, stack: error.stack } });
   }
 });
 `;

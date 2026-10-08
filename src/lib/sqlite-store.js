@@ -123,13 +123,23 @@ function coreStore(store) {
 }
 
 function createSchema(db) {
-  db.exec(`
-    PRAGMA busy_timeout = 5000;
-    PRAGMA journal_mode = WAL;
-    PRAGMA synchronous = NORMAL;
-    PRAGMA foreign_keys = ON;
-    PRAGMA wal_autocheckpoint = 1000;
-
+  db.exec("PRAGMA busy_timeout = 5000");
+  // Concurrent cold connections can fail a journal-mode lock upgrade without
+  // invoking SQLite's busy handler. Retry only that lock, within the same bound.
+  const deadline = Date.now() + 5000;
+  while (true) {
+    try {
+      db.exec("PRAGMA journal_mode = WAL");
+      break;
+    } catch (error) {
+      if (!/database is locked/i.test(error.message) || Date.now() >= deadline) throw error;
+      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 25);
+    }
+  }
+  db.exec("PRAGMA synchronous = NORMAL; PRAGMA foreign_keys = ON; PRAGMA wal_autocheckpoint = 1000");
+  db.exec("BEGIN IMMEDIATE");
+  try {
+    db.exec(`
     CREATE TABLE IF NOT EXISTS app_state (
       key TEXT PRIMARY KEY,
       json TEXT NOT NULL,
@@ -171,7 +181,12 @@ function createSchema(db) {
     );
     CREATE INDEX IF NOT EXISTS idx_scans_at ON scans(at DESC);
     CREATE INDEX IF NOT EXISTS idx_scans_plan ON scans(observation_plan_id, at DESC);
-  `);
+    `);
+    db.exec("COMMIT");
+  } catch (error) {
+    db.exec("ROLLBACK");
+    throw error;
+  }
 }
 
 function openState(filePath) {
@@ -179,7 +194,8 @@ function openState(filePath) {
   if (states.has(resolved)) return states.get(resolved);
   ensureDir(resolved);
   const db = new DatabaseSync(resolved);
-  createSchema(db);
+  try { createSchema(db); }
+  catch (error) { db.close(); throw error; }
   const state = {
     db,
     projectState: new Map(),
