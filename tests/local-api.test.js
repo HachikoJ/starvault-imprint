@@ -192,16 +192,18 @@ test("T-02 read-only Node task cache does not claim tasks or call providers", as
   await api.handle("/api/settings", { method: "POST", body: JSON.stringify({ validateProvider: false }) });
   const snapshot = await storage.getSnapshot();
   snapshot.store.tasks = {
-    legacy: { id: "legacy", type: "scan", status: "running", input: { observationPlanId: "default" }, checkpoint: {} }
+    legacy: { id: "legacy", type: "scan", status: "queued", input: { observationPlanId: "default" }, checkpoint: {} }
   };
   await storage.putSnapshot(snapshot);
   const tasks = await api.handle("/api/tasks", { readOnlyCache: true });
   const task = await api.handle("/api/tasks/legacy", { readOnlyCache: true });
-  assert.equal(tasks.tasks[0].status, "running");
-  assert.equal(task.task.status, "running");
+  const status = await api.handle("/api/scan/status", { readOnlyCache: true });
+  assert.equal(tasks.tasks[0].status, "queued");
+  assert.equal(task.task.status, "queued");
+  assert.equal(status.task.status, "queued");
   await assert.rejects(api.handle("/api/note", { method: "POST", readOnlyCache: true, body: '{}' }), /read-only/);
   assert.equal(calls, 0);
-  assert.equal((await storage.getSnapshot()).store.tasks.legacy.status, "running");
+  assert.equal((await storage.getSnapshot()).store.tasks.legacy.status, "queued");
 });
 
 test("browser-local settings migrate legacy DeepSeek defaults", async () => {

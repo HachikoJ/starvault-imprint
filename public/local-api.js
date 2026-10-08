@@ -3532,7 +3532,7 @@
       // reported as running. Once the countdown has lapsed this status read is
       // also the recovery point that releases the queued task.
       const running = taskPending && !cooldown.active;
-      if (running && task?.status === "queued") {
+      if (!options.readOnlyCache && running && task?.status === "queued") {
         startLocalTask(snapshot, task);
       }
       const hasScan = Boolean(lastScan) || task?.status === "completed";
