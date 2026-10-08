@@ -7,6 +7,33 @@ const { IDBFactory, IDBKeyRange, IDBObjectStore, indexedDB } = require("fake-ind
 
 const storageSource = fs.readFileSync(path.join(__dirname, "../public/indexeddb-storage.js"), "utf8");
 
+test("T-05 shared replacement abort keeps both memberships, history and revision unchanged", async () => {
+  const factory = new IDBFactory();
+  const api = createStorageApi(factory);
+  const shared = { fullName: "fixture/shared", firstSeenAt: "2020-01-01", snapshots: [{ at: "2020-01-01", stars: 1 }],
+    observationPlanMatches: { a: { planId: "a" }, b: { planId: "b" } } };
+  await api.putProjects([shared]);
+  const revision = (await api.getSnapshotMeta()).localRevision;
+  const original = IDBObjectStore.prototype.put;
+  let wrote = 0;
+  IDBObjectStore.prototype.put = function (...args) {
+    if (this.name === "projects" && ++wrote === 2) this.transaction.abort();
+    return original.apply(this, args);
+  };
+  try {
+    await assert.rejects(api.replaceProjectsForPlan("a", [
+      { ...shared, stars: 20 }, { fullName: "fixture/new", observationPlanMatches: { a: { planId: "a" } } }
+    ]));
+  } finally { IDBObjectStore.prototype.put = original; }
+  assert.equal(wrote, 2);
+  const reopened = createStorageApi(factory);
+  assert.deepEqual(JSON.parse(JSON.stringify(await reopened.getProject("fixture/shared"))), shared);
+  assert.equal(await reopened.getProject("fixture/new"), null);
+  assert.equal((await reopened.getSnapshotMeta()).localRevision, revision);
+  await reopened.replaceProjectsForPlan("a", [shared]);
+  assert.equal((await reopened.getProjectsByPlan("b")).length, 1);
+});
+
 function createStorageApi(factory = new IDBFactory()) {
   const window = { indexedDB: factory, IDBKeyRange };
   vm.runInNewContext(storageSource, {

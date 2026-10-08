@@ -274,3 +274,38 @@ test("T-01 real API replay preserves concurrent learning when undo was clipped a
   assert.ok(value.store.observationPlans.default.userData.watchlist[PROJECT]);
   assert.equal(value.store.observationPlans.default.userData.notes[PROJECT], undefined);
 });
+
+test("T-05 real tabs preserve shared history through concurrent scopes and scope removal", { timeout: 25000 }, async (t) => {
+  const { a, b } = await fixture(t);
+  await seed(a);
+  await a.evaluate(async () => {
+    await window.StarVaultIndexedDB.putProjects([{
+      fullName: "Fixture/Shared", firstSeenAt: "2020-01-01", snapshots: [{ at: "2020-01-01", stars: 1 }],
+      observationPlanMatches: { a: { planId: "a", firstSeenAt: "2020-01-01", privateMarker: "keep" } }
+    }]);
+  });
+  await Promise.all([a, b].map((page, index) => page.evaluate(async ({ planId, at }) => {
+    await window.StarVaultIndexedDB.replaceProjectsForPlan(planId, [
+      { fullName: "fixture/shared", firstSeenAt: at, snapshots: [{ at, stars: 10 }],
+        observationPlanMatches: { [planId]: { planId, firstSeenAt: at } } },
+      { fullName: "FIXTURE/SHARED", firstSeenAt: at, snapshots: [{ at, stars: 10 }],
+        observationPlanMatches: { [planId]: { planId, firstSeenAt: at } } }
+    ]);
+  }, { planId: index ? "b" : "a", at: index ? "2026-02-01" : "2026-01-01" })));
+  const read = () => a.evaluate(() => window.StarVaultIndexedDB.getProject("fixture/shared"));
+  await a.reload();
+  const shared = await read();
+  assert.equal(shared.firstSeenAt, "2020-01-01");
+  assert.deepEqual(shared.snapshots.map((entry) => entry.at), ["2020-01-01", "2026-01-01", "2026-02-01"]);
+  assert.deepEqual(Object.keys(shared.observationPlanMatches).sort(), ["a", "b"]);
+  assert.equal(shared.observationPlanMatches.a.privateMarker, "keep");
+  assert.equal(shared.observationPlanMatches.a.firstSeenAt, "2020-01-01");
+  assert.equal(await a.evaluate(() => window.StarVaultIndexedDB.countProjects()), 1);
+  await a.evaluate(() => window.StarVaultIndexedDB.replaceProjectsForPlan("a", []));
+  assert.deepEqual(Object.keys((await read()).observationPlanMatches), ["b"]);
+  await a.evaluate(() => window.StarVaultIndexedDB.deletePlanData("a"));
+  assert.deepEqual(Object.keys((await read()).observationPlanMatches), ["b"]);
+  await b.evaluate(() => window.StarVaultIndexedDB.deletePlanData("b"));
+  assert.equal(await a.evaluate(() => window.StarVaultIndexedDB.countProjects()), 0);
+  assert.deepEqual(await a.evaluate(() => window.StarVaultIndexedDB.getProjectsByPlan("b")), []);
+});

@@ -991,55 +991,70 @@
         .filter(([key]) => key)
     );
     const db = await openDb();
-    const readTx = db.transaction(STORES.projects, "readonly");
-    const index = readTx.objectStore(STORES.projects).index("scopePlanIds");
-    const keyRange = (window.IDBKeyRange || globalThis.IDBKeyRange).only(safePlanId);
-    const existing = await requestToPromise(index.getAll(keyRange));
-    await transactionDone(readTx);
-    const existingByKey = new Map(existing.map((record) => [record.key, record.value]));
     const writeTx = db.transaction([STORES.meta, STORES.projects], "readwrite");
     const done = snapshotWriteDone(writeTx);
     const store = writeTx.objectStore(STORES.projects);
     const committed = new Map();
-
-    for (const record of existing) {
-      if (incoming.has(record.key)) continue;
-      const remainingMatches = withoutPlanMatch(record.value, safePlanId);
-      const remainingPlanIds = projectPlanIds({ observationPlanMatches: remainingMatches });
-      const hadExplicitMatch = projectPlanIds(record.value).includes(safePlanId);
-      if (hadExplicitMatch && remainingPlanIds.length === 0) {
-        store.delete(record.key);
-        committed.set(record.key, null);
-      } else if (hadExplicitMatch) {
-        const updated = { ...record.value, observationPlanMatches: remainingMatches };
-        store.put(projectRecord(record.key, updated));
-        committed.set(record.key, updated);
-      }
-    }
-
-    for (const [key, project] of incoming) {
-      const previous = existingByKey.get(key) || {};
-      const previousMatches = planMatchMap(previous);
-      const incomingMatches = planMatchMap(project);
-      const nextMatches = {
-        ...previousMatches,
-        ...incomingMatches,
-        [safePlanId]: {
-          ...(previousMatches[safePlanId] || {}),
-          ...(incomingMatches[safePlanId] || {}),
-          planId: safePlanId
+    try {
+      const index = store.index("scopePlanIds");
+      const keyRange = (window.IDBKeyRange || globalThis.IDBKeyRange).only(safePlanId);
+      // New scope matches need the global row too. Read both inputs inside
+      // the writer transaction, so another tab cannot change them in between.
+      const keys = [...incoming.keys()];
+      const [existing, incomingRecords] = await Promise.all([
+        requestToPromise(index.getAll(keyRange)),
+        Promise.all(keys.map((key) => requestToPromise(store.get(key))))
+      ]);
+      const previousByKey = new Map(keys.map((key, index) => [key, incomingRecords[index]?.value || {}]));
+      for (const record of existing) {
+        if (incoming.has(record.key)) continue;
+        const remainingMatches = withoutPlanMatch(record.value, safePlanId);
+        const remainingPlanIds = projectPlanIds({ observationPlanMatches: remainingMatches });
+        const hadExplicitMatch = projectPlanIds(record.value).includes(safePlanId);
+        if (hadExplicitMatch && remainingPlanIds.length === 0) {
+          store.delete(record.key);
+          committed.set(record.key, null);
+        } else if (hadExplicitMatch) {
+          const updated = { ...record.value, observationPlanMatches: remainingMatches };
+          store.put(projectRecord(record.key, updated));
+          committed.set(record.key, updated);
         }
-      };
-      const updated = {
-        ...previous,
-        ...project,
-        firstSeenAt: previous.firstSeenAt || project.firstSeenAt,
-        observationPlanMatches: nextMatches
-      };
-      store.put(projectRecord(key, updated));
-      committed.set(key, updated);
+      }
+      for (const [key, project] of incoming) {
+        const previous = previousByKey.get(key) || {};
+        const previousMatches = planMatchMap(previous);
+        // Legacy rows without explicit matches are indexed in the default
+        // scope. Preserve that existing membership when a new scope finds one.
+        if (previous.fullName && !Object.keys(previousMatches).length) previousMatches.default = { planId: "default" };
+        const incomingMatches = planMatchMap(project);
+        const nextMatches = {
+          ...incomingMatches,
+          ...previousMatches,
+          [safePlanId]: {
+            ...(previousMatches[safePlanId] || {}),
+            ...(incomingMatches[safePlanId] || {}),
+            planId: safePlanId,
+            ...(previousMatches[safePlanId]?.firstSeenAt ? { firstSeenAt: previousMatches[safePlanId].firstSeenAt } : {})
+          }
+        };
+        const history = new Map();
+        for (const entry of [...(previous.snapshots || []), ...(project.snapshots || [])]) history.set(stableJson(entry), entry);
+        const updated = {
+          ...previous,
+          ...project,
+          firstSeenAt: previous.firstSeenAt || project.firstSeenAt,
+          ...(history.size ? { snapshots: [...history.values()].sort((a, b) => String(a.at || "").localeCompare(String(b.at || ""))).slice(-180) } : {}),
+          observationPlanMatches: nextMatches
+        };
+        store.put(projectRecord(key, updated));
+        committed.set(key, updated);
+      }
+      await done;
+    } catch (error) {
+      try { writeTx.abort(); } catch { /* already finished */ }
+      await done.catch(() => {});
+      throw error;
     }
-    await done;
     for (const [key, project] of committed) {
       if (!project) {
         persistedProjectHashes.delete(key);
@@ -1057,41 +1072,46 @@
     const safePlanId = String(planId || "");
     if (!safePlanId || safePlanId === "default") throw new Error("Default observation plan cannot be deleted");
     const db = await openDb();
-    const readTx = db.transaction(STORES.projects, "readonly");
-    const index = readTx.objectStore(STORES.projects).index("scopePlanIds");
-    const keyRange = (window.IDBKeyRange || globalThis.IDBKeyRange).only(safePlanId);
-    const projectRecords = await requestToPromise(index.getAll(keyRange));
-    await transactionDone(readTx);
-
     const tx = db.transaction([STORES.meta, STORES.projects, STORES.plans, STORES.scans, STORES.leaderboards], "readwrite");
     const done = snapshotWriteDone(tx);
     const projectStore = tx.objectStore(STORES.projects);
-    for (const record of projectRecords) {
-      const remainingMatches = withoutPlanMatch(record.value, safePlanId);
-      const remainingPlanIds = projectPlanIds({ observationPlanMatches: remainingMatches });
-      if (!remainingPlanIds.length) {
-        projectStore.delete(record.key);
-      } else {
-        const updated = { ...record.value, observationPlanMatches: remainingMatches };
-        projectStore.put(projectRecord(record.key, updated));
+    const index = projectStore.index("scopePlanIds");
+    const keyRange = (window.IDBKeyRange || globalThis.IDBKeyRange).only(safePlanId);
+    let affectedProjects = 0;
+    try {
+      const projectRecords = await requestToPromise(index.getAll(keyRange));
+      affectedProjects = projectRecords.length;
+      for (const record of projectRecords) {
+        const remainingMatches = withoutPlanMatch(record.value, safePlanId);
+        const remainingPlanIds = projectPlanIds({ observationPlanMatches: remainingMatches });
+        if (!remainingPlanIds.length) {
+          projectStore.delete(record.key);
+        } else {
+          const updated = { ...record.value, observationPlanMatches: remainingMatches };
+          projectStore.put(projectRecord(record.key, updated));
+        }
       }
+      tx.objectStore(STORES.plans).delete(safePlanId);
+      const scanCursor = tx.objectStore(STORES.scans).index("observationPlanId").openCursor((window.IDBKeyRange || globalThis.IDBKeyRange).only(safePlanId));
+      scanCursor.onsuccess = () => {
+        const cursor = scanCursor.result;
+        if (!cursor) return;
+        cursor.delete();
+        cursor.continue();
+      };
+      const leaderboardCursor = tx.objectStore(STORES.leaderboards).index("planId").openCursor((window.IDBKeyRange || globalThis.IDBKeyRange).only(safePlanId));
+      leaderboardCursor.onsuccess = () => {
+        const cursor = leaderboardCursor.result;
+        if (!cursor) return;
+        cursor.delete();
+        cursor.continue();
+      };
+      await done;
+    } catch (error) {
+      try { tx.abort(); } catch { /* already finished */ }
+      await done.catch(() => {});
+      throw error;
     }
-    tx.objectStore(STORES.plans).delete(safePlanId);
-    const scanCursor = tx.objectStore(STORES.scans).index("observationPlanId").openCursor((window.IDBKeyRange || globalThis.IDBKeyRange).only(safePlanId));
-    scanCursor.onsuccess = () => {
-      const cursor = scanCursor.result;
-      if (!cursor) return;
-      cursor.delete();
-      cursor.continue();
-    };
-    const leaderboardCursor = tx.objectStore(STORES.leaderboards).index("planId").openCursor((window.IDBKeyRange || globalThis.IDBKeyRange).only(safePlanId));
-    leaderboardCursor.onsuccess = () => {
-      const cursor = leaderboardCursor.result;
-      if (!cursor) return;
-      cursor.delete();
-      cursor.continue();
-    };
-    await done;
     // The operation spans projects, plans, scans and leaderboards. Force the
     // next read to rebuild every in-memory view from the committed transaction
     // instead of exposing a partially updated cached snapshot.
@@ -1105,7 +1125,7 @@
     persistedLeaderboardHashes = new Map();
     persistedCoreHash = "";
     invalidateProjectPlanCache();
-    return { planId: safePlanId, affectedProjects: projectRecords.length };
+    return { planId: safePlanId, affectedProjects };
   }
 
   async function countProjects() {
