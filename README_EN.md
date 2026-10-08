@@ -86,6 +86,12 @@ flowchart LR
   H --> B
 ```
 
+### Node offline cache and recovery copies
+
+Node remains the write authority. During an outage, synchronized browser contents can be read; failed or unconfirmed writes are not saved locally or replayed automatically, including AI, Star and Fork. Check the server result after reconnecting before retrying.
+
+Before replacing legacy or locally changed cache contents, an IndexedDB transaction retains a durable recovery copy. “Download local recovery copies” exports the original core, plans, projects, scans, archives, kv and task artifacts. Copies may contain local credentials; keep them private. They are neither uploaded nor automatically merged. To recover a note, find snapshots → records → plans → value → userData.notes in the downloaded JSON, check the current server record, then save it manually. Settings and learning records are retained similarly; keep the original file for further recovery. If saving the copy fails, cache replacement stops. Standalone static mode remains writable.
+
 ## Quick Start
 
 ```bash

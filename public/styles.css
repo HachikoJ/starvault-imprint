@@ -348,6 +348,17 @@ button {
   display: none;
 }
 
+#node-cache-status {
+  grid-column: 1 / -1;
+  font-size: 12px;
+  line-height: 1.4;
+  overflow-wrap: anywhere;
+}
+
+#node-cache-status[hidden] {
+  display: none;
+}
+
 .metric-tile.accent span {
   color: #b9c8bc;
 }

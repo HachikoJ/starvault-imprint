@@ -3136,6 +3136,7 @@
     const url = new URL(path, window.location.origin);
     const params = Object.fromEntries(url.searchParams.entries());
     const method = String(options.method || "GET").toUpperCase();
+    if (options.readOnlyCache && method !== "GET") throw new Error("Node offline cache is read-only");
     const body = options.body ? JSON.parse(options.body) : {};
     await restoreGithubCooldownState();
     const snapshot = await requireSnapshot();
@@ -3154,7 +3155,7 @@
         })
         .sort((a, b) => String(b.updatedAt || "").localeCompare(String(a.updatedAt || "")))
         .slice(0, Math.max(1, Math.min(60, Number(params.limit || 30))));
-      tasks.filter((task) => task.status === "queued" || task.status === "running").forEach((task) => startLocalTask(snapshot, task));
+      if (!options.readOnlyCache) tasks.filter((task) => task.status === "queued" || task.status === "running").forEach((task) => startLocalTask(snapshot, task));
       const cooldown = githubCooldownState();
       return {
         tasks: tasks.map(publicLocalTask),
@@ -3166,7 +3167,7 @@
       const id = decodeURIComponent(url.pathname.slice("/api/tasks/".length));
       const task = snapshot.store.tasks?.[id];
       if (!task) throw new Error("Task not found");
-      if (task.status === "queued" || task.status === "running") startLocalTask(snapshot, task);
+      if (!options.readOnlyCache && (task.status === "queued" || task.status === "running")) startLocalTask(snapshot, task);
       return { task: publicLocalTask(task) };
     }
 
@@ -3600,8 +3601,7 @@
 
   function shouldUseLocal(path, options = {}) {
     if (!canHandle(path)) return false;
-    if (localModeForced()) return true;
-    return false;
+    return isStaticDeployment();
   }
 
   window.StarVaultLocalApi = {

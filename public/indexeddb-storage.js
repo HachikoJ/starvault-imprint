@@ -15,6 +15,8 @@
   const CORE_KEY = "snapshotCore";
   const LEGACY_LEADERBOARDS_KEY = "leaderboards";
   const REVISION_KEY = "snapshotRevision";
+  const SERVER_CACHE_KEY = "serverCacheBaseline";
+  const RECOVERY_PREFIX = "serverCacheRecovery:";
   const snapshotBases = new WeakMap();
   const snapshotWrites = new WeakMap();
   const snapshotOperations = new WeakMap();
@@ -317,18 +319,66 @@
     return snapshot;
   }
 
-  async function bumpSnapshotRevision(tx) {
+  async function bumpSnapshotRevision(tx, options = {}) {
     const store = tx.objectStore(STORES.meta);
     const record = await requestToPromise(store.get(REVISION_KEY));
     const revision = Number(record?.value || 0) + 1;
     store.put({ key: REVISION_KEY, value: revision });
+    if (!options.serverCache) store.put({ key: "serverCacheDirty", value: true });
     return revision;
   }
 
-  function snapshotWriteDone(tx) {
-    const completion = Promise.all([transactionDone(tx), bumpSnapshotRevision(tx)]);
+  function snapshotWriteDone(tx, options = {}) {
+    const completion = Promise.all([transactionDone(tx), bumpSnapshotRevision(tx, options)]);
     completion.catch(() => {});
     return completion;
+  }
+
+  async function protectCacheWithinTransaction(tx) {
+    const meta = tx.objectStore(STORES.meta);
+    const [core, baseline, dirty, plans, scans] = await Promise.all([
+      requestToPromise(meta.get(CORE_KEY)), requestToPromise(meta.get(SERVER_CACHE_KEY)),
+      requestToPromise(meta.get("serverCacheDirty")), requestToPromise(tx.objectStore(STORES.plans).getAll()),
+      requestToPromise(tx.objectStore(STORES.scans).getAll())
+    ]);
+    const signature = stableJson([core?.value || null, plans, scans]);
+    if (!baseline || dirty?.value || baseline.value !== signature) {
+      const names = Object.values(STORES).filter(name => name !== STORES.meta);
+      const values = await Promise.all(names.map(name => requestToPromise(tx.objectStore(name).getAll())));
+      const records = Object.fromEntries(names.map((name, i) => [name, values[i]]));
+      if (core || values.some(items => items.length)) {
+        const revision = Number((await requestToPromise(meta.get(REVISION_KEY)))?.value || 0);
+        const id = `${RECOVERY_PREFIX}${revision}:${Date.now()}:${Math.random().toString(36).slice(2)}`;
+        // The backup and provenance marker commit together. Quota/abort means
+        // the caller must stop before any cache replacement.
+        meta.add({ key: id, value: { schema: "starvault-cache-recovery/v1", id,
+          savedAt: new Date().toISOString(), localRevision: revision, core: core?.value || null, records } });
+      }
+      meta.put({ key: SERVER_CACHE_KEY, value: signature });
+      meta.put({ key: "serverCacheDirty", value: false });
+    }
+  }
+
+  async function prepareServerCacheWrite(tx, options) {
+    if (!options.serverCache) return;
+    try { await protectCacheWithinTransaction(tx); }
+    catch (error) { try { tx.abort(); } catch {} throw error; }
+  }
+
+  async function protectServerCache() {
+    const db = await openDb();
+    const tx = db.transaction(Object.values(STORES), "readwrite");
+    const done = transactionDone(tx); done.catch(() => {});
+    try { await protectCacheWithinTransaction(tx); await done; }
+    catch (error) { try { tx.abort(); } catch {} await done.catch(() => {}); throw error; }
+  }
+
+  async function getRecoverySnapshots() {
+    const db = await openDb();
+    const tx = db.transaction(STORES.meta, "readonly");
+    const records = await requestToPromise(tx.objectStore(STORES.meta).getAll());
+    await transactionDone(tx);
+    return records.filter(record => record.key.startsWith(RECOVERY_PREFIX)).map(record => cloneValue(record.value));
   }
 
   async function freshCache(db) {
@@ -472,7 +522,7 @@
     const operations = submittedOperations.filter((operation) => operation.sequence > (operationState?.committedSequence || 0));
     const replace = force || options.replace === true || options.expectedRevision !== undefined || !base;
     const expectedRevision = Number(options.expectedRevision ?? tracked?.revision ?? 0);
-    const tx = db.transaction([STORES.meta, STORES.projects, STORES.plans, STORES.scans, STORES.leaderboards], "readwrite");
+    const tx = db.transaction(options.protectServerCache ? Object.values(STORES) : [STORES.meta, STORES.projects, STORES.plans, STORES.scans, STORES.leaderboards], "readwrite");
     const done = transactionDone(tx);
     // Attach immediately: a request failure can abort before the reads settle.
     done.catch(() => {});
@@ -497,6 +547,7 @@
       if (!force && !base && coreRecord && options.expectedRevision === undefined) throw snapshotConflict();
       if (!force && replace && revision !== expectedRevision && (coreRecord || options.expectedRevision !== undefined)) throw snapshotConflict();
       if (!replace && base && !coreRecord) throw snapshotConflict();
+      if (options.protectServerCache) await protectCacheWithinTransaction(tx);
       const current = coreRecord?.value || { store: {} };
       current.store = current.store || {};
       current.store.observationPlans = Object.fromEntries(planRecords.map((record) => [record.id, record.value]));
@@ -566,6 +617,13 @@
       metaStore.put({ key: CORE_KEY, value: snapshotCore(merged), updatedAt: new Date().toISOString() });
       metaStore.put({ key: REVISION_KEY, value: revision });
       metaStore.put({ key: SNAPSHOT_META_KEY, value: { ...snapshotMeta(merged), localRevision: revision }, updatedAt: new Date().toISOString() });
+      if (options.protectServerCache) {
+        metaStore.put({ key: SERVER_CACHE_KEY, value: stableJson([
+          snapshotCore(merged), Object.entries(plans).map(([id, value]) => ({ id, value })).sort((a, b) => a.id < b.id ? -1 : a.id > b.id ? 1 : 0),
+          Object.values(nextScans).map(value => ({ ...value, id: String(value.id), value })).sort((a, b) => a.id < b.id ? -1 : a.id > b.id ? 1 : 0)
+        ]) });
+        metaStore.put({ key: "serverCacheDirty", value: false });
+      } else metaStore.put({ key: "serverCacheDirty", value: true });
       await done;
     } catch (error) {
       try { tx.abort(); } catch { /* already completed or aborted */ }
@@ -852,12 +910,13 @@
     return { items, total: Number(total || 0), offset, limit };
   }
 
-  async function putProjects(projects = []) {
+  async function putProjects(projects = [], options = {}) {
     const entries = Array.isArray(projects) ? projects : Object.values(projects || {});
     if (!entries.length) return { updated: 0 };
     const db = await openDb();
-    const tx = db.transaction([STORES.meta, STORES.projects], "readwrite");
-    const done = snapshotWriteDone(tx);
+    const tx = db.transaction(options.serverCache ? Object.values(STORES) : [STORES.meta, STORES.projects], "readwrite");
+    const done = snapshotWriteDone(tx, options);
+    await prepareServerCacheWrite(tx, options);
     const store = tx.objectStore(STORES.projects);
     const committed = [];
     for (const project of entries) {
@@ -875,12 +934,13 @@
     return { updated: committed.length };
   }
 
-  async function putLeaderboardRecords(records = []) {
+  async function putLeaderboardRecords(records = [], options = {}) {
     const entries = Array.isArray(records) ? records.filter((record) => record?.id && record?.date) : [];
     if (!entries.length) return { updated: 0 };
     const db = await openDb();
-    const tx = db.transaction([STORES.meta, STORES.leaderboards], "readwrite");
-    const done = snapshotWriteDone(tx);
+    const tx = db.transaction(options.serverCache ? Object.values(STORES) : [STORES.meta, STORES.leaderboards], "readwrite");
+    const done = snapshotWriteDone(tx, options);
+    await prepareServerCacheWrite(tx, options);
     const store = tx.objectStore(STORES.leaderboards);
     const committed = [];
     for (const record of entries) {
@@ -899,11 +959,12 @@
     return { updated: committed.length };
   }
 
-  async function deleteLeaderboardsExcept(ids = []) {
+  async function deleteLeaderboardsExcept(ids = [], options = {}) {
     const retained = new Set((ids || []).map(String).filter(Boolean));
     const db = await openDb();
-    const tx = db.transaction([STORES.meta, STORES.leaderboards], "readwrite");
-    const done = snapshotWriteDone(tx);
+    const tx = db.transaction(options.serverCache ? Object.values(STORES) : [STORES.meta, STORES.leaderboards], "readwrite");
+    const done = snapshotWriteDone(tx, options);
+    await prepareServerCacheWrite(tx, options);
     const store = tx.objectStore(STORES.leaderboards);
     let deleted = 0;
     const deletedIds = [];
@@ -932,11 +993,12 @@
     return Number(count || 0);
   }
 
-  async function deleteProjectsExcept(keys = []) {
+  async function deleteProjectsExcept(keys = [], options = {}) {
     const retained = new Set((keys || []).map((key) => String(key || "").toLowerCase()).filter(Boolean));
     const db = await openDb();
-    const tx = db.transaction([STORES.meta, STORES.projects], "readwrite");
-    const done = snapshotWriteDone(tx);
+    const tx = db.transaction(options.serverCache ? Object.values(STORES) : [STORES.meta, STORES.projects], "readwrite");
+    const done = snapshotWriteDone(tx, options);
+    await prepareServerCacheWrite(tx, options);
     const store = tx.objectStore(STORES.projects);
     let deleted = 0;
     const deletedKeys = [];
@@ -1194,6 +1256,8 @@
     putSnapshot,
     getSnapshot,
     getSnapshotMeta,
+    protectServerCache,
+    getRecoverySnapshots,
     getProject,
     getProjects,
     getProjectsByPlan,

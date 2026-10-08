@@ -7,6 +7,45 @@ const { IDBFactory, IDBKeyRange, IDBObjectStore, indexedDB } = require("fake-ind
 
 const storageSource = fs.readFileSync(path.join(__dirname, "../public/indexeddb-storage.js"), "utf8");
 
+test("T-02 recovery backup commits before cache replacement and an abort preserves every asset", async () => {
+  const factory = new IDBFactory();
+  const api = createStorageApi(factory);
+  const fixture = snapshotFixture();
+  fixture.store.observationPlans.default.userData.notes = { "acme/example": { text: "legacy local note" } };
+  await api.putSnapshot(fixture);
+  await api.putValue("localSecrets", { githubToken: "fixture-recovery-token" });
+  await api.putTaskArtifact("local-task", "profile", { complete: true, repositories: ["acme/example"] });
+  const beforeRevision = (await api.getSnapshotMeta()).localRevision;
+  const server = snapshotFixture();
+  const originalAdd = IDBObjectStore.prototype.add;
+  let aborted = false;
+  IDBObjectStore.prototype.add = function (...args) {
+    if (this.name === "meta" && args[0]?.key?.startsWith("serverCacheRecovery:")) {
+      aborted = true; this.transaction.abort();
+    }
+    return originalAdd.apply(this, args);
+  };
+  try { await assert.rejects(api.putSnapshot(server, { expectedRevision: beforeRevision, protectServerCache: true })); }
+  finally { IDBObjectStore.prototype.add = originalAdd; }
+  assert.equal(aborted, true);
+  assert.equal((await api.getSnapshotMeta()).localRevision, beforeRevision);
+  assert.equal((await api.getSnapshot()).store.observationPlans.default.userData.notes["acme/example"].text, "legacy local note");
+  assert.equal((await api.getRecoverySnapshots()).length, 0);
+  const reopened = createStorageApi(factory);
+  await reopened.putSnapshot(server, { expectedRevision: beforeRevision, protectServerCache: true });
+  const copies = await reopened.getRecoverySnapshots();
+  assert.equal(copies.length, 1);
+  assert.ok(JSON.stringify(copies[0]).includes("legacy local note"));
+  assert.ok(JSON.stringify(copies[0].records.kv).includes("fixture-recovery-token"));
+  assert.ok(JSON.stringify(copies[0].records.taskArtifacts).includes("local-task"));
+  await reopened.protectServerCache();
+  assert.equal((await reopened.getRecoverySnapshots()).length, 1, "trusted unchanged cache must not accumulate copies");
+  await reopened.putProjects([{ fullName: "acme/example", description: "local project difference" }]);
+  await reopened.putProjects([{ fullName: "acme/example", description: "server version" }], { serverCache: true });
+  assert.ok(JSON.stringify(await reopened.getRecoverySnapshots()).includes("local project difference"));
+  assert.equal((await reopened.getProject("acme/example")).description, "server version");
+});
+
 test("T-05 shared replacement abort keeps both memberships, history and revision unchanged", async () => {
   const factory = new IDBFactory();
   const api = createStorageApi(factory);

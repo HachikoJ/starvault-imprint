@@ -58,6 +58,9 @@ const I18N = {
     watchlist: "收藏",
     lastScan: "最近扫描",
     scanCoverageIncomplete: "检索不完整，已保留旧成员",
+    nodeCacheOffline: "服务离线：当前缓存仅供阅读，写入不会转存到本地。",
+    nodeCacheRecovery: "恢复前的本地内容已保留为恢复副本；副本可能含凭据，请妥善保存。",
+    nodeCacheDownload: "下载本地恢复副本",
     search: "搜索",
     searchPlaceholder: "仓库、主题、语言",
     filterIntent: "筛选意图",
@@ -771,6 +774,9 @@ const I18N = {
     watchlist: "Favorites",
     lastScan: "Last scan",
     scanCoverageIncomplete: "Search incomplete; previous members retained",
+    nodeCacheOffline: "Server offline: this cache is read-only; writes are not saved locally.",
+    nodeCacheRecovery: "Previous local contents retained for recovery. Copies may contain credentials; keep them private.",
+    nodeCacheDownload: "Download local recovery copies",
     search: "Search",
     searchPlaceholder: "repo, topic, language",
     filterIntent: "Filter intent",
@@ -4777,6 +4783,22 @@ function setAuthToken(token) {
 async function api(path, options = {}) {
   const { skipIndexedDbSync, ...fetchOptions } = options;
   const localApi = window.StarVaultLocalApi;
+  const method = String(fetchOptions.method || "GET").toUpperCase();
+  async function cacheFallback(cause) {
+    if (!skipIndexedDbSync && method === "GET" && localApi?.canHandle?.(path, fetchOptions)
+        && path !== "/api/local-snapshot" && !String(path).startsWith("/api/local-projects")
+        && !String(path).startsWith("/api/local-leaderboards")) {
+      const cache = await indexedDbStore()?.getSnapshot?.({ includeProjects: false, includeLeaderboards: false });
+      if (cache) {
+        localApi.activateLocalMode?.();
+        renderNodeCacheStatus?.();
+        return localApi.handle(path, { ...fetchOptions, readOnlyCache: true });
+      }
+    }
+    const error = new Error(method === "GET" ? "服务暂不可用，且没有可用缓存。" : "写入未确认：服务不可用，离线缓存仅可读取。恢复连接后先检查服务端结果，再决定是否重试。", { cause });
+    error.code = method === "GET" ? "SERVER_UNAVAILABLE" : "SERVER_WRITE_UNCONFIRMED";
+    throw error;
+  }
   if (!skipIndexedDbSync && localApi?.shouldUseLocal?.(path, fetchOptions)) {
     return localApi.handle(path, fetchOptions);
   }
@@ -4800,26 +4822,22 @@ async function api(path, options = {}) {
   try {
     response = await fetch(path, { ...fetchOptions, headers });
   } catch (error) {
-    if (!skipIndexedDbSync && localApi?.canHandle?.(path, fetchOptions)) {
-      localApi.activateLocalMode?.();
-      return localApi.handle(path, fetchOptions);
-    }
-    throw error;
+    return cacheFallback(error);
   }
 
   let json = null;
   try {
     json = await response.json();
   } catch (error) {
-    if (!skipIndexedDbSync && localApi?.canHandle?.(path, fetchOptions)) {
-      localApi.activateLocalMode?.();
-      return localApi.handle(path, fetchOptions);
+    if (response.status === 401 || response.status === 403) {
+      const authError = new Error("访问令牌未配置或无效，请联系部署管理员。", { cause: error });
+      authError.status = response.status;
+      throw authError;
     }
-    throw error;
+    return cacheFallback(error);
   }
   if (!response.ok && response.status === 404 && !skipIndexedDbSync && localApi?.canHandle?.(path, fetchOptions)) {
-    if (["/api/config", "/api/settings"].some((prefix) => String(path).startsWith(prefix))) localApi.activateLocalMode?.();
-    return localApi.handle(path, fetchOptions);
+    return cacheFallback(new Error("Server route unavailable"));
   }
   if (!response.ok) {
     const message = json.message || json.error || "Request failed";
@@ -4843,10 +4861,24 @@ async function restoreServerApiMode() {
   try {
     await api("/api/config", { skipIndexedDbSync: true });
     localApi.deactivateLocalMode?.();
+    renderNodeCacheStatus?.();
     return true;
   } catch {
     return false;
   }
+}
+
+async function renderNodeCacheStatus() {
+  const panel = document.querySelector("#node-cache-status");
+  if (!panel) return;
+  if (window.StarVaultLocalApi?.isStaticDeployment?.()) { panel.hidden = true; return; }
+  const offline = Boolean(window.StarVaultLocalApi?.localModeForced?.());
+  const recoveries = await indexedDbStore()?.getRecoverySnapshots?.().catch(() => []) || [];
+  panel.hidden = !offline && !recoveries.length;
+  panel.querySelector("span").textContent = [offline ? t("nodeCacheOffline") : "", recoveries.length ? t("nodeCacheRecovery") : ""].filter(Boolean).join(" ");
+  const button = panel.querySelector("button");
+  button.hidden = !recoveries.length;
+  button.textContent = t("nodeCacheDownload");
 }
 
 const DURABLE_TASK_IDS_KEY = "starvault.pendingTaskIds";
@@ -5291,6 +5323,7 @@ async function refreshIndexedDbSnapshot(options = {}) {
   }
   state.indexedDbSnapshotSyncing = true;
   try {
+    await state.indexedDbCacheWrites;
     const expectedRevision = Number((await store.getSnapshotMeta())?.localRevision || 0);
     const snapshot = await api("/api/local-snapshot", { skipIndexedDbSync: true });
     const previousProjectRevision = String((await store.getValue(INDEXEDDB_PROJECT_SYNC_REVISION_KEY).catch(() => "")) || "");
@@ -5301,7 +5334,7 @@ async function refreshIndexedDbSnapshot(options = {}) {
     const expectedLeaderboardCount = Number(snapshot?.counts?.leaderboards || 0);
     const projectRevision = String(snapshot?.sync?.projectRevision || "");
     const leaderboardRevision = String(snapshot?.sync?.leaderboardRevision || "");
-    const meta = await store.putSnapshot(snapshot, { preserveProjects: true, preserveLeaderboards: true, expectedRevision });
+    const meta = await store.putSnapshot(snapshot, { preserveProjects: true, preserveLeaderboards: true, expectedRevision, protectServerCache: true });
     state.indexedDbSnapshotMeta = meta;
     const shouldSyncProjects =
       options.syncProjects === true ||
@@ -5319,12 +5352,12 @@ async function refreshIndexedDbSnapshot(options = {}) {
           throw new Error("Project data changed during IndexedDB synchronization");
         }
         const items = Array.isArray(page.items) ? page.items : [];
-        await store.putProjects(items);
+        await store.putProjects(items, { serverCache: true });
         retainedKeys.push(...items.map((project) => String(project?.fullName || "").toLowerCase()).filter(Boolean));
         cursor = String(page.nextCursor || "");
         done = Boolean(page.done) || !items.length;
       }
-      await store.deleteProjectsExcept(retainedKeys);
+      await store.deleteProjectsExcept(retainedKeys, { serverCache: true });
       await store.putValue(INDEXEDDB_PROJECT_SYNC_REVISION_KEY, projectRevision);
     }
     const shouldSyncLeaderboards =
@@ -5343,14 +5376,15 @@ async function refreshIndexedDbSnapshot(options = {}) {
           throw new Error("Leaderboard data changed during IndexedDB synchronization");
         }
         const items = Array.isArray(page.items) ? page.items : [];
-        await store.putLeaderboardRecords(items);
+        await store.putLeaderboardRecords(items, { serverCache: true });
         retainedIds.push(...items.map((record) => String(record?.id || "")).filter(Boolean));
         cursor = String(page.nextCursor || "");
         done = Boolean(page.done) || !items.length;
       }
-      await store.deleteLeaderboardsExcept(retainedIds);
+      await store.deleteLeaderboardsExcept(retainedIds, { serverCache: true });
       await store.putValue(INDEXEDDB_LEADERBOARD_SYNC_REVISION_KEY, leaderboardRevision);
     }
+    await renderNodeCacheStatus();
     return meta;
   } finally {
     state.indexedDbSnapshotSyncing = false;
@@ -5372,7 +5406,7 @@ function handleIndexedDbApiSuccess(path, options = {}, json = null) {
   if (!store || !String(path || "").startsWith("/api/")) return;
   if (path === "/api/local-snapshot" && json?.schema === "starvault-indexeddb-snapshot/v1") {
     if (options.indexedDbRevision === undefined) return;
-    store.putSnapshot(json, { preserveProjects: true, preserveLeaderboards: true, expectedRevision: options.indexedDbRevision }).then((meta) => {
+    store.putSnapshot(json, { preserveProjects: true, preserveLeaderboards: true, expectedRevision: options.indexedDbRevision, protectServerCache: true }).then((meta) => {
       state.indexedDbSnapshotMeta = meta;
     }).catch(() => {});
     return;
@@ -5384,8 +5418,8 @@ function handleIndexedDbApiSuccess(path, options = {}, json = null) {
       : json?.fullName
         ? [json]
         : [];
-  if (projectItems.length && ["/api/project", "/api/projects", "/api/leaderboard"].some((prefix) => String(path).startsWith(prefix))) {
-    store.putProjects(projectItems).catch(() => {});
+  if (!state.indexedDbSnapshotSyncing && projectItems.length && ["/api/project", "/api/projects", "/api/leaderboard"].some((prefix) => String(path).startsWith(prefix))) {
+    state.indexedDbCacheWrites = Promise.resolve(state.indexedDbCacheWrites).then(() => store.putProjects(projectItems, { serverCache: true })).catch(() => {});
   }
   const method = String(options.method || "GET").toUpperCase();
   if (method !== "GET") {
@@ -12453,6 +12487,10 @@ function wireEvents() {
     if (document.visibilityState === "visible") resumePendingTaskNotifications().catch(() => {});
   });
   elements.scanButton.addEventListener("click", () => runScan());
+  document.querySelector("#node-cache-status button")?.addEventListener("click", async () => {
+    const snapshots = await indexedDbStore()?.getRecoverySnapshots?.() || [];
+    downloadJson(`starvault-local-recovery-${new Date().toISOString().slice(0, 10)}.json`, { schema: "starvault-cache-recovery-bundle/v1", snapshots });
+  });
   elements.exportMenu?.addEventListener("click", (event) => {
     const button = event.target.closest("[data-export-format]");
     if (!button) return;
