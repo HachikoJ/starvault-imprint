@@ -3,6 +3,63 @@ const path = require("node:path");
 const { DatabaseSync } = require("node:sqlite");
 
 const states = new Map();
+const snapshotVersions = new WeakMap();
+
+class StorageConflictError extends Error {
+  constructor() {
+    super("The store changed after this snapshot was read. Reload it before saving.");
+    this.name = "StorageConflictError";
+    this.code = "STORAGE_CONFLICT";
+  }
+}
+
+function resetHashes(state) {
+  state.projectState = new Map();
+  state.planHashes = new Map();
+  state.scanHashes = new Map();
+  state.coreHash = "";
+  state.leaderboardsHash = "";
+  state.leaderboardsSignature = "";
+  state.leaderboardsRef = null;
+  state.initialized = false;
+  state.revision = null;
+}
+
+function getSqliteRevision(filePath) {
+  const state = openState(filePath);
+  return Number(parse(state.db.prepare("SELECT json FROM app_state WHERE key = ?").get("revision")?.json, 0));
+}
+
+function inheritSqliteSnapshot(source, target) {
+  const version = snapshotVersions.get(source);
+  if (version) snapshotVersions.set(target, version);
+  return target;
+}
+
+function snapshotRevision(store) {
+  return snapshotVersions.get(store)?.revision ?? null;
+}
+
+// Callbacks are synchronous storage operations. Never retain this lock across
+// provider calls; only the resulting local mutation belongs in this transaction.
+function withSqliteTransaction(filePath, operation, options = {}) {
+  const state = openState(filePath);
+  if (state.transactionDepth) return operation();
+  state.db.exec(options.readOnly ? "BEGIN" : "BEGIN IMMEDIATE");
+  state.transactionDepth = 1;
+  try {
+    const result = operation();
+    if (result && typeof result.then === "function") throw new Error("SQLite transactions require synchronous callbacks");
+    state.db.exec("COMMIT");
+    return result;
+  } catch (error) {
+    state.db.exec("ROLLBACK");
+    resetHashes(state);
+    throw error;
+  } finally {
+    state.transactionDepth = 0;
+  }
+}
 
 function ensureDir(filePath) {
   fs.mkdirSync(path.dirname(filePath), { recursive: true });
@@ -67,10 +124,10 @@ function coreStore(store) {
 
 function createSchema(db) {
   db.exec(`
+    PRAGMA busy_timeout = 5000;
     PRAGMA journal_mode = WAL;
     PRAGMA synchronous = NORMAL;
     PRAGMA foreign_keys = ON;
-    PRAGMA busy_timeout = 5000;
     PRAGMA wal_autocheckpoint = 1000;
 
     CREATE TABLE IF NOT EXISTS app_state (
@@ -132,14 +189,21 @@ function openState(filePath) {
     leaderboardsHash: "",
     leaderboardsSignature: "",
     leaderboardsRef: null,
-    initialized: false
+    initialized: false,
+    revision: null,
+    transactionDepth: 0
   };
   states.set(resolved, state);
   return state;
 }
 
 function readSqliteStore(filePath) {
+  return withSqliteTransaction(filePath, () => readSqliteSnapshot(filePath), { readOnly: true });
+}
+
+function readSqliteSnapshot(filePath) {
   const state = openState(filePath);
+  const revision = getSqliteRevision(filePath);
   const coreRow = state.db.prepare("SELECT json FROM app_state WHERE key = ?").get("core");
   if (!coreRow) return null;
   const leaderboardsRow = state.db.prepare("SELECT json FROM app_state WHERE key = ?").get("leaderboards");
@@ -181,11 +245,24 @@ function readSqliteStore(filePath) {
   state.leaderboardsSignature = leaderboardSignature(leaderboards);
   state.leaderboardsRef = leaderboards;
   state.initialized = true;
+  state.revision = revision;
+  snapshotVersions.set(store, { filePath: path.resolve(filePath), revision });
   return store;
 }
 
 function writeSqliteStore(filePath, store, options = {}) {
+  return withSqliteTransaction(filePath, () => writeSqliteSnapshot(filePath, store, options));
+}
+
+function writeSqliteSnapshot(filePath, store, options = {}) {
   const state = openState(filePath);
+  const revision = getSqliteRevision(filePath);
+  const version = snapshotVersions.get(store);
+  const existing = state.db.prepare("SELECT 1 FROM app_state WHERE key = ?").get("core");
+  if (existing && (!version || version.filePath !== path.resolve(filePath) || version.revision !== revision)) {
+    throw new StorageConflictError();
+  }
+  if (!state.initialized || state.revision !== revision) readSqliteSnapshot(filePath);
   const now = new Date().toISOString();
   const next = { ...store, updatedAt: now };
   const projects = next.projects || {};
@@ -247,32 +324,26 @@ function writeSqliteStore(filePath, store, options = {}) {
   const deleteProjectPlans = state.db.prepare("DELETE FROM project_plans WHERE project_key = ?");
   const insertProjectPlan = state.db.prepare("INSERT OR IGNORE INTO project_plans(project_key, plan_id) VALUES (?, ?)");
 
-  state.db.exec("BEGIN IMMEDIATE");
-  try {
-    if (force || state.coreHash !== coreJson) upsertState.run("core", coreJson, now);
-    if (leaderboardsChanged) upsertState.run("leaderboards", leaderboardsJson, now);
-    for (const [key, project, value] of changedProjects) {
-      upsertProject.run(
-        key,
-        String(project.fullName || key),
-        Number(project.scores?.opportunity || 0),
-        Number(project.stars || 0),
-        String(project.pushedAt || project.updatedAt || ""),
-        value
-      );
-      deleteProjectPlans.run(key);
-      for (const planId of planIds(project)) insertProjectPlan.run(key, planId);
-    }
-    for (const [id, plan, value] of changedPlans) upsertPlan.run(id, String(plan.name || ""), String(plan.updatedAt || ""), value);
-    for (const [id, scan, value] of changedScans) upsertScan.run(id, String(scan.at || ""), String(scan.observationPlanId || ""), value);
-    deletedProjects.forEach((key) => state.db.prepare("DELETE FROM projects WHERE key = ?").run(key));
-    deletedPlans.forEach((id) => state.db.prepare("DELETE FROM observation_plans WHERE id = ?").run(id));
-    deletedScans.forEach((id) => state.db.prepare("DELETE FROM scans WHERE id = ?").run(id));
-    state.db.exec("COMMIT");
-  } catch (error) {
-    state.db.exec("ROLLBACK");
-    throw error;
+  if (force || state.coreHash !== coreJson) upsertState.run("core", coreJson, now);
+  if (leaderboardsChanged) upsertState.run("leaderboards", leaderboardsJson, now);
+  for (const [key, project, value] of changedProjects) {
+    upsertProject.run(
+      key,
+      String(project.fullName || key),
+      Number(project.scores?.opportunity || 0),
+      Number(project.stars || 0),
+      String(project.pushedAt || project.updatedAt || ""),
+      value
+    );
+    deleteProjectPlans.run(key);
+    for (const planId of planIds(project)) insertProjectPlan.run(key, planId);
   }
+  for (const [id, plan, value] of changedPlans) upsertPlan.run(id, String(plan.name || ""), String(plan.updatedAt || ""), value);
+  for (const [id, scan, value] of changedScans) upsertScan.run(id, String(scan.at || ""), String(scan.observationPlanId || ""), value);
+  deletedProjects.forEach((key) => state.db.prepare("DELETE FROM projects WHERE key = ?").run(key));
+  deletedPlans.forEach((id) => state.db.prepare("DELETE FROM observation_plans WHERE id = ?").run(id));
+  deletedScans.forEach((id) => state.db.prepare("DELETE FROM scans WHERE id = ?").run(id));
+  upsertState.run("revision", json(revision + 1), now);
 
   state.projectState = nextProjectState;
   state.planHashes = nextPlanHashes;
@@ -282,6 +353,8 @@ function writeSqliteStore(filePath, store, options = {}) {
   state.leaderboardsSignature = nextLeaderboardSignature;
   state.leaderboardsRef = leaderboards;
   state.initialized = true;
+  state.revision = revision + 1;
+  snapshotVersions.set(next, { filePath: path.resolve(filePath), revision: revision + 1 });
   return next;
 }
 
@@ -294,8 +367,12 @@ function sqliteStats(filePath) {
 }
 
 module.exports = {
+  getSqliteRevision,
+  inheritSqliteSnapshot,
   isSqlitePath,
   readSqliteStore,
+  snapshotRevision,
   sqliteStats,
+  withSqliteTransaction,
   writeSqliteStore
 };

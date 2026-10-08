@@ -4,7 +4,7 @@ const { createHash, randomUUID } = require("node:crypto");
 const { classifyRepository, inferUseCase } = require("./scoring");
 const { assignProfileIds, projectProfileMatches } = require("../../public/domain-core");
 const { buildQueryProfiles } = require("./github");
-const { isSqlitePath, readSqliteStore, writeSqliteStore } = require("./sqlite-store");
+const { getSqliteRevision, inheritSqliteSnapshot, isSqlitePath, readSqliteStore, snapshotRevision, withSqliteTransaction, writeSqliteStore } = require("./sqlite-store");
 
 // Passive browsing remains visible in recent behavior, but only explicit actions affect learning.
 const MEMORY_EVENT_WEIGHTS = {
@@ -284,16 +284,20 @@ function readStore(filePath) {
   ensureDir(filePath);
   if (isSqlitePath(filePath)) {
     const stored = readSqliteStore(filePath);
-    if (stored) return normalizeStoreData(stored);
-    const basePath = filePath.replace(/\.(?:db|sqlite3?)$/i, "");
-    const legacyCandidates = [
-      `${basePath}.json`,
-      path.join(path.dirname(filePath), "store.json")
-    ];
-    const legacyPath = legacyCandidates.find((candidate, index) => legacyCandidates.indexOf(candidate) === index && fs.existsSync(candidate));
-    const imported = legacyPath ? JSON.parse(fs.readFileSync(legacyPath, "utf8")) : emptyStore();
-    const normalized = normalizeStoreData(imported);
-    return writeSqliteStore(filePath, normalized, { force: true });
+    if (stored) return inheritSqliteSnapshot(stored, normalizeStoreData(stored));
+    return withSqliteTransaction(filePath, () => {
+      // Another writer may have initialized the database after our first read.
+      const current = readSqliteStore(filePath);
+      if (current) return inheritSqliteSnapshot(current, normalizeStoreData(current));
+      const basePath = filePath.replace(/\.(?:db|sqlite3?)$/i, "");
+      const legacyCandidates = [
+        `${basePath}.json`,
+        path.join(path.dirname(filePath), "store.json")
+      ];
+      const legacyPath = legacyCandidates.find((candidate, index) => legacyCandidates.indexOf(candidate) === index && fs.existsSync(candidate));
+      const imported = legacyPath ? JSON.parse(fs.readFileSync(legacyPath, "utf8")) : emptyStore();
+      return writeSqliteStore(filePath, normalizeStoreData(imported), { force: true });
+    });
   }
   if (!fs.existsSync(filePath)) return emptyStore();
 
@@ -3944,6 +3948,7 @@ function applyMemoryTuningPatch(memory, tuning = {}) {
 function createStorage(filePath) {
   let storeCache = null;
   let storeCacheMtimeMs = 0;
+  let storeCacheRevision = null;
   let computedProjectItemsCache = null;
   let computedProjectItemsVersion = "";
   const summaryCache = new Map();
@@ -4004,6 +4009,14 @@ function createStorage(filePath) {
   }
 
   function load() {
+    if (isSqlitePath(filePath)) {
+      const revision = getSqliteRevision(filePath);
+      if (storeCache && storeCacheRevision === revision) return storeCache;
+      storeCache = readStore(filePath);
+      storeCacheRevision = snapshotRevision(storeCache);
+      invalidateComputedProjectItems();
+      return storeCache;
+    }
     try {
       const stat = fs.existsSync(filePath) ? fs.statSync(filePath) : null;
       const mtimeMs = stat?.mtimeMs || 0;
@@ -4024,10 +4037,44 @@ function createStorage(filePath) {
 
   function save(store, options = {}) {
     syncActivePlanMemory(store, store.memory);
-    storeCache = writeStore(filePath, store, options);
-    storeCacheMtimeMs = fs.existsSync(filePath) ? fs.statSync(filePath).mtimeMs : Date.now();
-    invalidateComputedProjectItems();
-    return storeCache;
+    try {
+      storeCache = writeStore(filePath, store, options);
+      storeCacheRevision = snapshotRevision(storeCache);
+      storeCacheMtimeMs = fs.existsSync(filePath) ? fs.statSync(filePath).mtimeMs : Date.now();
+      invalidateComputedProjectItems();
+      return storeCache;
+    } catch (error) {
+      storeCache = null;
+      storeCacheRevision = null;
+      invalidateComputedProjectItems();
+      throw error;
+    }
+  }
+
+  function loadSnapshot() {
+    const store = load();
+    // Public callers can retain this across asynchronous work. An independent
+    // snapshot keeps their edits out of the live cache until a successful CAS.
+    return inheritSqliteSnapshot(store, cloneJson(store, store));
+  }
+
+  function mutate(operation, args) {
+    if (!isSqlitePath(filePath)) return operation(...args);
+    try {
+      return withSqliteTransaction(filePath, () => {
+        // Refresh only after acquiring the writer lock. Both the input snapshot
+        // and incremental hashes must describe the latest committed version.
+        storeCache = null;
+        storeCacheRevision = null;
+        invalidateComputedProjectItems();
+        return operation(...args);
+      });
+    } catch (error) {
+      storeCache = null;
+      storeCacheRevision = null;
+      invalidateComputedProjectItems();
+      throw error;
+    }
   }
 
   function createTask(task = {}) {
@@ -5982,7 +6029,7 @@ function createStorage(filePath) {
     return getSettings(false);
   }
 
-  return {
+  const api = {
     addScan,
     applyMemoryTuning,
     buildLeaderboard,
@@ -6010,7 +6057,7 @@ function createStorage(filePath) {
     listObservationPlans,
     listProjects,
     listTasks,
-    load,
+    load: loadSnapshot,
     projectPoolPosition,
     recordMemoryEvent,
     recoverInterruptedTasks,
@@ -6037,6 +6084,22 @@ function createStorage(filePath) {
     updateSettings,
     upsertProjects
   };
+  const mutations = [
+    "addScan", "applyMemoryTuning", "buildLeaderboard", "clearMemoryEvents", "compactMemoryContext",
+    "createTask", "deleteObservationPlan", "evaluateMemoryHarness", "importObservationPlans", "importPortableData",
+    "recordLeaderboardFeedback", "recordMemoryEvent", "recoverInterruptedTasks", "saveObservationPlan",
+    "saveObservationPlanRequirements", "setActiveObservationPlan", "setAnalysis", "setGithubAction", "setNote",
+    "setProjectDismissed", "setRuntimeState", "setWatch", "updateDismissedProjectFeedback", "updateLatestScan",
+    "updateMemoryPreference", "updateMemorySettings", "updateProjectTrends", "updateSettings", "updateTask", "upsertProjects"
+  ];
+  for (const name of mutations) {
+    const operation = api[name];
+    api[name] = (...args) => {
+      if (name === "buildLeaderboard" && args[1]?.persist === false) return operation(...args);
+      return mutate(operation, args);
+    };
+  }
+  return api;
 }
 
 module.exports = {
