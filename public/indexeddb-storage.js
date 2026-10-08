@@ -14,6 +14,10 @@
   const SNAPSHOT_META_KEY = "localSnapshotMeta";
   const CORE_KEY = "snapshotCore";
   const LEGACY_LEADERBOARDS_KEY = "leaderboards";
+  const REVISION_KEY = "snapshotRevision";
+  const snapshotBases = new WeakMap();
+  const snapshotWrites = new WeakMap();
+  const snapshotOperations = new WeakMap();
 
   let dbPromise = null;
   let cachedSnapshot = null;
@@ -26,6 +30,7 @@
   let cachedSnapshotHasLeaderboards = false;
   let cachedProjectsByPlan = new Map();
   let persistenceRequest = null;
+  let cachedRevision = -1;
 
   function isSupported() {
     return typeof window !== "undefined" && typeof window.indexedDB !== "undefined";
@@ -136,11 +141,209 @@
 
   function snapshotCore(snapshot) {
     const core = { ...snapshot, store: { ...(snapshot.store || {}) } };
+    delete core.localRevision;
     delete core.store.projects;
     delete core.store.observationPlans;
     delete core.store.scans;
     delete core.store.leaderboards;
     return core;
+  }
+
+  function snapshotConflict() {
+    const error = new Error("工作区在操作期间已更新，请重新读取后再试");
+    error.code = "SNAPSHOT_CONFLICT";
+    return error;
+  }
+
+  function isRecord(value) {
+    return value !== null && typeof value === "object" && !Array.isArray(value);
+  }
+
+  function keyedArray(value) {
+    return Array.isArray(value) && value.every((item) => isRecord(item) && item.id);
+  }
+
+  function isLearningPath(path) {
+    return /\/memory\/(?:preferences|negativePreferences|discoveryProfiles|stats\/eventCounts)\//.test(path);
+  }
+
+  function learningValue(current, delta, path, bounds = {}) {
+    const eventCount = path.includes("/stats/eventCounts/");
+    const min = bounds.min ?? (path.includes("/discoveryProfiles/") ? -40 : 0);
+    const max = bounds.max ?? (eventCount ? Infinity : path.includes("/negativePreferences/repositories/") ? 20 : path.includes("/negativePreferences/") ? 30 : 40);
+    const value = Math.max(min, Math.min(max, Number(current || 0) + delta));
+    return eventCount ? value : Number(value.toFixed(3));
+  }
+
+  function prunedLearningValue(value, path) {
+    return !path.includes("/stats/eventCounts/") && Math.abs(value) < 0.005;
+  }
+
+  function memoryPathValue(memory, path) {
+    return path.reduce((value, key) => value?.[key], memory);
+  }
+
+  function setMemoryPath(memory, path, value, remove = false) {
+    let bucket = memory;
+    for (const key of path.slice(0, -1)) {
+      if (!isRecord(bucket[key])) bucket[key] = {};
+      bucket = bucket[key];
+    }
+    if (remove) delete bucket[path[path.length - 1]];
+    else bucket[path[path.length - 1]] = value;
+  }
+
+  // Register the original, unclamped operations after the local mutation.
+  // They stay in memory and are consumed only after a successful transaction.
+  function registerSnapshotOperations(snapshot, planId, operations = []) {
+    if (!snapshot || !snapshot.store?.observationPlans?.[planId]) throw new Error("Learning operation requires an existing observation plan");
+    let state = snapshotOperations.get(snapshot);
+    if (!state) {
+      state = { entries: [], nextSequence: 0, committedSequence: 0 };
+      snapshotOperations.set(snapshot, state);
+    }
+    const memory = snapshot.store.observationPlans[planId].memory || {};
+    let registered = 0;
+    for (const operation of operations) {
+      const path = Array.isArray(operation?.path) ? operation.path.map(String) : [];
+      if (!path.length || !isLearningPath(`/memory/${path.join("/")}`) || !Number.isFinite(operation.delta)) throw new Error("Invalid learning operation");
+      const min = operation.min === undefined ? undefined : Number(operation.min);
+      const max = operation.max === undefined ? undefined : Number(operation.max);
+      if ((min !== undefined && !Number.isFinite(min)) || (max !== undefined && !Number.isFinite(max)) || (min !== undefined && max !== undefined && min > max)) throw new Error("Invalid learning operation bounds");
+      state.entries.push({
+        sequence: ++state.nextSequence, planId: String(planId), path,
+        delta: operation.delta, min, max,
+        observedValue: Number(memoryPathValue(memory, path) || 0)
+      });
+      registered += 1;
+    }
+    return { registered };
+  }
+
+  function applySnapshotOperations(local, current, merged, operations) {
+    const groups = new Map();
+    for (const operation of operations) {
+      const key = `${operation.planId}|${JSON.stringify(operation.path)}`;
+      const list = groups.get(key) || [];
+      list.push(operation);
+      groups.set(key, list);
+    }
+    for (const list of groups.values()) {
+      const last = list[list.length - 1];
+      const plan = merged.store.observationPlans[last.planId];
+      if (!plan) continue;
+      const localValue = memoryPathValue(local.store?.observationPlans?.[last.planId]?.memory, last.path);
+      plan.memory = plan.memory || {};
+      if (Number(localValue || 0) !== last.observedValue) {
+        // A later explicit setter in this caller takes precedence over its
+        // earlier learning operations, retaining scalar last-commit behavior.
+        setMemoryPath(plan.memory, last.path, cloneValue(localValue), localValue === undefined);
+        continue;
+      }
+      const path = `/plans/${last.planId}/memory/${last.path.join("/")}`;
+      let value = Number(memoryPathValue(current.store?.observationPlans?.[last.planId]?.memory, last.path) || 0);
+      for (const operation of list) value = learningValue(value, operation.delta, path, operation);
+      setMemoryPath(plan.memory, last.path, value, prunedLearningValue(value, path));
+    }
+  }
+
+  // Apply only base -> local changes to the latest committed record. Scalar
+  // edits to the same field use transaction commit order (last commit wins).
+  // Learned counters are deltas; independent feedback must accumulate.
+  function mergeChanges(base, local, current, path = "", learnedDelta = false) {
+    if (stableJson(base) === stableJson(local)) return cloneValue(current, undefined);
+    if (isRecord(local) && (isRecord(base) || base === undefined)) {
+      if (path.endsWith("/memory")) {
+        learnedDelta = stableJson(base?.events || []) !== stableJson(local.events || []);
+      }
+      const result = isRecord(current) ? cloneValue(current, {}) : {};
+      for (const key of new Set([...Object.keys(base || {}), ...Object.keys(local)])) {
+        const childPath = `${path}/${key}`;
+        if (!Object.prototype.hasOwnProperty.call(local, key)) {
+          if (learnedDelta && typeof base?.[key] === "number" && isLearningPath(childPath)) {
+            const value = learningValue(current?.[key], -base[key], childPath);
+            if (prunedLearningValue(value, childPath)) delete result[key];
+            else result[key] = value;
+          } else delete result[key];
+        }
+        else if (stableJson(base?.[key]) !== stableJson(local[key])) {
+          result[key] = mergeChanges(base?.[key], local[key], current?.[key], childPath, learnedDelta);
+        }
+      }
+      return result;
+    }
+    if (keyedArray(local) && keyedArray(base || []) && keyedArray(current || [])) {
+      const map = (items) => Object.fromEntries((items || []).map((item) => [item.id, item]));
+      const merged = mergeChanges(map(base), map(local), map(current), path, learnedDelta);
+      const order = [...local.map((item) => item.id), ...(current || []).map((item) => item.id)];
+      return [...new Set(order)].filter((id) => merged[id]).map((id) => merged[id]);
+    }
+    if (Array.isArray(local) && Array.isArray(base || []) && /\/memory\/(?:events|shortTerm|context\/chunks|harness\/runs)$/.test(path)) {
+      // These append/remove logs predate event ids. Use content multiplicities
+      // so equal legacy entries and concurrent additions are not collapsed.
+      const counts = (items) => {
+        const values = new Map();
+        for (const item of items) values.set(stableJson(item), (values.get(stableJson(item)) || 0) + 1);
+        return values;
+      };
+      const oldCounts = counts(base || []);
+      const localCounts = counts(local);
+      const additions = [];
+      for (const item of local) {
+        const key = stableJson(item);
+        if (oldCounts.get(key)) oldCounts.set(key, oldCounts.get(key) - 1);
+        else additions.push(cloneValue(item));
+      }
+      const removals = counts(base || []);
+      for (const [key, count] of localCounts) removals.set(key, Math.max(0, (removals.get(key) || 0) - count));
+      const retained = (current || []).filter((item) => {
+        const key = stableJson(item);
+        if (!removals.get(key)) return true;
+        removals.set(key, removals.get(key) - 1);
+        return false;
+      });
+      return [...additions, ...cloneValue(retained, [])];
+    }
+    if (learnedDelta && typeof local === "number" && (typeof current === "number" || current === undefined) && isLearningPath(path)) {
+      return learningValue(current, local - Number(base || 0), path);
+    }
+    return cloneValue(local, local);
+  }
+
+  function bindSnapshot(snapshot, revision) {
+    if (!snapshot) return null;
+    snapshot.localRevision = revision;
+    snapshotBases.set(snapshot, { value: cloneValue(snapshot), revision });
+    return snapshot;
+  }
+
+  async function bumpSnapshotRevision(tx) {
+    const store = tx.objectStore(STORES.meta);
+    const record = await requestToPromise(store.get(REVISION_KEY));
+    const revision = Number(record?.value || 0) + 1;
+    store.put({ key: REVISION_KEY, value: revision });
+    return revision;
+  }
+
+  function snapshotWriteDone(tx) {
+    const completion = Promise.all([transactionDone(tx), bumpSnapshotRevision(tx)]);
+    completion.catch(() => {});
+    return completion;
+  }
+
+  async function freshCache(db) {
+    const tx = db.transaction(STORES.meta, "readonly");
+    const record = await requestToPromise(tx.objectStore(STORES.meta).get(REVISION_KEY));
+    await transactionDone(tx);
+    const revision = Number(record?.value || 0);
+    if (revision !== cachedRevision) {
+      cachedSnapshot = null;
+      cachedSnapshotHasProjects = false;
+      cachedSnapshotHasLeaderboards = false;
+      cachedProjectsByPlan = new Map();
+      cachedRevision = revision;
+    }
+    return revision;
   }
 
   function snapshotMeta(snapshot) {
@@ -259,101 +462,128 @@
     persistedCoreHash = stableJson(snapshotCore(snapshot));
   }
 
-  async function persistSnapshotWithDb(db, snapshot, force = false, options = {}) {
+  async function persistSnapshotWithDb(db, snapshot, force = false, options = {}, submittedSnapshot = null, submittedOperations = []) {
     const preserveProjects = options.preserveProjects === true;
     const preserveLeaderboards = options.preserveLeaderboards === true;
-    const projects = snapshot?.store?.projects || {};
-    const plans = snapshot?.store?.observationPlans || {};
-    const scans = Array.isArray(snapshot?.store?.scans) ? snapshot.store.scans : [];
-    const core = snapshotCore(snapshot);
-    const leaderboards = leaderboardRecords(snapshot?.store?.leaderboards || {});
-    const coreHash = stableJson(core);
-    const nextProjectKeys = new Set(Object.keys(projects));
-    const nextProjectHashes = new Map();
-    const nextPlanIds = new Set(Object.keys(plans));
-    const nextScanIds = new Set(scans.map((scan) => String(scan.id || "")).filter(Boolean));
-    const nextLeaderboardIds = new Set(leaderboards.map((record) => record.id));
-    const nextPlanHashes = new Map();
-    const nextScanHashes = new Map();
-    const nextLeaderboardHashes = new Map();
-    const changedProjects = [];
-    const changedPlans = [];
-    const changedScans = [];
-    const changedLeaderboards = [];
-
-    for (const [key, project] of Object.entries(projects)) {
-      const hash = stableJson(project);
-      nextProjectHashes.set(key, hash);
-      if (!preserveProjects && (force || persistedProjectHashes.get(key) !== hash)) changedProjects.push([key, project]);
-    }
-    for (const [id, plan] of Object.entries(plans)) {
-      const hash = stableJson(plan);
-      nextPlanHashes.set(id, hash);
-      if (force || persistedPlanHashes.get(id) !== hash) changedPlans.push([id, plan]);
-    }
-    for (const scan of scans) {
-      const id = String(scan.id || "");
-      if (!id) continue;
-      const hash = stableJson(scan);
-      nextScanHashes.set(id, hash);
-      if (force || persistedScanHashes.get(id) !== hash) changedScans.push(scan);
-    }
-    for (const record of leaderboards) {
-      const hash = stableJson(record.value);
-      nextLeaderboardHashes.set(record.id, hash);
-      if (!preserveLeaderboards && (force || persistedLeaderboardHashes.get(record.id) !== hash)) changedLeaderboards.push(record);
-    }
-
-    const deletedProjects = force || preserveProjects ? [] : [...persistedProjectHashes.keys()].filter((key) => !nextProjectKeys.has(key));
-    const deletedPlans = force ? [] : [...persistedPlanHashes.keys()].filter((id) => !nextPlanIds.has(id));
-    const deletedScans = force ? [] : [...persistedScanHashes.keys()].filter((id) => !nextScanIds.has(id));
-    const deletedLeaderboards = force || preserveLeaderboards
-      ? []
-      : [...persistedLeaderboardHashes.keys()].filter((id) => !nextLeaderboardIds.has(id));
+    const tracked = snapshotBases.get(snapshot);
+    const local = cloneValue(submittedSnapshot || snapshot);
+    const base = tracked?.value;
+    const operationState = snapshotOperations.get(snapshot);
+    const operations = submittedOperations.filter((operation) => operation.sequence > (operationState?.committedSequence || 0));
+    const replace = force || options.replace === true || options.expectedRevision !== undefined || !base;
+    const expectedRevision = Number(options.expectedRevision ?? tracked?.revision ?? 0);
     const tx = db.transaction([STORES.meta, STORES.projects, STORES.plans, STORES.scans, STORES.leaderboards], "readwrite");
+    const done = transactionDone(tx);
+    // Attach immediately: a request failure can abort before the reads settle.
+    done.catch(() => {});
     const metaStore = tx.objectStore(STORES.meta);
     const projectStore = tx.objectStore(STORES.projects);
     const planStore = tx.objectStore(STORES.plans);
     const scanStore = tx.objectStore(STORES.scans);
     const leaderboardStore = tx.objectStore(STORES.leaderboards);
+    let merged;
+    let revision;
+    try {
+      const [coreRecord, revisionRecord, projectRecords, planRecords, scanRecords, archives, projectCount] = await Promise.all([
+        requestToPromise(metaStore.get(CORE_KEY)),
+        requestToPromise(metaStore.get(REVISION_KEY)),
+        preserveProjects ? Promise.resolve([]) : requestToPromise(projectStore.getAll()),
+        requestToPromise(planStore.getAll()),
+        requestToPromise(scanStore.getAll()),
+        preserveLeaderboards ? Promise.resolve([]) : requestToPromise(leaderboardStore.getAll()),
+        requestToPromise(projectStore.count())
+      ]);
+      revision = Number(revisionRecord?.value || 0);
+      if (!force && !base && coreRecord && options.expectedRevision === undefined) throw snapshotConflict();
+      if (!force && replace && revision !== expectedRevision && (coreRecord || options.expectedRevision !== undefined)) throw snapshotConflict();
+      if (!replace && base && !coreRecord) throw snapshotConflict();
+      const current = coreRecord?.value || { store: {} };
+      current.store = current.store || {};
+      current.store.observationPlans = Object.fromEntries(planRecords.map((record) => [record.id, record.value]));
+      current.store.scans = scanRecords.map((record) => record.value);
+      current.store.projects = Object.fromEntries(projectRecords.map((record) => [record.key, record.value]));
+      current.store.leaderboards = assembleLeaderboards(archives);
 
-    if (force || persistedCoreHash !== coreHash) metaStore.put({ key: CORE_KEY, value: core, updatedAt: new Date().toISOString() });
-    metaStore.put({ key: SNAPSHOT_META_KEY, value: snapshotMeta(snapshot), updatedAt: new Date().toISOString() });
-    changedProjects.forEach(([key, project]) => projectStore.put(projectRecord(key, project)));
-    changedPlans.forEach(([id, plan]) => planStore.put({ id, value: plan }));
-    changedScans.forEach((scan) => scanStore.put({ ...scan, id: String(scan.id), value: scan }));
-    changedLeaderboards.forEach((record) => leaderboardStore.put(record));
-    deletedProjects.forEach((key) => projectStore.delete(key));
-    deletedPlans.forEach((id) => planStore.delete(id));
-    deletedScans.forEach((id) => scanStore.delete(id));
-    deletedLeaderboards.forEach((id) => leaderboardStore.delete(id));
-    await transactionDone(tx);
-
-    const previousSnapshot = cachedSnapshot;
-    const cachedNextSnapshot = cloneValue(snapshot, snapshot);
-    cachedSnapshot = cachedNextSnapshot;
-    if (!preserveProjects) {
-      persistedProjectHashes = nextProjectHashes;
-      cachedSnapshotHasProjects = true;
-      cachedProjectsByPlan = new Map();
-    } else if (cachedSnapshotHasProjects && previousSnapshot?.store?.projects) {
-      cachedSnapshot.store.projects = previousSnapshot.store.projects;
-    } else {
-      cachedSnapshotHasProjects = false;
-      cachedProjectsByPlan = new Map();
+      if (replace) merged = local;
+      else {
+        // Core mirrors and collection counts are derived below. Never patch an
+        // obsolete active plan's memory into the current plan's mirror.
+        const coreBase = snapshotCore(base);
+        const coreLocal = snapshotCore(local);
+        const coreCurrent = snapshotCore(current);
+        delete coreBase.store.memory;
+        delete coreLocal.store.memory;
+        delete coreCurrent.store.memory;
+        merged = mergeChanges(coreBase, coreLocal, coreCurrent);
+        merged.store = merged.store || {};
+        const oldPlans = base.store?.observationPlans || {};
+        const nextPlans = local.store?.observationPlans || {};
+        for (const [id, plan] of Object.entries(nextPlans)) {
+          if (oldPlans[id] && !current.store.observationPlans[id] && stableJson(oldPlans[id]) !== stableJson(plan)) throw snapshotConflict();
+        }
+        merged.store.observationPlans = mergeChanges(oldPlans, nextPlans, current.store.observationPlans, "/plans");
+        const scanMap = (items) => Object.fromEntries((items || []).filter((item) => item.id).map((item) => [String(item.id), item]));
+        merged.store.scans = Object.values(mergeChanges(scanMap(base.store?.scans), scanMap(local.store?.scans), scanMap(current.store.scans), "/scans"));
+        merged.store.projects = preserveProjects ? {} : mergeChanges(base.store?.projects || {}, local.store?.projects || {}, current.store.projects, "/projects");
+        merged.store.leaderboards = preserveLeaderboards ? { daily: {}, byPlan: {} } :
+          mergeChanges(base.store?.leaderboards || { daily: {}, byPlan: {} }, local.store?.leaderboards || { daily: {}, byPlan: {} }, current.store.leaderboards, "/leaderboards");
+        applySnapshotOperations(local, current, merged, operations);
+      }
+      merged.store = merged.store || {};
+      const plans = merged.store.observationPlans || {};
+      for (const plan of Object.values(plans)) {
+        const memory = plan.memory;
+        if (Array.isArray(memory?.events)) memory.events = memory.events.slice(0, Number(memory.context?.rawEventLimit || 300));
+        if (Array.isArray(memory?.shortTerm)) memory.shortTerm = memory.shortTerm.slice(0, Number(memory.context?.shortTermLimit || 80));
+      }
+      const activeId = merged.activeObservationPlanId || merged.settings?.activeObservationPlanId || "default";
+      merged.activeObservationPlanId = plans[activeId] ? activeId : "default";
+      merged.settings = { ...(merged.settings || {}), activeObservationPlanId: merged.activeObservationPlanId };
+      if (plans[merged.activeObservationPlanId]) merged.store.memory = cloneValue(plans[merged.activeObservationPlanId].memory || {});
+      merged.counts = {
+        ...(merged.counts || {}),
+        projects: preserveProjects ? Number(projectCount || 0) : Object.keys(merged.store.projects || {}).length,
+        observationPlans: Object.keys(plans).length,
+        scans: (merged.store.scans || []).length
+      };
+      const writeRecords = (store, previous, next, record) => {
+        for (const key of Object.keys(previous)) if (!Object.prototype.hasOwnProperty.call(next, key)) store.delete(key);
+        for (const [key, value] of Object.entries(next)) {
+          if (stableJson(previous[key]) !== stableJson(value)) store.put(record(key, value));
+        }
+      };
+      writeRecords(planStore, current.store.observationPlans, plans, (id, value) => ({ id, value }));
+      const oldScans = Object.fromEntries(scanRecords.map((record) => [record.id, record.value]));
+      const nextScans = Object.fromEntries((merged.store.scans || []).filter((scan) => scan.id).map((scan) => [String(scan.id), scan]));
+      writeRecords(scanStore, oldScans, nextScans, (id, value) => ({ ...value, id, value }));
+      if (!preserveProjects) writeRecords(projectStore, current.store.projects, merged.store.projects || {}, projectRecord);
+      if (!preserveLeaderboards) {
+        const nextArchives = Object.fromEntries(leaderboardRecords(merged.store.leaderboards || {}).map((record) => [record.id, record]));
+        writeRecords(leaderboardStore, Object.fromEntries(archives.map((record) => [record.id, record])), nextArchives, (_id, record) => record);
+      }
+      revision += 1;
+      merged.localRevision = revision;
+      metaStore.put({ key: CORE_KEY, value: snapshotCore(merged), updatedAt: new Date().toISOString() });
+      metaStore.put({ key: REVISION_KEY, value: revision });
+      metaStore.put({ key: SNAPSHOT_META_KEY, value: { ...snapshotMeta(merged), localRevision: revision }, updatedAt: new Date().toISOString() });
+      await done;
+    } catch (error) {
+      try { tx.abort(); } catch { /* already completed or aborted */ }
+      await done.catch(() => {});
+      throw error;
     }
-    if (!preserveLeaderboards) {
-      persistedLeaderboardHashes = nextLeaderboardHashes;
-      cachedSnapshotHasLeaderboards = true;
-    } else if (cachedSnapshotHasLeaderboards && previousSnapshot?.store?.leaderboards) {
-      cachedSnapshot.store.leaderboards = previousSnapshot.store.leaderboards;
-    } else {
-      cachedSnapshotHasLeaderboards = false;
+    // Caller references (including task) stay intact. Its next delta must be
+    // based on what it submitted, not concurrent fields it has never read.
+    snapshot.localRevision = revision;
+    local.localRevision = revision;
+    snapshotBases.set(snapshot, { value: local, revision });
+    if (operationState && operations.length) {
+      operationState.committedSequence = Math.max(operationState.committedSequence, ...operations.map((operation) => operation.sequence));
+      operationState.entries = operationState.entries.filter((operation) => operation.sequence > operationState.committedSequence);
     }
-    persistedPlanHashes = nextPlanHashes;
-    persistedScanHashes = nextScanHashes;
-    persistedCoreHash = coreHash;
-    return snapshotMeta(snapshot);
+    cachePersistedState(merged, { hasProjects: !preserveProjects, hasLeaderboards: !preserveLeaderboards });
+    cachedRevision = revision;
+    return { ...snapshotMeta(merged), localRevision: revision };
   }
 
   function invalidateProjectPlanCache() {
@@ -432,12 +662,23 @@
     return record ? record.value : null;
   }
 
-  async function putValue(key, value) {
+  async function putValue(key, value, options = {}) {
     const db = await openDb();
     const updatedAt = new Date().toISOString();
     const tx = db.transaction(STORES.kv, "readwrite");
-    tx.objectStore(STORES.kv).put({ key, value, updatedAt });
-    await transactionDone(tx);
+    const done = transactionDone(tx);
+    done.catch(() => {});
+    const store = tx.objectStore(STORES.kv);
+    try {
+      const previous = options.base !== undefined ? await requestToPromise(store.get(key)) : null;
+      const next = options.base !== undefined ? mergeChanges(options.base, value, previous?.value || {}) : value;
+      store.put({ key, value: next, updatedAt });
+      await done;
+    } catch (error) {
+      try { tx.abort(); } catch { /* already aborted */ }
+      await done.catch(() => {});
+      throw error;
+    }
     return { key, updatedAt };
   }
 
@@ -503,6 +744,8 @@
   async function getSnapshot(options = {}) {
     const includeProjects = options.includeProjects !== false;
     const includeLeaderboards = options.includeLeaderboards !== false;
+    const db = await openDb();
+    await freshCache(db);
     if (
       cachedSnapshot &&
       (!includeProjects || cachedSnapshotHasProjects) &&
@@ -512,17 +755,17 @@
       const result = cloneValue(cachedSnapshot, null);
       if (result?.store && includeProjects === false) result.store.projects = {};
       if (result?.store && includeLeaderboards === false) result.store.leaderboards = { daily: {}, byPlan: {} };
-      return result;
+      return bindSnapshot(result, cachedRevision);
     }
-    const db = await openDb();
     const tx = db.transaction([STORES.meta, STORES.projects, STORES.plans, STORES.scans, STORES.leaderboards], "readonly");
     const metaStore = tx.objectStore(STORES.meta);
-    const [coreRecord, projectRecords, planRecords, scanRecords, leaderboardEntries] = await Promise.all([
+    const [coreRecord, projectRecords, planRecords, scanRecords, leaderboardEntries, revisionRecord] = await Promise.all([
       requestToPromise(metaStore.get(CORE_KEY)),
       includeProjects ? requestToPromise(tx.objectStore(STORES.projects).getAll()) : Promise.resolve([]),
       requestToPromise(tx.objectStore(STORES.plans).getAll()),
       requestToPromise(tx.objectStore(STORES.scans).getAll()),
-      includeLeaderboards ? requestToPromise(tx.objectStore(STORES.leaderboards).getAll()) : Promise.resolve([])
+      includeLeaderboards ? requestToPromise(tx.objectStore(STORES.leaderboards).getAll()) : Promise.resolve([]),
+      requestToPromise(metaStore.get(REVISION_KEY))
     ]);
     await transactionDone(tx);
     if (!coreRecord?.value) return null;
@@ -533,25 +776,23 @@
     snapshot.store.scans = scanRecords.map((record) => record.value).sort((a, b) => String(b.at || "").localeCompare(String(a.at || "")));
     snapshot.store.leaderboards = includeLeaderboards ? assembleLeaderboards(leaderboardEntries) : { daily: {}, byPlan: {} };
     cachePersistedState(snapshot, { hasProjects: includeProjects, hasLeaderboards: includeLeaderboards });
-    return cloneValue(snapshot, snapshot);
+    cachedRevision = Number(revisionRecord?.value || 0);
+    return bindSnapshot(cloneValue(snapshot, snapshot), cachedRevision);
   }
 
   async function putSnapshot(snapshot, options = {}) {
     if (!snapshot || snapshot.schema !== "starvault-indexeddb-snapshot/v1") {
       throw new Error("Invalid StarVault IndexedDB snapshot");
     }
-    const db = await openDb();
-    if (
-      !cachedSnapshot ||
-      (options.preserveProjects !== true && !cachedSnapshotHasProjects) ||
-      (options.preserveLeaderboards !== true && !cachedSnapshotHasLeaderboards)
-    ) {
-      await getSnapshot({
-        includeProjects: options.preserveProjects !== true,
-        includeLeaderboards: options.preserveLeaderboards !== true
-      });
-    }
-    return persistSnapshotWithDb(db, snapshot, false, options);
+    const submitted = cloneValue(snapshot);
+    const submittedOperations = (snapshotOperations.get(snapshot)?.entries || []).map((operation) => ({ ...operation, path: [...operation.path] }));
+    const previous = snapshotWrites.get(snapshot) || Promise.resolve();
+    const completion = previous.catch(() => {}).then(async () => {
+      const db = await openDb();
+      return persistSnapshotWithDb(db, snapshot, false, options, submitted, submittedOperations);
+    });
+    snapshotWrites.set(snapshot, completion);
+    return completion;
   }
 
   async function getProject(key) {
@@ -575,8 +816,9 @@
 
   async function getProjectsByPlan(planId = "default") {
     const safePlanId = String(planId || "default");
-    if (cachedProjectsByPlan.has(safePlanId)) return cachedProjectsByPlan.get(safePlanId).map((project) => cloneValue(project, project));
     const db = await openDb();
+    await freshCache(db);
+    if (cachedProjectsByPlan.has(safePlanId)) return cachedProjectsByPlan.get(safePlanId).map((project) => cloneValue(project, project));
     const tx = db.transaction(STORES.projects, "readonly");
     const index = tx.objectStore(STORES.projects).index("scopePlanIds");
     const keyRange = (window.IDBKeyRange || globalThis.IDBKeyRange).only(safePlanId);
@@ -614,7 +856,8 @@
     const entries = Array.isArray(projects) ? projects : Object.values(projects || {});
     if (!entries.length) return { updated: 0 };
     const db = await openDb();
-    const tx = db.transaction(STORES.projects, "readwrite");
+    const tx = db.transaction([STORES.meta, STORES.projects], "readwrite");
+    const done = snapshotWriteDone(tx);
     const store = tx.objectStore(STORES.projects);
     const committed = [];
     for (const project of entries) {
@@ -623,7 +866,7 @@
       store.put(projectRecord(key, project));
       committed.push([key, project]);
     }
-    await transactionDone(tx);
+    await done;
     for (const [key, project] of committed) {
       persistedProjectHashes.set(key, stableJson(project));
       if (cachedSnapshotHasProjects && cachedSnapshot?.store?.projects) cachedSnapshot.store.projects[key] = cloneValue(project, project);
@@ -636,7 +879,8 @@
     const entries = Array.isArray(records) ? records.filter((record) => record?.id && record?.date) : [];
     if (!entries.length) return { updated: 0 };
     const db = await openDb();
-    const tx = db.transaction(STORES.leaderboards, "readwrite");
+    const tx = db.transaction([STORES.meta, STORES.leaderboards], "readwrite");
+    const done = snapshotWriteDone(tx);
     const store = tx.objectStore(STORES.leaderboards);
     const committed = [];
     for (const record of entries) {
@@ -649,7 +893,7 @@
       });
       committed.push(record);
     }
-    await transactionDone(tx);
+    await done;
     for (const record of committed) persistedLeaderboardHashes.set(String(record.id), stableJson(record.value));
     cachedSnapshotHasLeaderboards = false;
     return { updated: committed.length };
@@ -658,7 +902,8 @@
   async function deleteLeaderboardsExcept(ids = []) {
     const retained = new Set((ids || []).map(String).filter(Boolean));
     const db = await openDb();
-    const tx = db.transaction(STORES.leaderboards, "readwrite");
+    const tx = db.transaction([STORES.meta, STORES.leaderboards], "readwrite");
+    const done = snapshotWriteDone(tx);
     const store = tx.objectStore(STORES.leaderboards);
     let deleted = 0;
     const deletedIds = [];
@@ -673,7 +918,7 @@
       }
       cursor.continue();
     };
-    await transactionDone(tx);
+    await done;
     deletedIds.forEach((id) => persistedLeaderboardHashes.delete(id));
     cachedSnapshotHasLeaderboards = false;
     return { deleted, retained: retained.size };
@@ -690,7 +935,8 @@
   async function deleteProjectsExcept(keys = []) {
     const retained = new Set((keys || []).map((key) => String(key || "").toLowerCase()).filter(Boolean));
     const db = await openDb();
-    const tx = db.transaction(STORES.projects, "readwrite");
+    const tx = db.transaction([STORES.meta, STORES.projects], "readwrite");
+    const done = snapshotWriteDone(tx);
     const store = tx.objectStore(STORES.projects);
     let deleted = 0;
     const deletedKeys = [];
@@ -705,7 +951,7 @@
       }
       cursor.continue();
     };
-    await transactionDone(tx);
+    await done;
     for (const key of deletedKeys) {
       persistedProjectHashes.delete(key);
       if (cachedSnapshotHasProjects && cachedSnapshot?.store?.projects) delete cachedSnapshot.store.projects[key];
@@ -751,7 +997,8 @@
     const existing = await requestToPromise(index.getAll(keyRange));
     await transactionDone(readTx);
     const existingByKey = new Map(existing.map((record) => [record.key, record.value]));
-    const writeTx = db.transaction(STORES.projects, "readwrite");
+    const writeTx = db.transaction([STORES.meta, STORES.projects], "readwrite");
+    const done = snapshotWriteDone(writeTx);
     const store = writeTx.objectStore(STORES.projects);
     const committed = new Map();
 
@@ -792,7 +1039,7 @@
       store.put(projectRecord(key, updated));
       committed.set(key, updated);
     }
-    await transactionDone(writeTx);
+    await done;
     for (const [key, project] of committed) {
       if (!project) {
         persistedProjectHashes.delete(key);
@@ -816,7 +1063,8 @@
     const projectRecords = await requestToPromise(index.getAll(keyRange));
     await transactionDone(readTx);
 
-    const tx = db.transaction([STORES.projects, STORES.plans, STORES.scans, STORES.leaderboards], "readwrite");
+    const tx = db.transaction([STORES.meta, STORES.projects, STORES.plans, STORES.scans, STORES.leaderboards], "readwrite");
+    const done = snapshotWriteDone(tx);
     const projectStore = tx.objectStore(STORES.projects);
     for (const record of projectRecords) {
       const remainingMatches = withoutPlanMatch(record.value, safePlanId);
@@ -843,7 +1091,7 @@
       cursor.delete();
       cursor.continue();
     };
-    await transactionDone(tx);
+    await done;
     // The operation spans projects, plans, scans and leaderboards. Force the
     // next read to rebuild every in-memory view from the committed transaction
     // instead of exposing a partially updated cached snapshot.
@@ -871,9 +1119,12 @@
   async function getSnapshotMeta() {
     const db = await openDb();
     const tx = db.transaction(STORES.meta, "readonly");
-    const record = await requestToPromise(tx.objectStore(STORES.meta).get(SNAPSHOT_META_KEY));
+    const [record, revision] = await Promise.all([
+      requestToPromise(tx.objectStore(STORES.meta).get(SNAPSHOT_META_KEY)),
+      requestToPromise(tx.objectStore(STORES.meta).get(REVISION_KEY))
+    ]);
     await transactionDone(tx);
-    return record ? record.value : null;
+    return record || revision ? { ...(record?.value || {}), localRevision: Number(revision?.value || 0) } : null;
   }
 
   async function shouldSyncSnapshot(minAgeMs) {
@@ -889,6 +1140,7 @@
   async function clearSnapshot() {
     const db = await openDb();
     const tx = db.transaction([STORES.meta, STORES.projects, STORES.plans, STORES.scans, STORES.leaderboards, STORES.taskArtifacts], "readwrite");
+    const done = snapshotWriteDone(tx);
     tx.objectStore(STORES.meta).delete(CORE_KEY);
     tx.objectStore(STORES.meta).delete(LEGACY_LEADERBOARDS_KEY);
     tx.objectStore(STORES.meta).delete(SNAPSHOT_META_KEY);
@@ -897,7 +1149,7 @@
     tx.objectStore(STORES.scans).clear();
     tx.objectStore(STORES.leaderboards).clear();
     tx.objectStore(STORES.taskArtifacts).clear();
-    await transactionDone(tx);
+    await done;
     cachedSnapshot = null;
     cachedSnapshotHasProjects = false;
     cachedSnapshotHasLeaderboards = false;
@@ -917,6 +1169,7 @@
     putTaskArtifact,
     getTaskArtifacts,
     clearTaskArtifacts,
+    registerSnapshotOperations,
     putSnapshot,
     getSnapshot,
     getSnapshotMeta,

@@ -7,9 +7,10 @@ const vm = require("node:vm");
 const { indexedDB, IDBKeyRange } = require("fake-indexeddb");
 const { createStorage } = require("../src/lib/storage");
 
-const domainCoreSource = fs.readFileSync(path.join(__dirname, "../public/domain-core.js"), "utf8");
-const indexedDbSource = fs.readFileSync(path.join(__dirname, "../public/indexeddb-storage.js"), "utf8");
-const localApiSource = fs.readFileSync(path.join(__dirname, "../public/local-api.js"), "utf8");
+const sourceRoot = process.env.STARVAULT_TEST_SOURCE_ROOT || path.join(__dirname, "..");
+const domainCoreSource = fs.readFileSync(path.join(sourceRoot, "public/domain-core.js"), "utf8");
+const indexedDbSource = fs.readFileSync(path.join(sourceRoot, "public/indexeddb-storage.js"), "utf8");
+const localApiSource = fs.readFileSync(path.join(sourceRoot, "public/local-api.js"), "utf8");
 
 function memoryStorage() {
   const values = new Map();
@@ -1427,4 +1428,52 @@ test("a missing demo snapshot leaves the static app usable without retry loops",
   assert.equal(fetchImpl.calls.length, 2);
   await runtime.api.handle("/api/projects?limit=all");
   assert.equal(fetchImpl.calls.length, 2);
+});
+
+test("a long analysis preserves edits, new plans, learning and active selection committed while it waits", async () => {
+  let release;
+  let started;
+  const modelStarted = new Promise((resolve) => { started = resolve; });
+  const gate = new Promise((resolve) => { release = resolve; });
+  const runtime = await createBrowserRuntime(async () => {
+    started();
+    await gate;
+    return response({ choices: [{ message: { content: JSON.stringify({
+      recommendation: "watch", riskLevel: "medium", summary: "A valid fixture analysis",
+      risks: [], boundaries: [], inspirations: [], validations: []
+    }) } }] });
+  });
+  const post = (pathname, body) => runtime.api.handle(pathname, { method: "POST", body: JSON.stringify(body) });
+  await runtime.storage.putProjects([{
+    fullName: "acme/example", name: "example", description: "A fixture tool", stars: 50,
+    category: { key: "tools" }, useCase: { key: "personal" }, language: "JavaScript",
+    scores: { risk: 10 }, observationPlanMatches: { default: { planId: "default" } }
+  }]);
+  await post("/api/settings", { validateProvider: false, llmProviders: [{ id: "deepseek", apiKey: "fixture-key" }] });
+  const { task } = await post("/api/analyze", { fullName: "acme/example" });
+  await modelStarted;
+  await post("/api/note", { fullName: "acme/example", text: "saved while waiting", status: "watch" });
+  await post("/api/watchlist", { fullName: "acme/example", watched: true });
+  await post("/api/memory-preference", { kind: "category", key: "manual-choice", value: 12 });
+  await savePlan(runtime.api, { id: "other", name: "Other", strategy: { keywords: ["other"] } });
+  await post("/api/observation-plans/active", { id: "other" });
+  const before = await runtime.storage.getSnapshot();
+  assert.equal(before.store.observationPlans.default.userData.notes["acme/example"].text, "saved while waiting");
+  release();
+  const completed = await waitForTask(runtime.api, task.id);
+  assert.equal(completed.status, "completed", completed.error);
+  const persisted = await runtime.storage.getSnapshot();
+  const plan = persisted.store.observationPlans.default;
+  assert.equal(plan.userData.notes["acme/example"].text, "saved while waiting");
+  assert.equal(plan.userData.watchlist["acme/example"].fullName, "acme/example");
+  assert.equal(plan.memory.preferences.categories["manual-choice"], 12);
+  assert.equal(plan.userData.analysis["acme/example"].result.summary, "A valid fixture analysis");
+  assert.equal(plan.memory.events.filter((event) => event.type === "favorite").length, 1);
+  assert.equal(plan.memory.events.filter((event) => event.type === "ai_analyze").length, 1);
+  assert.equal(plan.memory.stats.eventCounts.favorite, 1);
+  assert.equal(plan.memory.stats.eventCounts.ai_analyze, 1);
+  assert.equal(persisted.activeObservationPlanId, "other");
+  assert.equal(persisted.settings.activeObservationPlanId, "other");
+  assert.deepEqual(persisted.store.memory, persisted.store.observationPlans.other.memory);
+  assert.equal(persisted.store.observationPlans.other.userData.analysis?.["acme/example"], undefined);
 });

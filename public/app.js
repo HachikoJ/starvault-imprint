@@ -4784,6 +4784,16 @@ async function api(path, options = {}) {
   }
 
   let response;
+  let indexedDbRevision;
+  if (path === "/api/local-snapshot" && !skipIndexedDbSync) {
+    try {
+      const store = indexedDbStore();
+      if (store) indexedDbRevision = Number((await store.getSnapshotMeta())?.localRevision || 0);
+    } catch {
+      // Cache availability must not prevent an online request. Without a
+      // captured revision, the response cannot safely replace local data.
+    }
+  }
   try {
     response = await fetch(path, { ...fetchOptions, headers });
   } catch (error) {
@@ -4818,7 +4828,7 @@ async function api(path, options = {}) {
     throw error;
   }
   if (!skipIndexedDbSync) {
-    handleIndexedDbApiSuccess(path, fetchOptions, json);
+    handleIndexedDbApiSuccess(path, { ...fetchOptions, indexedDbRevision }, json);
   }
   return json;
 }
@@ -5278,6 +5288,7 @@ async function refreshIndexedDbSnapshot(options = {}) {
   }
   state.indexedDbSnapshotSyncing = true;
   try {
+    const expectedRevision = Number((await store.getSnapshotMeta())?.localRevision || 0);
     const snapshot = await api("/api/local-snapshot", { skipIndexedDbSync: true });
     const previousProjectRevision = String((await store.getValue(INDEXEDDB_PROJECT_SYNC_REVISION_KEY).catch(() => "")) || "");
     const previousLeaderboardRevision = String((await store.getValue(INDEXEDDB_LEADERBOARD_SYNC_REVISION_KEY).catch(() => "")) || "");
@@ -5287,7 +5298,7 @@ async function refreshIndexedDbSnapshot(options = {}) {
     const expectedLeaderboardCount = Number(snapshot?.counts?.leaderboards || 0);
     const projectRevision = String(snapshot?.sync?.projectRevision || "");
     const leaderboardRevision = String(snapshot?.sync?.leaderboardRevision || "");
-    const meta = await store.putSnapshot(snapshot, { preserveProjects: true, preserveLeaderboards: true });
+    const meta = await store.putSnapshot(snapshot, { preserveProjects: true, preserveLeaderboards: true, expectedRevision });
     state.indexedDbSnapshotMeta = meta;
     const shouldSyncProjects =
       options.syncProjects === true ||
@@ -5357,7 +5368,8 @@ function handleIndexedDbApiSuccess(path, options = {}, json = null) {
   const store = indexedDbStore();
   if (!store || !String(path || "").startsWith("/api/")) return;
   if (path === "/api/local-snapshot" && json?.schema === "starvault-indexeddb-snapshot/v1") {
-    store.putSnapshot(json, { preserveProjects: true, preserveLeaderboards: true }).then((meta) => {
+    if (options.indexedDbRevision === undefined) return;
+    store.putSnapshot(json, { preserveProjects: true, preserveLeaderboards: true, expectedRevision: options.indexedDbRevision }).then((meta) => {
       state.indexedDbSnapshotMeta = meta;
     }).catch(() => {});
     return;

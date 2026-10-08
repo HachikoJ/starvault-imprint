@@ -182,14 +182,14 @@
     return db?.getSnapshot ? db.getSnapshot(options) : null;
   }
 
-  async function saveSnapshot(snapshot) {
+  async function saveSnapshot(snapshot, options = {}) {
     const db = storage();
     if (!db?.putSnapshot) throw new Error("IndexedDB is unavailable");
     ensureDefaultObservationPlan(snapshot);
     snapshot.exportedAt = nowIso();
     snapshot.store = snapshot.store || {};
     snapshot.store.updatedAt = nowIso();
-    return db.putSnapshot(snapshot, { preserveProjects: true });
+    return db.putSnapshot(snapshot, { preserveProjects: true, ...options });
   }
 
   async function getSecrets() {
@@ -197,10 +197,10 @@
     return (await db?.getValue?.(SECRETS_KEY)) || {};
   }
 
-  async function saveSecrets(secrets) {
+  async function saveSecrets(secrets, base) {
     const db = storage();
     if (!db?.putValue) return;
-    await db.putValue(SECRETS_KEY, secrets || {});
+    await db.putValue(SECRETS_KEY, secrets || {}, { base });
   }
 
   function emptySnapshot() {
@@ -2784,7 +2784,7 @@
     userData.githubActions = clone(learning.githubActions || userData.githubActions || {}, {});
     snapshot.store.memory = activePlan(snapshot).memory || defaultMemory();
     updateCounts(snapshot);
-    await saveSnapshot(snapshot);
+    await saveSnapshot(snapshot, { replace: true, expectedRevision: snapshot.localRevision });
     return {
       imported: true,
       activeObservationPlanId: snapshot.activeObservationPlanId,
@@ -2874,34 +2874,45 @@
     else bucket[key] = Number(next.toFixed(3));
   }
 
-  function adjustLocalMemorySignal(memory, project, planId, weight, eventType, direction = 1) {
+  function adjustLocalMemorySignal(memory, project, planId, weight, eventType, direction = 1, operations = []) {
     const keys = localMemoryKeys(project);
     const preferences = memory.preferences;
     const negative = memory.negativePreferences;
+    const bucketPaths = new Map([
+      ...Object.entries(preferences).map(([key, bucket]) => [bucket, ["preferences", key]]),
+      ...Object.entries(negative).map(([key, bucket]) => [bucket, ["negativePreferences", key]]),
+      [memory.discoveryProfiles, ["discoveryProfiles"]]
+    ]);
+    const adjust = (bucket, key, delta, min = 0, max = 40) => {
+      adjustLocalBucket(bucket, key, delta, min, max);
+      if (key && Number.isFinite(Number(delta)) && Number(delta) !== 0) {
+        operations.push({ path: [...bucketPaths.get(bucket), key], delta: Number(delta), min, max });
+      }
+    };
     const signed = Number(weight || 0) * direction;
     const absolute = Math.abs(Number(weight || 0)) * direction;
     if (weight >= 0) {
-      adjustLocalBucket(preferences.categories, keys.category, signed);
-      adjustLocalBucket(preferences.useCases, keys.useCase, signed);
-      adjustLocalBucket(preferences.languages, keys.language, signed * 0.45);
-      adjustLocalBucket(preferences.licenses, keys.license, signed * 0.35);
-      adjustLocalBucket(preferences.riskLevels, keys.risk, signed * 0.25);
-      adjustLocalBucket(negative.categories, keys.category, -signed * 0.45, 0, 30);
-      adjustLocalBucket(negative.useCases, keys.useCase, -signed * 0.45, 0, 30);
+      adjust(preferences.categories, keys.category, signed);
+      adjust(preferences.useCases, keys.useCase, signed);
+      adjust(preferences.languages, keys.language, signed * 0.45);
+      adjust(preferences.licenses, keys.license, signed * 0.35);
+      adjust(preferences.riskLevels, keys.risk, signed * 0.25);
+      adjust(negative.categories, keys.category, -signed * 0.45, 0, 30);
+      adjust(negative.useCases, keys.useCase, -signed * 0.45, 0, 30);
     } else {
-      adjustLocalBucket(preferences.categories, keys.category, signed);
-      adjustLocalBucket(preferences.useCases, keys.useCase, signed);
-      adjustLocalBucket(preferences.languages, keys.language, signed * 0.25);
-      adjustLocalBucket(negative.categories, keys.category, absolute * 0.75, 0, 30);
-      adjustLocalBucket(negative.useCases, keys.useCase, absolute * 0.85, 0, 30);
-      adjustLocalBucket(negative.languages, keys.language, absolute * 0.25, 0, 30);
+      adjust(preferences.categories, keys.category, signed);
+      adjust(preferences.useCases, keys.useCase, signed);
+      adjust(preferences.languages, keys.language, signed * 0.25);
+      adjust(negative.categories, keys.category, absolute * 0.75, 0, 30);
+      adjust(negative.useCases, keys.useCase, absolute * 0.85, 0, 30);
+      adjust(negative.languages, keys.language, absolute * 0.25, 0, 30);
       if (eventType === "leaderboard_negative") {
-        adjustLocalBucket(negative.repositories, project.fullName, absolute, 0, 20);
+        adjust(negative.repositories, project.fullName, absolute, 0, 20);
       }
     }
     const profile = projectProfile(project, planId);
     const profileDelta = profile.matches.length ? signed / profile.matches.length : 0;
-    for (const match of profile.matches) adjustLocalBucket(memory.discoveryProfiles, match.key, profileDelta, -40, 40);
+    for (const match of profile.matches) adjust(memory.discoveryProfiles, match.key, profileDelta, -40, 40);
     return { keys, profile };
   }
 
@@ -2911,9 +2922,11 @@
     const type = localMemoryEventType(eventType);
     const memory = memoryForPlan(snapshot, planId);
     const weight = localEventWeight(type, options.weight);
-    const { keys, profile } = adjustLocalMemorySignal(memory, project, planId, weight, type, 1);
+    const operations = [];
+    const { keys, profile } = adjustLocalMemorySignal(memory, project, planId, weight, type, 1, operations);
     const at = nowIso();
     const entry = {
+      id: `local-event-${Date.now()}-${Math.random().toString(36).slice(2, 9)}`,
       at,
       type,
       reason: options.reason || type,
@@ -2935,6 +2948,8 @@
     memory.stats.eventCounts[type] = Number(memory.stats.eventCounts[type] || 0) + 1;
     memory.stats.lastEventAt = at;
     syncPlanMemory(snapshot, planId, memory);
+    operations.push({ path: ["stats", "eventCounts", type], delta: 1, min: 0 });
+    storage()?.registerSnapshotOperations?.(snapshot, planId, operations);
     return entry;
   }
 
@@ -2960,7 +2975,8 @@
           }
         }
       : project;
-    adjustLocalMemorySignal(memory, rollbackProject, planId, Number(event.weight || localEventWeight(type)), type, -1);
+    const operations = [];
+    adjustLocalMemorySignal(memory, rollbackProject, planId, Number(event.weight || localEventWeight(type)), type, -1, operations);
     const removeFirst = (items = []) => {
       let removed = false;
       return items.filter((item) => {
@@ -2975,6 +2991,8 @@
     memory.shortTerm = removeFirst(memory.shortTerm);
     memory.stats.eventCounts[type] = Math.max(0, Number(memory.stats.eventCounts[type] || 0) - 1);
     syncPlanMemory(snapshot, planId, memory);
+    operations.push({ path: ["stats", "eventCounts", type], delta: -1, min: 0 });
+    storage()?.registerSnapshotOperations?.(snapshot, planId, operations);
     return true;
   }
 
@@ -3165,7 +3183,7 @@
         if (provider.clearApiKey) nextSecrets.llmProviders[provider.id] = { apiKey: "" };
       }
       snapshot.settings = { ...snapshot.settings, ...safeSettings(body), activeObservationPlanId: activeId };
-      await saveSecrets(nextSecrets);
+      await saveSecrets(nextSecrets, secrets);
       await saveSnapshot(snapshot);
       const keyValidation = await validateBrowserServiceKeys(nextSecrets);
       if (body.validateProvider !== false) {
