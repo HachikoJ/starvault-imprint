@@ -209,6 +209,86 @@
       signals, errors: uniqueErrors };
   }
 
+  function measurementTime(value) {
+    if (typeof value !== "string") return NaN;
+    const parts = /^(\d{4})-(\d{2})-(\d{2})T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})$/i.exec(value);
+    if (!parts) return NaN;
+    const calendar = new Date(0);
+    calendar.setUTCFullYear(Number(parts[1]), Number(parts[2]) - 1, Number(parts[3]));
+    if (calendar.getUTCFullYear() !== Number(parts[1]) || calendar.getUTCMonth() + 1 !== Number(parts[2]) || calendar.getUTCDate() !== Number(parts[3])) return NaN;
+    return Date.parse(value);
+  }
+
+  function measurementCount(value) {
+    return typeof value === "number" && Number.isFinite(value) ? value : null;
+  }
+
+  function describeTrend(trend = {}) {
+    trend = trend && typeof trend === "object" ? trend : {};
+    const source = String(trend.source || "");
+    let start = measurementTime(trend.intervalStart);
+    let end = measurementTime(trend.intervalEnd);
+    const daily = source === "github-online" && trend.period === "previous-day-online";
+    // Only the existing online-event contract proves a legacy date is a UTC
+    // day. A browser snapshot date never proves the start of its interval.
+    if (daily && trend.cached !== false && !trend.pending && !trend.intervalStart && !trend.intervalEnd && /^\d{4}-\d{2}-\d{2}$/.test(trend.date || "")) {
+      start = Date.parse(`${trend.date}T00:00:00.000Z`);
+      if (Number.isFinite(start) && new Date(start).toISOString().slice(0, 10) === trend.date) end = start + 86400000;
+    }
+    const windowKnown = Number.isFinite(start) && Number.isFinite(end) && start < end;
+    const utcDay = daily && windowKnown && end - start === 86400000 && start % 86400000 === 0;
+    const usable = windowKnown && !trend.error && !trend.unavailable && !trend.pending && trend.cached !== false;
+    const stars = usable ? measurementCount(trend.stars) : null;
+    const forks = usable ? measurementCount(trend.forks) : null;
+    return {
+      source, kind: utcDay ? "utc-day-events" : source === "github-browser-snapshots" || source === "github-snapshots" ? "snapshot-net-change" : "observed-change",
+      windowKnown, intervalStart: windowKnown ? new Date(start).toISOString() : "",
+      intervalEnd: windowKnown ? new Date(end).toISOString() : "", durationMs: windowKnown ? end - start : null,
+      stars, forks, complete: usable && stars !== null && forks !== null && trend.complete !== false && trend.starsComplete !== false && trend.forksComplete !== false
+    };
+  }
+
+  function snapshotTrend(previous, current, scannedAt) {
+    let baseline = previous;
+    let start = measurementTime(previous?.lastSeenAt);
+    const end = measurementTime(scannedAt);
+    let fallbackPoints = [];
+    if (previous && !previous.lastSeenAt) {
+      // A fallback timestamp must travel with the counts observed at that time.
+      fallbackPoints = (Array.isArray(previous.snapshots) ? previous.snapshots : []).map(point => ({point,at:measurementTime(point?.at)}))
+        .filter(item => Number.isFinite(item.at) && item.at < end).sort((a, b) => b.at - a.at);
+      baseline = fallbackPoints[0]?.point;
+      start = fallbackPoints[0]?.at;
+    }
+    const valid = Boolean(baseline) && Number.isFinite(start) && Number.isFinite(end) && start < end;
+    const count = value => Number.isInteger(value) && value >= 0;
+    const delta = field => valid && count(baseline[field]) && count(current?.[field]) && fallbackPoints.every(item => item.at !== start || item.point[field] === baseline[field])
+      ? current[field] - baseline[field] : null;
+    const stars = delta("stars");
+    const forks = delta("forks");
+    return { source:"github-browser-snapshots", period:"since-previous-scan", date:Number.isFinite(end) ? new Date(end).toISOString().slice(0, 10) : "",
+      intervalStart:valid ? new Date(start).toISOString() : "", intervalEnd:valid ? new Date(end).toISOString() : "",
+      stars, forks, complete:valid && stars !== null && forks !== null,
+      status:valid ? "measured" : previous ? "unknown" : "baseline", cached:true, pending:false };
+  }
+
+  function snapshotGrowth(project, days, reference = Date.now()) {
+    const endLimit = typeof reference === "number" ? reference : measurementTime(reference);
+    const cutoff = endLimit - days * 86400000;
+    // Use observations inside the requested rolling period. A lone current
+    // observation plus a month-old baseline cannot prove a daily growth bonus.
+    const snapshots = (Array.isArray(project.snapshots) ? project.snapshots : []).map(point => ({point,at:measurementTime(point?.at)}))
+      .filter(item => Number.isFinite(item.at) && item.at >= cutoff && item.at <= endLimit).sort((a, b) => a.at - b.at);
+    const first = snapshots[0];
+    const last = snapshots[snapshots.length - 1];
+    const valid = first && last && first.at < last.at;
+    const count = value => Number.isInteger(value) && value >= 0;
+    const delta = field => valid && count(first.point[field]) && count(last.point[field]) && snapshots.every(item =>
+      (item.at !== first.at || item.point[field] === first.point[field]) && (item.at !== last.at || item.point[field] === last.point[field])) ? last.point[field] - first.point[field] : null;
+    const measurement = describeTrend({ source:"github-snapshots", intervalStart:valid ? first.point.at : "", intervalEnd:valid ? last.point.at : "", stars:delta("stars"), forks:delta("forks") });
+    return { ...measurement, requestedDays:days, periodCoverage:measurement.windowKnown ? "observed-interval" : "unknown" };
+  }
+
   function normalizedId(value = "") {
     return String(value || "")
       .toLowerCase()
@@ -844,6 +924,9 @@
     assertAnalysisDelivery,
     validateAnalysisResult,
     externalSignalOutcome,
+    describeTrend,
+    snapshotTrend,
+    snapshotGrowth,
     analysisProviderIdentity,
     analysisTaskIdentity,
     analysisTaskKey,

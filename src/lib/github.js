@@ -1850,6 +1850,8 @@ async function repositoryOnlineTrend(token, fullName, options = {}) {
     forks: forks.count,
     period: "previous-day-online",
     date: window.date,
+    intervalStart: window.start.toISOString(),
+    intervalEnd: window.end.toISOString(),
     source: "github-online",
     method: "graphql-star-v1",
     starsComplete: stars.complete,
@@ -1883,12 +1885,15 @@ async function repositoryOnlineTrends(token, fullNames = [], options = {}) {
           throw error;
         }
         errors.push({ fullName, message: error.message });
+        const window = previousUtcDayWindow(options.reference || new Date());
         items[fullName] = {
           fullName,
           stars: null,
           forks: null,
           period: "previous-day-online",
-          date: previousUtcDayWindow(options.reference || new Date()).date,
+          date: window.date,
+          intervalStart: window.start.toISOString(),
+          intervalEnd: window.end.toISOString(),
           source: "github-online",
           complete: false,
           pending: false,

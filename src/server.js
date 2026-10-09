@@ -2427,14 +2427,16 @@ function exportLicenseLabel(project, language) {
 
 function exportTrendValue(project, key) {
   const trend = project.trend || {};
-  if (trend.error || trend.unavailable || trend.cached === false || trend[key] === null || trend[key] === undefined) return "";
-  return trend[key];
+  if (key === "stars" && trend.starsComplete === false || key === "forks" && trend.forksComplete === false) return "";
+  return domainCore.describeTrend(trend)[key] ?? "";
 }
 
 function exportTrendStatus(project, language) {
   const trend = project.trend || {};
   if (trend.error || trend.unavailable) return language === "zh" ? "趋势统计失败" : "trend failed";
   if (trend.cached === false) return language === "zh" ? "未纳入趋势缓存" : "not in trend cache";
+  const measurement = domainCore.describeTrend(trend);
+  if (!measurement.windowKnown) return language === "zh" ? "测量区间未知" : "measurement window unknown";
   if (trend.pending || trend.stars === null || trend.stars === undefined || trend.forks === null || trend.forks === undefined) {
     return language === "zh" ? "等待扫描更新" : "awaiting scan";
   }
@@ -2442,6 +2444,14 @@ function exportTrendStatus(project, language) {
     return language === "zh" ? "部分统计" : "partial";
   }
   return language === "zh" ? "已缓存" : "cached";
+}
+
+function exportTrendKind(project, language) {
+  const kind = domainCore.describeTrend(project.trend).kind;
+  if (language !== "zh") return kind;
+  if (kind === "utc-day-events") return language === "zh" ? "UTC 自然日新增事件" : "UTC-day new events";
+  if (kind === "snapshot-net-change") return language === "zh" ? "观测区间净变化" : "observed-interval net change";
+  return language === "zh" ? "观测变化" : "observed change";
 }
 
 const EXPORT_FIELDS = [
@@ -2480,6 +2490,11 @@ const EXPORT_FIELDS = [
   ["trendForks", "趋势 Forks", "trendForks", (project) => exportTrendValue(project, "forks")],
   ["trendDate", "趋势日期", "trendDate", (project) => project.trend?.date || ""],
   ["trendStatus", "趋势状态", "trendStatus", (project, language) => exportTrendStatus(project, language)],
+  ["trendSource", "趋势来源", "trendSource", (project) => domainCore.describeTrend(project.trend).source],
+  ["trendKind", "趋势种类", "trendKind", (project, language) => exportTrendKind(project, language)],
+  ["trendIntervalStart", "趋势区间开始", "trendIntervalStart", (project) => domainCore.describeTrend(project.trend).intervalStart],
+  ["trendIntervalEnd", "趋势区间结束", "trendIntervalEnd", (project) => domainCore.describeTrend(project.trend).intervalEnd],
+  ["trendDurationMs", "趋势区间毫秒", "trendDurationMs", (project) => domainCore.describeTrend(project.trend).durationMs],
   ["opportunity", "推荐值", "opportunity", (project) => project.scores?.opportunity],
   ["actionability", "可落地性", "actionability", (project) => project.scores?.actionability],
   ["productization", "应用价值", "appliedValue", (project) => project.scores?.productization],

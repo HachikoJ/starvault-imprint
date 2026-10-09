@@ -846,6 +846,15 @@
       if (sort === "actionability") return score(b, "actionability") - score(a, "actionability");
       if (sort === "productization") return score(b, "productization") - score(a, "productization");
       if (sort === "quality") return score(b, "quality") - score(a, "quality");
+      if (sort === "trendStars" || sort === "trendForks") {
+        const field = sort === "trendStars" ? "stars" : "forks";
+        const left = domainCore.describeTrend(a.trend)[field];
+        const right = domainCore.describeTrend(b.trend)[field];
+        if (left === null && right !== null) return 1;
+        if (right === null && left !== null) return -1;
+        if (left !== null && right !== null && right !== left) return right - left;
+        return Number(b.stars || 0) - Number(a.stars || 0);
+      }
       const personalized = (project) => score(project, "opportunity") + domainCore.memoryScore(project, memory);
       return personalized(b) - personalized(a) || Number(b.stars || 0) - Number(a.stars || 0);
     });
@@ -990,15 +999,6 @@
     };
   }
 
-  function projectPeriodDelta(project, field, days) {
-    const snapshots = (project.snapshots || []).slice().sort((a, b) => String(a.at || "").localeCompare(String(b.at || "")));
-    if (snapshots.length < 2) return Number(project.trend?.[field] || 0);
-    const cutoff = Date.now() - days * 86400000;
-    const latest = snapshots[snapshots.length - 1];
-    const baseline = snapshots.find((item) => new Date(item.at || 0).getTime() >= cutoff) || snapshots[0];
-    return Math.max(0, Number(latest?.[field] || 0) - Number(baseline?.[field] || 0));
-  }
-
   function browserLeaderboardScore(project, period, memory) {
     const memoryBoost = domainCore.memoryScore(project, memory);
     const opportunity = Number(project.scores?.opportunity || 0);
@@ -1007,9 +1007,10 @@
     const actionability = Number(project.scores?.actionability || 0);
     const community = Number(project.scores?.community || 0);
     const days = period === "daily" ? 1 : period === "weekly" ? 7 : period === "monthly" ? 30 : 3650;
-    const starDelta = projectPeriodDelta(project, "stars", days);
-    const forkDelta = projectPeriodDelta(project, "forks", days);
-    const trendBoost = Math.min(24, Math.log10(1 + starDelta) * 8 + Math.log10(1 + forkDelta) * 5);
+    const growthWindow = domainCore.snapshotGrowth(project, days);
+    const starDelta = growthWindow.stars;
+    const forkDelta = growthWindow.forks;
+    const trendBoost = Math.min(24, Math.log10(1 + Math.max(0, starDelta ?? 0)) * 8 + Math.log10(1 + Math.max(0, forkDelta ?? 0)) * 5);
     const weights = {
       daily: [0.34, 0.12, 0.26, 0.16, 0.12],
       weekly: [0.36, 0.17, 0.2, 0.16, 0.11],
@@ -1017,7 +1018,7 @@
       all: [0.34, 0.28, 0.08, 0.19, 0.11]
     }[period] || [0.36, 0.2, 0.16, 0.17, 0.11];
     const base = opportunity * weights[0] + quality * weights[1] + momentum * weights[2] + actionability * weights[3] + community * weights[4];
-    return { score: Number((base + trendBoost + memoryBoost).toFixed(2)), memoryBoost: Number(memoryBoost.toFixed(2)), starDelta, forkDelta };
+    return { score: Number((base + trendBoost + memoryBoost).toFixed(2)), memoryBoost: Number(memoryBoost.toFixed(2)), starDelta, forkDelta, growthWindow };
   }
 
   function buildLeaderboard(snapshot, params = {}, sourceProjects = null, planId = snapshot.activeObservationPlanId || "default") {
@@ -2051,25 +2052,7 @@
       project.firstSeenAt = previous?.firstSeenAt || scannedAt;
       project.lastSeenAt = scannedAt;
       project.snapshots = [...(previous?.snapshots || []), snapshotEntry].slice(-180);
-      project.trend = previous
-        ? {
-            stars: Number(project.stars || 0) - Number(previous.stars || 0),
-            forks: Number(project.forks || 0) - Number(previous.forks || 0),
-            date: scannedAt.slice(0, 10),
-            status: "ready",
-            source: "github-browser-snapshots",
-            updatedAt: scannedAt,
-            complete: true
-          }
-        : {
-            stars: 0,
-            forks: 0,
-            date: scannedAt.slice(0, 10),
-            status: "baseline",
-            source: "github-browser-snapshots",
-            updatedAt: scannedAt,
-            complete: false
-          };
+      project.trend = { ...domainCore.snapshotTrend(previous, project, scannedAt), updatedAt: scannedAt };
     }
     await storage().replaceProjectsForPlan(plan.id, projects, { replace: discoveryCoverage.complete, ...taskWriteOptions(snapshot) });
     checkpoint = await persistBrowserScanCheckpoint(snapshot, task, checkpoint, { stage: "persisted" });
@@ -2736,6 +2719,13 @@
 
   function localExportRecord(project, language, index) {
     const localized = (value = {}) => language === "zh" ? value.labelZh || value.label || value.labelEn || "" : value.labelEn || value.label || value.labelZh || "";
+    const trend = domainCore.describeTrend(project.trend);
+    const rawTrend = project.trend || {};
+    const trendStatus = rawTrend.error || rawTrend.unavailable ? language === "zh" ? "趋势统计失败" : "trend failed"
+      : rawTrend.cached === false ? language === "zh" ? "未纳入趋势缓存" : "not in trend cache"
+      : rawTrend.pending ? language === "zh" ? "等待扫描更新" : "awaiting scan"
+      : !trend.windowKnown ? language === "zh" ? "测量区间未知" : "measurement window unknown"
+      : trend.complete ? language === "zh" ? "已测量" : "complete" : language === "zh" ? "部分统计" : "partial";
     const fields = language === "zh"
       ? {
           排名: index + 1,
@@ -2757,9 +2747,15 @@
           Stars: project.stars,
           Forks: project.forks,
           Issues: project.openIssues,
-          "趋势 Stars": project.trend?.stars ?? "",
-          "趋势 Forks": project.trend?.forks ?? "",
+          "趋势 Stars": trend.stars,
+          "趋势 Forks": trend.forks,
           趋势日期: project.trend?.date || "",
+          趋势区间开始: trend.intervalStart,
+          趋势区间结束: trend.intervalEnd,
+          趋势区间毫秒: trend.durationMs,
+          趋势来源: trend.source,
+          趋势种类: ({ "utc-day-events": "UTC自然日新增事件", "snapshot-net-change": "快照净变化", "observed-change": "观测变化" })[trend.kind],
+          趋势状态: trendStatus,
           推荐值: project.scores?.opportunity ?? "",
           可落地性: project.scores?.actionability ?? "",
           工程质量: project.scores?.quality ?? "",
@@ -2794,9 +2790,15 @@
           stars: project.stars,
           forks: project.forks,
           issues: project.openIssues,
-          trendStars: project.trend?.stars ?? "",
-          trendForks: project.trend?.forks ?? "",
+          trendStars: trend.stars,
+          trendForks: trend.forks,
           trendDate: project.trend?.date || "",
+          trendIntervalStart: trend.intervalStart,
+          trendIntervalEnd: trend.intervalEnd,
+          trendDurationMs: trend.durationMs,
+          trendSource: trend.source,
+          trendKind: trend.kind,
+          trendStatus,
           opportunity: project.scores?.opportunity ?? "",
           actionability: project.scores?.actionability ?? "",
           quality: project.scores?.quality ?? "",

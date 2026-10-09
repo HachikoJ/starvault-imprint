@@ -2,7 +2,7 @@ const fs = require("node:fs");
 const path = require("node:path");
 const { createHash, randomUUID } = require("node:crypto");
 const { classifyRepository, inferUseCase } = require("./scoring");
-const { assignProfileIds, projectProfileMatches } = require("../../public/domain-core");
+const { assignProfileIds, describeTrend, projectProfileMatches, snapshotGrowth } = require("../../public/domain-core");
 const { buildQueryProfiles } = require("./github");
 const { getSqliteRevision, inheritSqliteSnapshot, isSqlitePath, readSqliteStore, snapshotRevision, withSqliteTransaction, writeSqliteStore } = require("./sqlite-store");
 
@@ -2080,19 +2080,6 @@ function daysForPeriod(period) {
   return 1;
 }
 
-function snapshotDelta(project, field, days) {
-  const snapshots = project.snapshots || [];
-  if (!snapshots.length) return 0;
-  const latest = snapshots[snapshots.length - 1];
-  const cutoff = Date.now() - days * 86400000;
-  const baseline =
-    snapshots
-      .slice()
-      .reverse()
-      .find((snapshot) => new Date(snapshot.at).getTime() <= cutoff) || snapshots[0];
-  return Math.max(0, (latest[field] || 0) - (baseline[field] || 0));
-}
-
 function previousDayWindow(reference = new Date()) {
   const end = new Date(reference);
   end.setHours(0, 0, 0, 0);
@@ -2175,8 +2162,9 @@ function personalizedOpportunity(project, memory = {}) {
 
 function leaderboardScore(project, period, memory = {}) {
   const days = daysForPeriod(period);
-  const starDelta = snapshotDelta(project, "stars", days);
-  const forkDelta = snapshotDelta(project, "forks", days);
+  const growth = snapshotGrowth(project, days);
+  const starDelta = Math.max(0, growth.stars ?? 0);
+  const forkDelta = Math.max(0, growth.forks ?? 0);
   const agentNoise = Number(project.signals?.productFit?.abstractAgentPenalty || 0);
   const trendingBoost = Math.min(
     8,
@@ -2204,6 +2192,7 @@ function leaderboardScore(project, period, memory = {}) {
 function leaderboardItem(project, rank, period, memory = {}, previousRanks = new Map()) {
   const fullName = project.fullName;
   const days = daysForPeriod(period);
+  const growth = snapshotGrowth(project, days);
   const previousRank = previousRanks.get(fullName) || null;
   const memoryBoost = memoryScore(project, memory);
   return {
@@ -2229,6 +2218,9 @@ function leaderboardItem(project, rank, period, memory = {}, previousRanks = new
       actionability: project.scores?.actionability || 0,
       projectRisk: project.scores?.risk || 0,
       memoryBoost,
+      starDelta: growth.stars,
+      forkDelta: growth.forks,
+      growthWindow: growth,
       diversitySlot: memoryBoost <= 0.5
     },
     trend: cachedTrend(project),
@@ -3654,11 +3646,10 @@ function projectTagMatches(project, tag = "") {
 
 function cachedTrendValue(project, field) {
   const trend = cachedTrend(project);
-  if (trend.cached === false || trend.pending || trend.error || trend.unavailable) return -1;
-  if (field === "stars" && trend.starsComplete === false) return -1;
-  if (field === "forks" && trend.forksComplete === false) return -1;
-  const value = trend?.[field];
-  return Number.isFinite(Number(value)) ? Number(value) : -1;
+  if (field === "stars" && trend.starsComplete === false) return -Infinity;
+  if (field === "forks" && trend.forksComplete === false) return -Infinity;
+  const value = describeTrend(trend)[field];
+  return value === null ? -Infinity : value;
 }
 
 function countSemanticFilters(projects = [], memory = {}) {

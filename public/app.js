@@ -138,7 +138,16 @@ const I18N = {
     opportunity: "推荐值",
     momentum: "近期热度",
     momentumHint: "近期热度：综合最近 Stars/Forks 增长、更新活跃度和外部讨论，0-100 越高代表越热。",
-    trendHint: "趋势在扫描时从 GitHub 在线统计并缓存，按上一自然日 UTC 00:00-24:00 的 Stars/Forks 新增量计算。",
+    trendHint: "Node 在线趋势统计前一 UTC 自然日新增事件；浏览器趋势是两次扫描之间的累计数净变化。每项显示实际起止与跨度，窗口未知时不显示计数，不折算每日速率。",
+    trendWindowUnknown: "趋势窗口未知",
+    trendCountUnknown: "未知",
+    trendWindow: "观测区间",
+    trendSource: "来源",
+    trendNetChange: "扫描间净变化",
+    trendUtcDay: "前一 UTC 日新增",
+    trendObservedChange: "观测变化",
+    trendGrowthWindow: "榜单增长输入",
+    trendGrowthHint: "榜单周期用于选择观测记录；增长仅指所示实际区间的变化，不代表完整周期，也不折算每日速率。",
     trendLoading: "等待扫描更新",
     trendNotCached: "未纳入趋势缓存",
     trendNotCachedHint: "本次扫描只会给排序靠前的一部分项目更新趋势缓存；该项目暂未覆盖，可等下次扫描或提高趋势缓存数量。",
@@ -147,7 +156,7 @@ const I18N = {
     trendPartialShort: "部分统计",
     trendStarsPartial: "Stars 未完整",
     trendForksPartial: "Forks 未完整",
-    trendZeroHint: "前一自然日没有新增 Stars 或 Forks，这是有效统计结果，不是异常。",
+    trendZeroHint: "所示区间的 Stars 和 Forks 变化均为 0，这是有效观测，不是未知数据。",
     trendReasonRateLimited: "GitHub API 限流，等待下一次扫描重试。",
     trendReasonAuth: "GitHub Token 无效或权限不足。",
     trendReasonForbidden: "GitHub 拒绝本次趋势请求，可能是权限或二级限流。",
@@ -855,7 +864,16 @@ const I18N = {
     opportunity: "Opportunity",
     momentum: "Recent heat",
     momentumHint: "Recent heat combines Stars/Forks growth, update recency, and external mentions. Higher is hotter.",
-    trendHint: "Trend is fetched from GitHub during scans and cached, using the previous UTC calendar day, 00:00-24:00.",
+    trendHint: "Node online trends count events in the previous UTC calendar day; browser trends measure net total-count changes between scans. Each item shows its actual interval and duration. Unknown windows have no counts; values are not daily rates.",
+    trendWindowUnknown: "Trend window unknown",
+    trendCountUnknown: "Unknown",
+    trendWindow: "Observed interval",
+    trendSource: "Source",
+    trendNetChange: "Net change between scans",
+    trendUtcDay: "Previous UTC day additions",
+    trendObservedChange: "Observed change",
+    trendGrowthWindow: "Ranking growth input",
+    trendGrowthHint: "The ranking period selects observations. Growth covers only the actual interval shown, not necessarily the whole period, and is not a daily rate.",
     trendLoading: "Awaiting scan",
     trendNotCached: "Not in trend cache",
     trendNotCachedHint: "Each scan updates trend cache for only a ranked subset. This project was not covered yet; wait for another scan or raise the trend cache limit.",
@@ -864,7 +882,7 @@ const I18N = {
     trendPartialShort: "Partial",
     trendStarsPartial: "Stars incomplete",
     trendForksPartial: "Forks incomplete",
-    trendZeroHint: "No Stars or Forks were added during the previous calendar day. This is a valid result, not an error.",
+    trendZeroHint: "Stars and Forks both changed by 0 in the shown interval. This is a valid observation, not unknown data.",
     trendReasonRateLimited: "GitHub API rate limit. The next scan can retry.",
     trendReasonAuth: "GitHub token is invalid or lacks permission.",
     trendReasonForbidden: "GitHub rejected the trend request, possibly due to permission or secondary rate limits.",
@@ -1476,8 +1494,8 @@ const FILTERS = {
     ["productization", "应用价值", "Applied value", "更接近真实可用场景", "Closer to a usable scenario"],
     ["momentum", "增长爆发", "Fast growth", "优先看近期热度和增长速度", "Recent attention and growth"],
     ["stars", "人气最高", "Most starred", "按总 star 排，容易受历史热度影响", "Total popularity"],
-    ["trendStars", "趋势 Star", "Trending Stars", "按扫描缓存的上一自然日 Star 新增量降序", "Sort by cached Stars added during the previous day"],
-    ["trendForks", "趋势 Forks", "Trending Forks", "按扫描缓存的上一自然日 Forks 新增量降序", "Sort by cached Forks added during the previous day"],
+    ["trendStars", "趋势 Star", "Trending Stars", "按各项目实际观测区间的 Star 变化降序；不折算每日，未知最后", "Sort by each project's observed Star change; no daily-rate conversion, unknown last"],
+    ["trendForks", "趋势 Forks", "Trending Forks", "按各项目实际观测区间的 Fork 变化降序；不折算每日，未知最后", "Sort by each project's observed Fork change; no daily-rate conversion, unknown last"],
     ["commercial", "许可清晰", "Clear license", "优先 MIT/Apache/BSD 等许可", "MIT/Apache/BSD style licenses first"],
     ["quality", "工程质量", "Quality", "维护、描述、活跃度更稳", "Health and maintainability"],
     ["actionability", "可落地优先", "Actionable", "低风险、质量较好、方便下手", "Low risk and easier to act on"],
@@ -4139,17 +4157,41 @@ function projectBrief(project) {
   return cleaned.endsWith("。") ? cleaned : `${cleaned}。`;
 }
 
+function signedTrendCount(value) {
+  if (value === null) return t("trendCountUnknown");
+  return `${value > 0 ? "+" : ""}${fmtNumber(value)}`;
+}
+
+function trendMeasurementLabel(measurement) {
+  return t(measurement.kind === "utc-day-events" ? "trendUtcDay" : measurement.kind === "snapshot-net-change" ? "trendNetChange" : "trendObservedChange");
+}
+
+function trendWindowHint(measurement) {
+  if (!measurement.windowKnown) return t("trendWindowUnknown");
+  const minutes = measurement.durationMs / 60000;
+  const amount = minutes >= 1440 ? minutes / 1440 : minutes >= 60 ? minutes / 60 : minutes;
+  const unit = state.language === "zh" ? minutes >= 1440 ? "天" : minutes >= 60 ? "小时" : "分钟" : minutes >= 1440 ? "days" : minutes >= 60 ? "hours" : "minutes";
+  const duration = new Intl.NumberFormat(state.language === "zh" ? "zh-CN" : "en-US", { maximumFractionDigits: 2 }).format(amount);
+  const utc = value => value.replace("T", " ").replace(/\.000Z$/, " UTC").replace(/Z$/, " UTC");
+  return `${t("trendWindow")}: ${utc(measurement.intervalStart)} → ${utc(measurement.intervalEnd)} (${duration} ${unit})`;
+}
+
+function leaderboardGrowthHint(project) {
+  const measurement = window.StarVaultDomainCore.describeTrend(project.scoreParts?.growthWindow || {});
+  const values = measurement.windowKnown
+    ? `Stars ${signedTrendCount(measurement.stars)} / Forks ${signedTrendCount(measurement.forks)}` : t("trendWindowUnknown");
+  return [t("trendGrowthWindow"), trendWindowHint(measurement), `${t("trendSource")}: ${measurement.source || (state.language === "zh" ? "未知" : "Unknown")}`, values, t("trendGrowthHint")].join(" · ");
+}
+
 function projectTrendLabel(project) {
   const trend = project.trend || {};
+  const measurement = window.StarVaultDomainCore.describeTrend(trend);
   if (trend.error || trend.unavailable) return t("trendUnavailable");
   if (trend.cached === false) return t("trendNotCached");
-  if (trend.pending || trend.stars === null || trend.stars === undefined || trend.forks === null || trend.forks === undefined) {
-    return t("trendLoading");
-  }
-  if (trend.complete === false || trend.starsComplete === false || trend.forksComplete === false) {
-    return `${t("trend")} ${t("trendPartialShort")}`;
-  }
-  return `${t("trend")} +${fmtNumber(trend.stars || 0)} Stars / +${fmtNumber(trend.forks || 0)} Forks`;
+  if (trend.pending) return t("trendLoading");
+  if (!measurement.windowKnown) return t("trendWindowUnknown");
+  const partial = measurement.complete ? "" : ` · ${t("trendPartialShort")}`;
+  return `${trendMeasurementLabel(measurement)} ${signedTrendCount(measurement.stars)} Stars / ${signedTrendCount(measurement.forks)} Forks${partial}`;
 }
 
 function trendFailureReason(reason = "") {
@@ -4165,19 +4207,18 @@ function trendFailureReason(reason = "") {
 
 function projectTrendHint(project) {
   const trend = project.trend || {};
-  const date = trend.date ? `${trend.date} · ` : "";
-  if (trend.cached === false) return date + t("trendNotCachedHint");
+  const measurement = window.StarVaultDomainCore.describeTrend(trend);
+  const parts = [trendMeasurementLabel(measurement), trendWindowHint(measurement), `${t("trendSource")}: ${measurement.source || (state.language === "zh" ? "未知" : "Unknown")}`];
+  if (trend.cached === false) return [...parts, t("trendNotCachedHint")].join(" · ");
   if (trend.error || trend.unavailable) {
-    return [date + t("trendUnavailable"), trendFailureReason(trend.reason), trend.error].filter(Boolean).join(" · ");
+    return [...parts, t("trendUnavailable"), trendFailureReason(trend.reason), trend.error].filter(Boolean).join(" · ");
   }
-  if (trend.pending || trend.stars === null || trend.stars === undefined || trend.forks === null || trend.forks === undefined) {
-    return date + t("trendLoading");
-  }
-  const parts = [date + (state.language === "zh" ? "前一日增量" : "Previous-day change")];
-  parts.push(`Stars +${fmtNumber(trend.stars || 0)}`);
-  parts.push(`Forks +${fmtNumber(trend.forks || 0)}`);
-  if ((trend.stars || 0) === 0 && (trend.forks || 0) === 0) parts.push(t("trendZeroHint"));
-  if (trend.complete === false || trend.starsComplete === false || trend.forksComplete === false) {
+  if (trend.pending) return [...parts, t("trendLoading")].join(" · ");
+  if (!measurement.windowKnown) return [...parts, t("trendWindowUnknown")].join(" · ");
+  parts.push(`Stars ${signedTrendCount(measurement.stars)}`);
+  parts.push(`Forks ${signedTrendCount(measurement.forks)}`);
+  if (measurement.stars === 0 && measurement.forks === 0) parts.push(t("trendZeroHint"));
+  if (!measurement.complete) {
     parts.push(t("trendPartial"));
     if (trend.starsComplete === false) parts.push(t("trendStarsPartial"));
     if (trend.forksComplete === false) parts.push(t("trendForksPartial"));
@@ -7911,7 +7952,7 @@ function renderLeaderboard(leaderboard) {
           return `
             <article class="leaderboard-item ${selected}" data-full-name="${escapeHtml(project.fullName)}" role="button" tabindex="0" aria-label="${escapeHtml(project.fullName)}">
               <span class="leaderboard-rank-select" aria-hidden="true">
-                <span class="rank-cell ${rankPodiumClass(project.rank)}">
+                <span class="rank-cell has-tooltip ${rankPodiumClass(project.rank)}" data-tooltip="${escapeHtml(leaderboardGrowthHint(project))}">
                   ${rankPodiumClass(project.rank) ? iconOnly("trophy", rankMedalLabel(project.rank), "rank-medal") : ""}
                   ${rankPodiumClass(project.rank) ? "" : `<strong>${project.rank}</strong>`}
                   ${rankChangeIcon(project.rankChange)}
@@ -7953,6 +7994,8 @@ function renderLeaderboard(leaderboard) {
   const memory = setMemory(leaderboard.memory || {}, { render: false });
   elements.leaderboardLogic.innerHTML = `
     <p>${escapeHtml(t("rankingLogicCopy"))}</p>
+    <p>${escapeHtml(t("trendGrowthHint"))}</p>
+    <p>${escapeHtml(t("trendHint"))}</p>
     <div class="logic-matrix">
       <span>${escapeHtml(t("opportunity"))}</span>
       <span>${escapeHtml(t("momentum"))}</span>
@@ -8975,6 +9018,7 @@ function renderDetail(project) {
         </div>
         <div class="detail-github-inline">
           ${githubActionButtons(project)}
+          <span class="mini-metric trend-tag has-tooltip" data-full-name="${escapeHtml(project.fullName)}" data-tooltip="${escapeHtml(projectTrendHint(project))}">${escapeHtml(projectTrendLabel(project))}</span>
         </div>
       </div>
 
@@ -9011,6 +9055,8 @@ function renderDetail(project) {
           ${detailFoldToggleMarkup()}
         </summary>
         <div class="signal-grid detail-data-grid">${dataRows}</div>
+        <p class="muted-inline">${escapeHtml(projectTrendHint(project))}</p>
+        <p class="muted-inline">${escapeHtml(t("trendHint"))}</p>
         <div class="detail-topic-block">
           <span>${escapeHtml(t("topics"))}</span>
           <div class="topic-strip">${topics || `<span class="muted-inline">${escapeHtml(state.language === "zh" ? "暂无主题" : "No topics")}</span>`}</div>
