@@ -255,7 +255,7 @@
   // edits to the same field use transaction commit order (last commit wins).
   // Learned counters are deltas; independent feedback must accumulate.
   function mergeChanges(base, local, current, path = "", learnedDelta = false) {
-    if (stableJson(base) === stableJson(local)) return cloneValue(current, undefined);
+    if ((base === undefined) === (local === undefined) && stableJson(base) === stableJson(local)) return cloneValue(current, undefined);
     if (isRecord(local) && (isRecord(base) || base === undefined)) {
       if (path.endsWith("/memory")) {
         learnedDelta = stableJson(base?.events || []) !== stableJson(local.events || []);
@@ -270,7 +270,7 @@
             else result[key] = value;
           } else delete result[key];
         }
-        else if (stableJson(base?.[key]) !== stableJson(local[key])) {
+        else if (!Object.prototype.hasOwnProperty.call(base || {}, key) || stableJson(base[key]) !== stableJson(local[key])) {
           result[key] = mergeChanges(base?.[key], local[key], current?.[key], childPath, learnedDelta);
         }
       }

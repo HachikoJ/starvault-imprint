@@ -7,6 +7,33 @@ const { IDBFactory, IDBKeyRange, IDBObjectStore, indexedDB } = require("fake-ind
 
 const storageSource = fs.readFileSync(path.join(__dirname, "../public/indexeddb-storage.js"), "utf8");
 
+test("T-01 snapshot merge preserves explicit null in new fields and keyed archive items", async () => {
+  const factory = new IDBFactory();
+  const first = createStorageApi(factory);
+  const second = createStorageApi(factory);
+  await first.putSnapshot(snapshotFixture());
+  const caller = await first.getSnapshot();
+  const concurrent = await second.getSnapshot();
+  concurrent.settings.otherTab = "retained";
+  await second.putSnapshot(concurrent);
+  caller.settings.measuredUnknown = null;
+  caller.store.leaderboards = { daily: { "2026-10-09": { items: [{ id:"repo-fixture", scoreParts:{ starDelta:null, growthWindow:{stars:null,durationMs:null,windowKnown:false} } }] } }, byPlan:{} };
+  await first.putSnapshot(caller);
+  const saved = await second.getSnapshot();
+  assert.equal(saved.settings.otherTab,"retained");
+  assert.ok(Object.hasOwn(saved.settings,"measuredUnknown"));
+  assert.equal(saved.settings.measuredUnknown,null);
+  const parts=saved.store.leaderboards.daily["2026-10-09"].items[0].scoreParts;
+  assert.deepEqual(JSON.parse(JSON.stringify(parts)),{starDelta:null,growthWindow:{stars:null,durationMs:null,windowKnown:false}});
+  const replacement=await first.getSnapshot();
+  replacement.settings.measuredUnknown=9;
+  await first.putSnapshot(replacement);
+  const clear=await second.getSnapshot();
+  clear.settings.measuredUnknown=null;
+  await second.putSnapshot(clear);
+  assert.equal((await first.getSnapshot()).settings.measuredUnknown,null);
+});
+
 test("T-02 recovery backup commits before cache replacement and an abort preserves every asset", async () => {
   const factory = new IDBFactory();
   const api = createStorageApi(factory);
