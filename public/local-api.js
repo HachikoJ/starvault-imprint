@@ -2192,25 +2192,20 @@
       error.providerAuthFailure = [401, 403].includes(response.status);
       throw error;
     }
-    const content = payload?.choices?.[0]?.message?.content || payload?.content || payload?.raw || "";
-    return {
-      raw: content,
-      json: parseJsonFromText(content),
-      provider
-    };
+    if (options.analysisProvider) domainCore.assertAnalysisDelivery(payload);
+    let content = payload?.choices?.[0]?.message?.content || payload?.content || payload?.raw || "";
+    if (options.analysisProvider && Array.isArray(content)) content = content.map(item => typeof item?.text === "string" ? item.text : "").join("\n");
+    let json;
+    try { json = parseJsonFromText(content); }
+    catch (error) {
+      if (options.analysisProvider) throw Object.assign(new Error("AI analysis is invalid: expected a complete business JSON object"), { code: "AI_ANALYSIS_INVALID" });
+      throw error;
+    }
+    return { raw: content, json, provider };
   }
 
   function normalizeBrowserAnalysis(result = {}, project, context = {}) {
-    const normalized = {
-      recommendation: result.recommendation || result.suggestion || "watch",
-      riskLevel: result.riskLevel || result.risk || "medium",
-      verdict: result.verdict || result.summary || "",
-      summary: result.summary || result.verdict || "",
-      risks: Array.isArray(result.risks) ? result.risks : [],
-      boundaries: Array.isArray(result.boundaries) ? result.boundaries : [],
-      inspirations: Array.isArray(result.inspirations) ? result.inspirations : Array.isArray(result.practiceIdeas) ? result.practiceIdeas : [],
-      validations: Array.isArray(result.validations) ? result.validations : Array.isArray(result.nextActions) ? result.nextActions : []
-    };
+    const normalized = domainCore.validateAnalysisResult(result);
     return {
       result: normalized,
       updatedAt: nowIso(),

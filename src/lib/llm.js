@@ -1,4 +1,4 @@
-const { normalizeAnalysisContext } = require("../../public/domain-core");
+const { normalizeAnalysisContext, assertAnalysisDelivery, validateAnalysisResult } = require("../../public/domain-core");
 const { fetchWithRetries } = require("./http-client");
 const {
   extractJsonObject,
@@ -384,85 +384,21 @@ function firstList(maxItems, maxLength, ...values) {
   return [];
 }
 
-function fallbackSentences(raw = "", maxItems = 3) {
-  return cleanAnalysisText(raw)
-    .split(/[\n。.!?]+/)
-    .map((item) => compactText(item, 120))
-    .filter(Boolean)
-    .slice(0, maxItems);
-}
-
-function inferredRiskLevel(project) {
-  const risk = Number(project?.scores?.risk || 0);
-  if (risk >= 35) return "high";
-  if (risk >= 15) return "medium";
-  return "low";
-}
-
-function normalizeAnalysisRecommendation(parsed = {}, riskLevel = "medium", language = "zh") {
-  const direct = String(parsed.recommendation || parsed.decision || parsed.recommendationTag || "")
-    .toLowerCase()
-    .trim();
-  if (["validate", "validation", "continue", "deep-dive", "deep_dive"].includes(direct)) return "validate";
-  if (["pause", "skip", "hold", "not-fit", "not_fit"].includes(direct)) return "pause";
-  if (["watch", "observe", "review"].includes(direct)) return "watch";
-  const text = cleanAnalysisText([parsed.verdict, parsed.summary].filter(Boolean).join(" "));
-  if (/暂缓|暂不|不建议|不适合|先放弃|skip|pause|not fit|not recommended/i.test(text)) return "pause";
-  if (/建议验证|优先验证|继续跟进|值得验证|值得关注|validate|continue|priority/i.test(text) && riskLevel !== "high") return "validate";
-  if (riskLevel === "high") return "pause";
-  if (riskLevel === "low") return "validate";
-  return "watch";
-}
-
 function normalizeAnalysisResult(raw, project, language = "zh") {
-  const parsed = extractJsonObject(raw) || {};
-  const fallback = fallbackSentences(raw);
-  const riskLevel = ["low", "medium", "high"].includes(String(parsed.riskLevel || "").toLowerCase())
-    ? String(parsed.riskLevel).toLowerCase()
-    : inferredRiskLevel(project);
-  const recommendation = normalizeAnalysisRecommendation(parsed, riskLevel, language);
-  const sections = parsed.sections || {};
+  const parsed = validateAnalysisResult(extractJsonObject(raw));
   const itemMax = language === "en" ? 180 : 96;
-  const risks = firstList(3, itemMax, sections.risks, parsed.risks, parsed.biggestRisks, parsed.riskAnalysis);
-  const boundaries = firstList(
-    3,
-    itemMax,
-    sections.boundaries,
-    parsed.boundaries,
-    parsed.boundary,
-    parsed.practiceBoundary,
-    parsed.cleanRoom,
-    parsed.reuseBoundary,
-    parsed.cleanRoomBoundary
-  );
-  const inspirations = firstList(
-    3,
-    itemMax,
-    sections.inspirations,
-    parsed.inspirations,
-    parsed.practiceIdeas,
-    parsed.reuseIdeas,
-    parsed.developmentPath,
-    parsed.productizationIdeas
-  );
-  const validations = firstList(3, itemMax, sections.validations, parsed.validations, parsed.nextActions, parsed.actions);
-  const licenseBoundary = compactText(licensePracticeBoundary(project?.licensePolicy, language), itemMax);
-  const boundaryList = boundaries.length ? boundaries : [licenseBoundary].filter(Boolean);
-  const validationList = validations.length ? validations : fallback.slice(0, 3);
-
+  const lists = Object.fromEntries(["risks", "boundaries", "inspirations", "validations"]
+    .map(field => [field, firstList(3, itemMax, parsed[field])]));
   return {
     version: "project-analysis-v2",
-    recommendation,
-    verdict: compactText(parsed.verdict, language === "en" ? 120 : 56) || (language === "en" ? "Watch with review" : "谨慎观察"),
-    summary: compactText(parsed.summary || parsed.marketAngle, language === "en" ? 220 : 120) || fallback[0] || "",
-    riskLevel,
-    risks: risks.length ? risks : fallback.slice(0, 3),
-    boundaries: boundaryList,
-    inspirations,
-    validations: validationList,
-    practiceIdeas: inspirations,
-    practiceBoundary: boundaryList.join("；"),
-    nextActions: validationList
+    recommendation: parsed.recommendation,
+    verdict: compactText(parsed.verdict, language === "en" ? 120 : 56),
+    summary: compactText(parsed.summary, language === "en" ? 220 : 120),
+    riskLevel: parsed.riskLevel,
+    ...lists,
+    practiceIdeas: lists.inspirations,
+    practiceBoundary: lists.boundaries.join("；"),
+    nextActions: lists.validations
   };
 }
 
@@ -1300,11 +1236,9 @@ async function analyzeOpenAICompatible(provider, project, language, context = {}
     })
   }, providerHttpOptions(provider));
 
-  const json = await response.json();
-  if (!response.ok) {
-    throw new Error(json.error?.message || `Provider request failed with ${response.status}`);
-  }
-  const raw = json.choices?.[0]?.message?.content || "";
+  const json = await readProviderResponse(response);
+  assertAnalysisDelivery(json);
+  const raw = providerMessageContent(json.choices?.[0]?.message?.content);
   return {
     raw,
     result: normalizeAnalysisResult(raw, project, language)
@@ -1333,10 +1267,8 @@ async function analyzeAnthropic(provider, project, language, context = {}) {
     })
   }, providerHttpOptions(provider));
 
-  const json = await response.json();
-  if (!response.ok) {
-    throw new Error(json.error?.message || `Provider request failed with ${response.status}`);
-  }
+  const json = await readProviderResponse(response);
+  assertAnalysisDelivery(json);
   const raw = (json.content || []).map((item) => item.text || "").join("\n").trim();
   return {
     raw,
@@ -1366,10 +1298,8 @@ async function analyzeGemini(provider, project, language, context = {}) {
     })
   }, providerHttpOptions(provider));
 
-  const json = await response.json();
-  if (!response.ok) {
-    throw new Error(json.error?.message || `Provider request failed with ${response.status}`);
-  }
+  const json = await readProviderResponse(response);
+  assertAnalysisDelivery(json);
   const raw = (json.candidates?.[0]?.content?.parts || []).map((item) => item.text || "").join("\n").trim();
   return {
     raw,

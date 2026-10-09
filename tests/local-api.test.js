@@ -1791,3 +1791,43 @@ for (const mismatch of [false, true]) {
     assert.equal((await runtime.storage.getSnapshot()).activeObservationPlanId, 'beta');
   });
 }
+
+test('T-07 browser invalid AI deliveries preserve old analysis, learning and provider state', async () => {
+  const valid = { recommendation:'watch',riskLevel:'medium',summary:'Valid local maintainer workflow',risks:[],boundaries:[],inspirations:[],validations:[] };
+  const invalid = ['', '{}', 'Service overloaded, try again later', '{"summary":"Truncated"',
+    JSON.stringify({...valid,recommendation:'buy'}),JSON.stringify({...valid,risks:[{}]}),
+    {choices:[{message:{refusal:'Refused',content:JSON.stringify(valid)}}]}];
+  let current;let calls=0;
+  const runtime=await createBrowserRuntime(async url=>{
+    assert.ok(String(url).startsWith('https://provider.invalid/'),'Unexpected request blocked');calls++;
+    return response(typeof current==='object'?current:{choices:[{message:{content:current}}]});
+  });
+  const post=(url,body)=>runtime.api.handle(url,{method:'POST',body:JSON.stringify(body)});
+  await post('/api/settings',{validateProvider:false,llmProviders:[{id:'deepseek',baseUrl:'https://provider.invalid',apiKey:'fixture-t07-key'}]});
+  await runtime.storage.putProjects([{fullName:'acme/validation',description:'Fixture',scores:{risk:0},observationPlanMatches:{default:{planId:'default'}}}]);
+  const seed=await runtime.storage.getSnapshot();
+  const old={result:valid,raw:'old fixture',updatedAt:'2026-01-01T00:00:00.000Z',runCount:3};
+  seed.store.observationPlans.default.userData.analysis['acme/validation']=old;
+  seed.settings.llmProviders[0].testStatus='fixture-before';
+  await runtime.storage.putSnapshot(seed);
+  const eventCount=s=>(s.store.observationPlans.default.memory.events||[]).filter(e=>e.type==='ai_analyze').length;
+  const before=await runtime.storage.getSnapshot();
+  for(let index=0;index<invalid.length;index++){
+    current=invalid[index];
+    const start=await post('/api/analyze',{fullName:'acme/validation',userNeed:'invalid fixture '+index});
+    const task=await waitForTask(runtime.api,start.task.id);
+    assert.equal(task.status,'failed',JSON.stringify(task));assert.match(task.error,/AI analysis is invalid/);
+    const after=await runtime.storage.getSnapshot();
+    assert.deepEqual(after.store.observationPlans.default.userData.analysis['acme/validation'],old);
+    assert.equal(eventCount(after),eventCount(before));
+    assert.equal(after.settings.llmProviders[0].testStatus,'fixture-before');
+    assert.equal((await runtime.storage.getTaskLease(task.id)).expiresAt,0);
+  }
+  current=JSON.stringify({...valid,summary:'有效的本地维护工作流。'});
+  const start=await post('/api/analyze',{fullName:'acme/validation',userNeed:'valid fixture'});
+  const task=await waitForTask(runtime.api,start.task.id);assert.equal(task.status,'completed',task.error);
+  const accepted=await runtime.storage.getSnapshot();
+  assert.equal(accepted.store.observationPlans.default.userData.analysis['acme/validation'].result.summary,'有效的本地维护工作流。');
+  assert.equal(eventCount(accepted),eventCount(before)+1);assert.equal(accepted.settings.llmProviders[0].testStatus,'ok');
+  assert.equal(calls,invalid.length+1);
+});

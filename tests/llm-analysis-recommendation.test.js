@@ -2,6 +2,7 @@ const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const path = require("node:path");
 const test = require("node:test");
+const { analyzeWithProvider } = require("../src/lib/llm");
 
 const llmSource = fs.readFileSync(path.join(__dirname, "..", "src", "lib", "llm.js"), "utf8");
 
@@ -14,21 +15,23 @@ function functionBody(name) {
   return llmSource.slice(start, nextMatch ? start + 1 + nextMatch.index : llmSource.length);
 }
 
-test("project AI analysis requests and normalizes stable recommendation conclusions", () => {
+test("project AI analysis requests stable conclusions without inferring approval from local risk", async t => {
   const prompt = functionBody("projectPrompt");
-  const normalizer = functionBody("normalizeAnalysisResult");
-  const recommendation = functionBody("normalizeAnalysisRecommendation");
 
   assert.match(prompt, /recommendation:\s*"validate \| watch \| pause"/);
   assert.match(prompt, /validate =/);
   assert.match(prompt, /watch =/);
   assert.match(prompt, /pause =/);
-  assert.match(recommendation, /validate/);
-  assert.match(recommendation, /watch/);
-  assert.match(recommendation, /pause/);
-  assert.match(recommendation, /riskLevel === "high"/);
-  assert.match(normalizer, /const recommendation = normalizeAnalysisRecommendation/);
-  assert.match(normalizer, /recommendation,/);
+  const originalFetch = global.fetch;
+  t.after(() => { global.fetch = originalFetch; });
+  global.fetch = async url => {
+    assert.ok(String(url).startsWith("https://provider.invalid/"));
+    return new Response(JSON.stringify({ choices: [{ message: { content: JSON.stringify({ summary: "A narrow local workflow." }) } }] }));
+  };
+  const analysis = await analyzeWithProvider({ provider: { protocol: "openai-compatible", baseUrl: "https://provider.invalid", apiKey: "fixture-only", model: "fixture" }, project: { fullName: "acme/fixture", scores: { risk: 0 } }, language: "en" });
+  assert.equal(analysis.result.recommendation, "watch");
+  assert.equal(analysis.result.riskLevel, "medium");
+  assert.deepEqual(analysis.result.risks, []);
 });
 
 test("project AI analysis prompt makes opportunity discovery explicit", () => {

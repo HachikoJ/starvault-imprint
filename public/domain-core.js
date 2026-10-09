@@ -38,6 +38,100 @@
     return (hash >>> 0).toString(36);
   }
 
+  function invalidAnalysisError(detail) {
+    const error = new Error(`AI analysis is invalid: ${detail}`);
+    error.code = "AI_ANALYSIS_INVALID";
+    return error;
+  }
+
+  function isAnalysisObject(value) {
+    if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+    const prototype = Object.getPrototypeOf(value);
+    return prototype === null || Object.getPrototypeOf(prototype) === null;
+  }
+
+  function assertAnalysisDelivery(payload) {
+    // Inspect only explicit provider failure metadata. Length/max_tokens alone
+    // cannot reject a complete and valid business result.
+    const rejected = (value) => {
+      if (!value || typeof value !== "object") return false;
+      if (value.error || value.refusal || value.blocked || value.blockReason || value.blockedReason) return true;
+      if (/^(?:error|refusal|blocked)$/i.test(String(value.type || ""))) return true;
+      return [value.finish_reason, value.finishReason, value.stop_reason].some(reason =>
+        /^(?:refusal|content_filter|safety|recitation|blocked|blocklist|prohibited_content|spii)$/i.test(String(reason || "")));
+    };
+    const selected = payload?.choices?.[0];
+    const candidate = payload?.candidates?.[0];
+    const parts = [payload, selected, selected?.message, candidate, payload?.promptFeedback,
+      ...(Array.isArray(payload?.content) ? payload.content : []),
+      ...(Array.isArray(selected?.message?.content) ? selected.message.content : []),
+      ...(Array.isArray(candidate?.content?.parts) ? candidate.content.parts : [])];
+    if (parts.some(rejected)) throw invalidAnalysisError("provider returned an error, refusal or blocked result");
+  }
+
+  function validateAnalysisResult(parsed) {
+    if (!isAnalysisObject(parsed)) throw invalidAnalysisError("expected a business JSON object");
+    assertAnalysisDelivery(parsed);
+    const has = (object, key) => Object.prototype.hasOwnProperty.call(object, key);
+    const text = (value, field) => {
+      if (typeof value !== "string") throw invalidAnalysisError(`${field} must be a string`);
+      return value.replace(/\s+/g, " ").trim();
+    };
+    const summaryFields = ["summary", "verdict", "marketAngle"];
+    const texts = {};
+    for (const field of summaryFields) if (has(parsed, field)) texts[field] = text(parsed[field], field);
+    // Known service/refusal messages are not project conclusions even when a
+    // gateway wraps them in a syntactically valid summary field.
+    const serviceFailure = /^(?:(?:the )?service (?:is )?)?(?:overloaded|unavailable|too many requests)(?:[.!]?|\s*[,;:]?\s*(?:please )?try again(?: later)?[.!]?)$/i;
+    const refusal = /^(?:i (?:cannot|can't|am unable to) (?:assist|help|comply|analy[sz]e)\b|(?:很抱歉[，,\s]*)?(?:我)?无法(?:协助|处理|分析)(?:这个|该|您的)?请求|服务(?:繁忙|过载)[，。!！\s]*请稍后)/i;
+    if (Object.values(texts).some(value => serviceFailure.test(value) || refusal.test(value))) throw invalidAnalysisError("provider returned a service or refusal message");
+    const meaningful = value => /[\p{L}\p{N}]/u.test(value || "");
+    const summary = summaryFields.map(field => texts[field]).find(meaningful) || "";
+    if (!summary) throw invalidAnalysisError("a non-empty summary or verdict is required");
+
+    const recommendations = {
+      validate: "validate", validation: "validate", continue: "validate", "deep-dive": "validate", deep_dive: "validate",
+      watch: "watch", observe: "watch", review: "watch",
+      pause: "pause", skip: "pause", hold: "pause", "not-fit": "pause", not_fit: "pause"
+    };
+    const enumValue = (fields, allowed, fallback) => {
+      let selected;
+      for (const field of fields) {
+        if (!has(parsed, field)) continue;
+        const value = text(parsed[field], field).toLowerCase();
+        if (!has(allowed, value)) throw invalidAnalysisError(`${field} has an unsupported value`);
+        if (selected === undefined) selected = allowed[value];
+      }
+      return selected === undefined ? fallback : selected;
+    };
+    const recommendation = enumValue(["recommendation", "decision", "recommendationTag", "suggestion"], recommendations, "watch");
+    const riskLevel = enumValue(["riskLevel", "risk"], { low: "low", medium: "medium", high: "high" }, "medium");
+    if (has(parsed, "sections") && !isAnalysisObject(parsed.sections)) throw invalidAnalysisError("sections must be an object");
+    const sections = parsed.sections || {};
+    const aliases = {
+      risks: ["biggestRisks", "riskAnalysis"],
+      boundaries: ["boundary", "practiceBoundary", "cleanRoom", "reuseBoundary", "cleanRoomBoundary"],
+      inspirations: ["practiceIdeas", "reuseIdeas", "developmentPath", "productizationIdeas"],
+      validations: ["nextActions", "actions"]
+    };
+    const list = (value, field, scalarAlias = false) => {
+      if (scalarAlias && typeof value === "string") return value.split(/\n+|[；;]/).map(item => item.trim()).filter(Boolean);
+      if (!Array.isArray(value) || value.some(item => typeof item !== "string")) throw invalidAnalysisError(`${field} must be a string array`);
+      return Array.from(value, item => item.trim()).filter(Boolean);
+    };
+    const lists = {};
+    for (const [field, oldFields] of Object.entries(aliases)) {
+      // Validate every explicitly supplied recognized field, even when a higher
+      // priority field is present; malformed output must not hide behind aliases.
+      const choices = [];
+      if (has(sections, field)) choices.push(list(sections[field], `sections.${field}`));
+      if (has(parsed, field)) choices.push(list(parsed[field], field));
+      for (const old of oldFields) if (has(parsed, old)) choices.push(list(parsed[old], old, true));
+      lists[field] = choices.length ? choices[0] : [];
+    }
+    return { recommendation, riskLevel, summary, verdict: meaningful(texts.verdict) ? texts.verdict : summary, ...lists };
+  }
+
   function normalizeAnalysisContext(context = {}) {
     const methods = ["balanced", "commercial", "cleanRoom", "technical", "niche"];
     const method = String(context.method || "balanced").trim();
@@ -720,6 +814,8 @@
   }
 
   return {
+    assertAnalysisDelivery,
+    validateAnalysisResult,
     analysisProviderIdentity,
     analysisTaskIdentity,
     analysisTaskKey,
