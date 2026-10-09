@@ -30,6 +30,15 @@ function deleteDatabase() {
   });
 }
 
+async function expireTaskLease(taskId) {
+  const db = await new Promise((resolve, reject) => { const req = indexedDB.open("starvault-imprint", 5); req.onsuccess = () => resolve(req.result); req.onerror = () => reject(req.error); });
+  const tx = db.transaction("meta", "readwrite");
+  const expired = new Promise((resolve, reject) => { tx.oncomplete = resolve; tx.onabort = () => reject(tx.error); });
+  const leaseRequest = tx.objectStore("meta").get(`taskLease:${taskId}`);
+  leaseRequest.onsuccess = () => tx.objectStore("meta").put({ ...leaseRequest.result, value: { ...leaseRequest.result.value, expiresAt: Date.now() - 1 } });
+  await expired; db.close();
+}
+
 async function createBrowserRuntime(fetchImpl, options = {}) {
   if (options.reset !== false) await deleteDatabase();
   const window = {
@@ -300,8 +309,9 @@ test("T-11 browser analysis and plan deadlines fail tasks without replay or CORS
     const started = await api.handle(endpoint, {method:'POST',body:JSON.stringify(body)});
     const task = await waitForTask(api, started.task.id);
     assert.equal(task.status,'failed'); assert.match(task.error,/timed out/i); assert.doesNotMatch(task.error,/CORS/);
+    const lease = await storage.getTaskLease(task.id); assert.equal(lease.released, true); assert.equal(lease.expiresAt, 0);
   }
-  assert.deepEqual(deadlines,[45000,75000]); assert.equal(calls,2); assert.equal(cancelled,2);
+  assert.deepEqual(deadlines.filter(ms => ms > 10000),[45000,75000]); assert.equal(calls,2); assert.equal(cancelled,2);
   assert.equal(Object.keys((await storage.getSnapshot()).store.observationPlans.default.userData.analysis || {}).length,0);
 });
 
@@ -456,6 +466,9 @@ test("browser scan resumes after refresh from the last completed profile", async
   assert.equal(checkpoint?.completedProfiles?.length, 1);
   assert.deepEqual(firstSearches, ["first-anchor in:name archived:false mirror:false", "second-anchor in:name archived:false mirror:false"]);
 
+  // A refresh cannot take a still-live owner. Simulate its lease expiry first;
+  // readonly GitHub work may then resume from the durable profile artifact.
+  await expireTaskLease(started.task.id);
   const resumedSearches = [];
   const resumed = await createBrowserRuntime(async (url) => {
     const parsed = new URL(url);
@@ -1595,9 +1608,98 @@ test("T-12 browser legacy running analysis is not rebound or automatically repla
     attempts: 1, input: { fullName: "acme/legacy", userNeed: "Old unbound request" }, createdAt: new Date().toISOString() } };
   await runtime.storage.putSnapshot(snapshot);
   const result = await runtime.api.handle("/api/tasks/legacy");
-  assert.equal(result.task.status, "failed"); assert.match(result.task.error, /identity is unknown/);
+  assert.equal(result.task.status, "failed"); assert.match(result.task.error, /identity is unknown|outcome is unknown/);
   await new Promise(resolve => setTimeout(resolve, 10));
   assert.equal(calls, 0);
   const persisted = (await runtime.storage.getSnapshot()).store.tasks.legacy;
   assert.equal(persisted.status, "failed"); assert.equal(persisted.input.observationPlanId, undefined);
+});
+
+
+test("T-06 two runtimes querying and enqueueing one analysis have only one owner and one learning commit", async () => {
+  let calls = 0; let release; const gate = new Promise(resolve => { release = resolve; });
+  const fetchImpl = async () => {
+    calls++; await gate;
+    return response({ choices: [{ message: { content: JSON.stringify({ recommendation: "watch", riskLevel: "low", summary: "Unique owner",
+      risks: [], boundaries: [], inspirations: [], validations: [] }) } }] });
+  };
+  const first = await createBrowserRuntime(fetchImpl);
+  const post = (api, url, body) => api.handle(url, { method: "POST", body: JSON.stringify(body) });
+  try {
+    await post(first.api, "/api/settings", { validateProvider: false, llmProviders: [{ id: "deepseek", apiKey: "fixture-owner-key" }] });
+    await first.storage.putProjects([{ fullName: "fixture/owner", category: { key: "tools" }, useCase: { key: "personal" } }]);
+    const started = await post(first.api, "/api/analyze", { fullName: "fixture/owner", userNeed: "Unique request" });
+    const second = await createBrowserRuntime(fetchImpl, { reset: false });
+    const duplicate = await post(second.api, "/api/analyze", { fullName: "fixture/owner", userNeed: "Unique request" });
+    assert.equal(duplicate.task.id, started.task.id);
+    await Promise.all([first.api.handle(`/api/tasks/${started.task.id}`), second.api.handle(`/api/tasks/${started.task.id}`), second.api.handle("/api/tasks")]);
+    await new Promise(resolve => setTimeout(resolve, 10));
+    assert.equal(calls, 1);
+    release();
+    const completed = await waitForTask(first.api, started.task.id); assert.equal(completed.status, "completed", completed.error);
+    const snapshot = await second.storage.getSnapshot();
+    assert.equal(snapshot.store.observationPlans.default.memory.events.filter(row => row.type === "ai_analyze").length, 1);
+    assert.equal(snapshot.store.observationPlans.default.memory.stats.eventCounts.ai_analyze, 1);
+    assert.equal((await second.storage.getTaskLease(started.task.id)).released, true);
+  } finally { release(); }
+});
+
+
+test("T-06 failed renewal aborts the owner's request and cannot overwrite uncertain recovery", async () => {
+  let signal; let calls = 0;
+  const first = await createBrowserRuntime(async (url, init) => { signal = init.signal; calls++; return new Promise(() => {}); },
+    { setTimeout: (callback, ms) => setTimeout(callback, ms === 10000 ? 15 : ms) });
+  await first.api.handle("/api/settings", { method: "POST", body: JSON.stringify({ validateProvider: false, llmProviders: [{ id: "deepseek", apiKey: "fixture-renew-key" }] }) });
+  await first.storage.putProjects([{ fullName: "fixture/renew" }]);
+  const { task } = await first.api.handle("/api/analyze", { method: "POST", body: JSON.stringify({ fullName: "fixture/renew" }) });
+  for (let i = 0; i < 100 && !signal; i++) await new Promise(resolve => setTimeout(resolve, 2));
+  assert.ok(signal);
+  await expireTaskLease(task.id);
+  for (let i = 0; i < 100 && !signal.aborted; i++) await new Promise(resolve => setTimeout(resolve, 2));
+  assert.equal(signal.aborted, true); assert.equal(signal.reason.code, "TASK_OWNERSHIP_LOST");
+  const second = await createBrowserRuntime(async () => { calls++; throw new Error("Unknown paid result must not replay"); }, { reset: false });
+  const result = await waitForTask(second.api, task.id);
+  assert.equal(result.status, "failed"); assert.match(result.error, /outcome is unknown/); assert.equal(calls, 1);
+  assert.equal(Object.keys((await second.storage.getSnapshot()).store.observationPlans.default.userData.analysis || {}).length, 0);
+});
+
+test("T-06 durable external artifact closes the paid-response checkpoint crash window", async () => {
+  let researchCalls = 0; let durable; const savedArtifact = new Promise(resolve => { durable = resolve; });
+  const fetchImpl = async (url, init = {}) => {
+    const parsed = new URL(url);
+    if (parsed.hostname === "api.github.com") return githubResponse(url, { total_count: 1, items: [repository("fixture/artifactprobe", 321, { description: "artifactprobe toolkit" })] });
+    assert.equal(parsed.hostname, "api.tavily.com");
+    const query = JSON.parse(init.body).query;
+    if (query.includes("artifactprobe")) researchCalls++;
+    return response({ results: [{ title: "artifactprobe", url: "https://github.com/fixture/artifactprobe", content: "artifactprobe toolkit" }] });
+  };
+  const first = await createBrowserRuntime(fetchImpl);
+  await first.api.handle("/api/settings", { method: "POST", body: JSON.stringify({ validateProvider: false, githubToken: "fixture-github-key", tavilyKey: "fixture-tavily-key" }) });
+  await savePlan(first.api, { id: "artifactprobe", name: "artifactprobe", searchLogic: { baseMode: "only", keywords: ["artifactprobe"], customQueries: [{ key: "artifactprobe-core", label: "artifactprobe", query: "artifactprobe in:name" }] } });
+  await activatePlan(first.api, "artifactprobe");
+  const originalPut = first.storage.putTaskArtifact;
+  first.storage.putTaskArtifact = async (...args) => {
+    const result = await originalPut(...args);
+    if (args[1] === "external-discovery") { await expireTaskLease(args[0]); durable(args[0]); }
+    return result;
+  };
+  const started = await first.api.handle("/api/scan", { method: "POST", body: JSON.stringify({ mode: "manual" }) });
+  assert.equal(await savedArtifact, started.task.id);
+  const before = (await first.storage.getSnapshot()).store.tasks[started.task.id];
+  assert.equal(before.checkpoint.externalCompleted, false);
+  assert.equal((await first.storage.getTaskLease(started.task.id)).nonReplayableInFlight, false);
+  const second = await createBrowserRuntime(fetchImpl, { reset: false });
+  const completed = await waitForTask(second.api, started.task.id);
+  assert.equal(completed.status, "completed", completed.error); assert.equal(researchCalls, 1);
+  assert.deepEqual((await second.storage.getProjectsByPlan("artifactprobe")).map(row => row.fullName), ["fixture/artifactprobe"]);
+});
+
+
+test("T-06 atomic enqueue initializes an empty workspace without a demo or saved settings", async () => {
+  let calls = 0; const runtime = await createBrowserRuntime(async () => { calls++; throw new Error("Unconfigured scan must not send requests"); });
+  const started = await runtime.api.handle("/api/scan", { method: "POST", body: JSON.stringify({ mode: "manual" }) });
+  const task = await waitForTask(runtime.api, started.task.id);
+  assert.equal(task.status, "failed"); assert.match(task.error, /GitHub Token is required/); assert.equal(calls, 0);
+  const snapshot = await runtime.storage.getSnapshot();
+  assert.ok(snapshot.store.observationPlans.default);assert.equal((await runtime.storage.getTaskLease(task.id)).released, true);
 });

@@ -127,6 +127,296 @@ function snapshotFixture(overrides = {}) {
   };
 }
 
+function queuedLeaseTask(id = "owned", input = { observationPlanId: "default" }) {
+  return { id, type: "analysis", key: "analysis:fixture", status: "queued", attempts: 0, input,
+    createdAt: "2026-10-08T00:00:00.000Z", updatedAt: "2026-10-08T00:00:00.000Z" };
+}
+
+test("T-06 atomic enqueue and competing runtimes claim exactly one owner", async () => {
+  const factory = new IDBFactory();
+  const a = createStorageApi(factory), b = createStorageApi(factory);
+  await a.putSnapshot(snapshotFixture());
+  await b.getSnapshot(); // Warm the second runtime before the other writer.
+  const [first, second] = await Promise.all([
+    a.enqueueTask(queuedLeaseTask("first"), { sameInput: input => input.observationPlanId === "default" }),
+    b.enqueueTask(queuedLeaseTask("second"), { sameInput: input => input.observationPlanId === "default" })
+  ]);
+  assert.equal(first.id, second.id);
+  const [one, two] = await Promise.all([
+    a.claimTask(first.id, { ownerId: "a" }), b.claimTask(first.id, { ownerId: "b" })
+  ]);
+  assert.equal(Number(one.claimed) + Number(two.claimed), 1);
+  assert.equal((await b.getSnapshot()).store.tasks[first.id].attempts, 1);
+  assert.equal((await a.getTaskLease(first.id)).token, (one.claimed ? one : two).lease.token);
+});
+
+test("T-06 enqueue rejects a full active queue but preserves duplicate reuse and all old owners", async () => {
+  const api = createStorageApi();
+  const fixture = snapshotFixture();
+  fixture.store.tasks = Object.fromEntries(Array.from({ length: 60 }, (_, i) => {
+    const task = queuedLeaseTask(`task-${i}`); task.key = `key-${i}`; return [task.id, task];
+  }));
+  await api.putSnapshot(fixture);
+  await assert.rejects(api.enqueueTask({ ...queuedLeaseTask("new"), key: "new" }), error => error.code === "TASK_QUEUE_FULL");
+  assert.equal((await api.enqueueTask({ ...queuedLeaseTask("duplicate"), key: "key-0" })).id, "task-0");
+  assert.equal(Object.keys((await api.getSnapshot()).store.tasks).length, 60);
+});
+
+test("T-06 renewal cannot revive an expired lease and takeover fences the former token", async () => {
+  const factory = new IDBFactory();
+  const a = createStorageApi(factory), b = createStorageApi(factory);
+  await a.putSnapshot(snapshotFixture());
+  await a.enqueueTask(queuedLeaseTask());
+  const first = await a.claimTask("owned", { ownerId: "a", now: 1000, leaseMs: 1000 });
+  const renewed = await a.renewTaskLease(first.lease, { now: 1500, leaseMs: 1000 });
+  assert.equal(renewed.expiresAt, 2500);
+  assert.equal((await b.claimTask("owned", { ownerId: "b", now: 2499 })).claimed, false);
+  await assert.rejects(a.renewTaskLease(first.lease, { now: 2500 }), error => error.code === "TASK_OWNERSHIP_LOST");
+  const second = await b.claimTask("owned", { ownerId: "b", now: 2500 });
+  assert.equal(second.claimed, true);
+  assert.notEqual(second.lease.token, first.lease.token);
+  assert.equal(second.task.attempts, 2);
+  await assert.rejects(a.markTaskExternalRequest(first.lease, { now: 2501 }), error => error.code === "TASK_OWNERSHIP_LOST");
+});
+
+test("T-06 legacy running and expired issued AI requests are quarantined without a new claim", async () => {
+  const api = createStorageApi();
+  const fixture = snapshotFixture();
+  fixture.store.tasks = { legacy: { ...queuedLeaseTask("legacy"), status: "running", attempts: 1 } };
+  await api.putSnapshot(fixture);
+  const legacy = await api.claimTask("legacy", { ownerId: "new" });
+  assert.equal(legacy.claimed, false);
+  assert.equal(legacy.task.status, "failed");
+  assert.equal(legacy.task.errorCode, "TASK_OUTCOME_UNKNOWN");
+  await api.enqueueTask(queuedLeaseTask());
+  const current = await api.claimTask("owned", { ownerId: "a", now: 1000, leaseMs: 1000 });
+  await api.markTaskExternalRequest(current.lease, { now: 1100 });
+  const recovery = await api.claimTask("owned", { ownerId: "b", now: 2000 });
+  assert.equal(recovery.claimed, false);
+  assert.equal(recovery.task.status, "failed");
+  assert.equal(recovery.task.recoveryRequired, true);
+  assert.equal(recovery.task.attempts, 1);
+  assert.match(recovery.task.error, /unknown.*charged.*automatic replay is disabled/i);
+});
+
+test("T-06 stale result, learning, project and artifact writes are rejected atomically", async () => {
+  const factory = new IDBFactory();
+  const a = createStorageApi(factory), b = createStorageApi(factory);
+  await a.putSnapshot(snapshotFixture());
+  await a.enqueueTask(queuedLeaseTask());
+  const first = await a.claimTask("owned", { ownerId: "a", now: Date.now() - 60000, leaseMs: 30000 });
+  const stale = a.bindTaskSnapshot(await a.getSnapshot(), first.lease);
+  stale.store.observationPlans.default.userData.analysis = { "acme/example": { result: "late result" } };
+  stale.store.observationPlans.default.memory.events = [{ id: "late", type: "ai_analyze" }];
+  a.registerSnapshotOperations(stale, "default", [{ path: ["stats", "eventCounts", "ai_analyze"], delta: 1, min: 0 }]);
+  stale.store.tasks.owned.status = "completed";
+  const second = await b.claimTask("owned", { ownerId: "b" });
+  await b.putTaskArtifact("owned", "profile", { owner: "b" }, { taskLease: second.lease });
+  const before = await b.getSnapshot();
+  const beforeRevision = (await b.getSnapshotMeta()).localRevision;
+  const lost = error => error.code === "TASK_OWNERSHIP_LOST";
+  await assert.rejects(a.putSnapshot(stale), lost);
+  await assert.rejects(a.replaceProjectsForPlan("default", [{ fullName: "late/project" }], { taskLease: first.lease }), lost);
+  await assert.rejects(a.putTaskArtifact("owned", "profile", { owner: "a" }, { taskLease: first.lease }), lost);
+  await assert.rejects(a.clearTaskArtifacts("owned", { taskLease: first.lease }), lost);
+  assert.deepEqual(JSON.parse(JSON.stringify((await b.getSnapshot()).store)), JSON.parse(JSON.stringify(before.store)));
+  assert.equal((await b.getSnapshotMeta()).localRevision, beforeRevision);
+  assert.equal((await b.getTaskArtifacts("owned")).profile.owner, "b");
+});
+
+test("T-06 terminal delivery releases the lease and only matching artifact cleanup is allowed", async () => {
+  const api = createStorageApi();
+  await api.putSnapshot(snapshotFixture());
+  await api.enqueueTask(queuedLeaseTask());
+  const claim = await api.claimTask("owned", { ownerId: "a" });
+  await api.markTaskExternalRequest(claim.lease);
+  await api.putTaskArtifact("owned", "profile", { saved: true }, { taskLease: claim.lease });
+  const snapshot = api.bindTaskSnapshot(await api.getSnapshot(), claim.lease);
+  snapshot.store.observationPlans.default.userData.analysis = { "acme/example": { result: "durable" } };
+  snapshot.store.tasks.owned.status = "completed";
+  snapshot.store.tasks.owned.result = { ok: true };
+  await api.putSnapshot(snapshot);
+  const released = await api.getTaskLease("owned");
+  assert.equal(released.released, true);
+  assert.equal(released.expiresAt, 0);
+  assert.equal(released.nonReplayableInFlight, false);
+  await assert.rejects(api.renewTaskLease(claim.lease), error => error.code === "TASK_OWNERSHIP_LOST");
+  await assert.rejects(api.putSnapshot(snapshot), error => error.code === "TASK_OWNERSHIP_LOST");
+  await assert.rejects(api.putTaskArtifact("owned", "late", {}, { taskLease: claim.lease }), error => error.code === "TASK_OWNERSHIP_LOST");
+  assert.equal((await api.clearTaskArtifacts("owned", { taskLease: claim.lease })).deleted, 1);
+  assert.equal(Object.keys(await api.getTaskArtifacts("owned")).length, 0);
+  assert.equal((await api.getSnapshot()).store.observationPlans.default.userData.analysis["acme/example"].result, "durable");
+});
+
+test("T-06 an aborted terminal transaction preserves its running lease and every result", async () => {
+  const api = createStorageApi();
+  await api.putSnapshot(snapshotFixture());
+  await api.enqueueTask(queuedLeaseTask());
+  const claim = await api.claimTask("owned", { ownerId: "a" });
+  await api.markTaskExternalRequest(claim.lease);
+  const snapshot = api.bindTaskSnapshot(await api.getSnapshot(), claim.lease);
+  snapshot.store.tasks.owned.status = "completed";
+  snapshot.store.observationPlans.default.userData.analysis = { "acme/example": { result: "must roll back" } };
+  const revision = (await api.getSnapshotMeta()).localRevision;
+  const originalPut = IDBObjectStore.prototype.put;
+  IDBObjectStore.prototype.put = function (...args) {
+    const result = originalPut.apply(this, args);
+    if (this.name === "plans") this.transaction.abort();
+    return result;
+  };
+  try { await assert.rejects(api.putSnapshot(snapshot)); }
+  finally { IDBObjectStore.prototype.put = originalPut; }
+  const unchanged = await api.getSnapshot();
+  assert.equal(unchanged.store.tasks.owned.status, "running");
+  assert.equal(unchanged.store.observationPlans.default.userData.analysis, undefined);
+  assert.equal((await api.getTaskLease("owned")).nonReplayableInFlight, true);
+  assert.equal((await api.getTaskLease("owned")).released, false);
+  assert.equal((await api.getSnapshotMeta()).localRevision, revision);
+  await api.putSnapshot(snapshot);
+  assert.equal((await api.getTaskLease("owned")).released, true);
+});
+
+test("T-06 claim abort leaves the task queued without an owner or attempt", async () => {
+  const api = createStorageApi();
+  await api.putSnapshot(snapshotFixture());
+  await api.enqueueTask(queuedLeaseTask());
+  const revision = (await api.getSnapshotMeta()).localRevision;
+  const originalPut = IDBObjectStore.prototype.put;
+  IDBObjectStore.prototype.put = function (...args) {
+    const result = originalPut.apply(this, args);
+    if (this.name === "meta" && args[0]?.key === "snapshotCore") this.transaction.abort();
+    return result;
+  };
+  try { await assert.rejects(api.claimTask("owned", { ownerId: "a" })); }
+  finally { IDBObjectStore.prototype.put = originalPut; }
+  assert.equal((await api.getSnapshot()).store.tasks.owned.status, "queued");
+  assert.equal((await api.getSnapshot()).store.tasks.owned.attempts, 0);
+  assert.equal(await api.getTaskLease("owned"), null);
+  assert.equal((await api.getSnapshotMeta()).localRevision, revision);
+  assert.equal((await api.claimTask("owned", { ownerId: "b" })).claimed, true);
+});
+
+test("T-06 changed task inputs fence the old result even if its token remains current", async () => {
+  const factory = new IDBFactory();
+  const a = createStorageApi(factory), b = createStorageApi(factory);
+  await a.putSnapshot(snapshotFixture());
+  await a.enqueueTask(queuedLeaseTask());
+  const claim = await a.claimTask("owned", { ownerId: "a" });
+  const old = a.bindTaskSnapshot(await a.getSnapshot(), claim.lease);
+  const changed = await b.getSnapshot();
+  changed.store.tasks.owned.input.observationPlanId = "different-plan";
+  await b.putSnapshot(changed);
+  old.store.tasks.owned.status = "completed";
+  old.store.observationPlans.default.userData.analysis = { "acme/example": { result: "wrong input" } };
+  await assert.rejects(a.putSnapshot(old), error => error.code === "TASK_OWNERSHIP_LOST");
+  assert.equal((await b.getSnapshot()).store.observationPlans.default.userData.analysis, undefined);
+  assert.equal((await b.getSnapshot()).store.tasks.owned.input.observationPlanId, "different-plan");
+});
+
+test("T-06 non-finite lease clocks fail closed and finite defaults remain renewable", async () => {
+  const api = createStorageApi();
+  await api.putSnapshot(snapshotFixture());
+  await api.enqueueTask(queuedLeaseTask());
+  await assert.rejects(api.claimTask("owned", { ownerId: "a", now: NaN }), error => error.code === "TASK_OWNERSHIP_LOST");
+  const claim = await api.claimTask("owned", { ownerId: "a", now: 1000, leaseMs: Infinity });
+  assert.equal(claim.lease.expiresAt, 31000);
+  await assert.rejects(api.renewTaskLease(claim.lease, { now: Infinity }), error => error.code === "TASK_OWNERSHIP_LOST");
+  assert.equal((await api.renewTaskLease(claim.lease, { now: 2000 })).expiresAt, 32000);
+});
+
+test("T-06 a durable external artifact clears its issued marker in the same transaction", async () => {
+  const api = createStorageApi();
+  await api.putSnapshot(snapshotFixture());
+  await api.enqueueTask({ ...queuedLeaseTask(), type: "scan", key: "scan:default" });
+  const claim = await api.claimTask("owned", { ownerId: "a" });
+  await api.markTaskExternalRequest(claim.lease);
+  await api.putTaskArtifact("owned", "github-profile", { saved: true }, { taskLease: claim.lease });
+  assert.equal((await api.getTaskLease("owned")).nonReplayableInFlight, true);
+  await assert.rejects(api.putTaskArtifact("owned", "github-profile", {}, {
+    taskLease: claim.lease, completeExternalRequest: true
+  }), error => error.code === "TASK_OWNERSHIP_LOST");
+  const artifact = { projects: [{ fullName: "fixture/external" }], errors: [] };
+  await api.putTaskArtifact("owned", "external-discovery", artifact, {
+    taskLease: claim.lease, completeExternalRequest: true
+  });
+  assert.equal((await api.getTaskLease("owned")).nonReplayableInFlight, false);
+  const recovered = await api.claimTask("owned", { ownerId: "b", now: claim.lease.expiresAt });
+  assert.equal(recovered.claimed, true);
+  assert.equal(recovered.task.attempts, 2);
+  assert.deepEqual(JSON.parse(JSON.stringify((await api.getTaskArtifacts("owned"))["external-discovery"])), artifact);
+});
+
+test("T-06 aborting external artifact delivery retains the issued marker and existing artifact", async () => {
+  const api = createStorageApi();
+  await api.putSnapshot(snapshotFixture());
+  await api.enqueueTask({ ...queuedLeaseTask(), type: "scan", key: "scan:default" });
+  const claim = await api.claimTask("owned", { ownerId: "a" });
+  await api.markTaskExternalRequest(claim.lease);
+  const before = (await api.getSnapshotMeta()).localRevision;
+  const originalPut = IDBObjectStore.prototype.put;
+  IDBObjectStore.prototype.put = function (...args) {
+    const result = originalPut.apply(this, args);
+    if (this.name === "meta" && args[0]?.key === "taskLease:owned" && args[0]?.value.nonReplayableInFlight === false) this.transaction.abort();
+    return result;
+  };
+  try {
+    await assert.rejects(api.putTaskArtifact("owned", "external-discovery", { projects: [] }, {
+      taskLease: claim.lease, completeExternalRequest: true
+    }));
+  } finally { IDBObjectStore.prototype.put = originalPut; }
+  assert.equal((await api.getTaskLease("owned")).nonReplayableInFlight, true);
+  assert.equal((await api.getTaskArtifacts("owned"))["external-discovery"], undefined);
+  assert.equal((await api.getSnapshotMeta()).localRevision, before);
+});
+
+test("T-06 an owner cannot commit different inputs, requeue itself, or alter another task", async () => {
+  const api = createStorageApi();
+  await api.putSnapshot(snapshotFixture());
+  await api.enqueueTask(queuedLeaseTask());
+  await api.enqueueTask({ ...queuedLeaseTask("other"), key: "analysis:other" });
+  const claim = await api.claimTask("owned", { ownerId: "a" });
+  const revision = (await api.getSnapshotMeta()).localRevision;
+  const mutations = [
+    snapshot => { snapshot.store.tasks.owned.input.observationPlanId = "changed"; },
+    snapshot => { snapshot.store.tasks.owned.key = "analysis:changed"; },
+    snapshot => { snapshot.store.tasks.owned.type = "plan-generation"; },
+    snapshot => { snapshot.store.tasks.owned.status = "queued"; },
+    snapshot => { snapshot.store.tasks.other.status = "completed"; }
+  ];
+  for (const mutate of mutations) {
+    const snapshot = api.bindTaskSnapshot(await api.getSnapshot(), claim.lease);
+    snapshot.store.tasks.owned.status = "completed";
+    snapshot.store.observationPlans.default.userData.analysis = { "acme/example": { result: "must be rejected" } };
+    snapshot.store.observationPlans.default.memory.events = [{ id: "must-be-rejected", type: "ai_analyze" }];
+    mutate(snapshot);
+    await assert.rejects(api.putSnapshot(snapshot), error => error.code === "TASK_OWNERSHIP_LOST");
+    const unchanged = await api.getSnapshot();
+    assert.equal(unchanged.store.tasks.owned.status, "running");
+    assert.equal(unchanged.store.tasks.other.status, "queued");
+    assert.equal(unchanged.store.observationPlans.default.userData.analysis, undefined);
+    assert.equal((await api.getSnapshotMeta()).localRevision, revision);
+  }
+  const valid = api.bindTaskSnapshot(await api.getSnapshot(), claim.lease);
+  valid.store.tasks.owned.status = "completed";
+  valid.store.tasks.owned.result = { accepted: true };
+  await api.putSnapshot(valid);
+  assert.equal((await api.getSnapshot()).store.tasks.owned.status, "completed");
+});
+
+test("T-06 a quarantined owner cannot clear artifacts despite its terminal task status", async () => {
+  const api = createStorageApi();
+  await api.putSnapshot(snapshotFixture());
+  await api.enqueueTask(queuedLeaseTask());
+  const claim = await api.claimTask("owned", { ownerId: "a" });
+  await api.putTaskArtifact("owned", "evidence", { keep: true }, { taskLease: claim.lease });
+  await api.markTaskExternalRequest(claim.lease);
+  const quarantine = await api.claimTask("owned", { ownerId: "b", now: claim.lease.expiresAt });
+  assert.equal(quarantine.task.status, "failed");
+  assert.equal((await api.getTaskLease("owned")).terminalDelivered, false);
+  await assert.rejects(api.clearTaskArtifacts("owned", { taskLease: claim.lease }), error => error.code === "TASK_OWNERSHIP_LOST");
+  assert.equal((await api.getTaskArtifacts("owned")).evidence.keep, true);
+});
+
 function requestResult(request) {
   return new Promise((resolve, reject) => {
     request.onsuccess = () => resolve(request.result);

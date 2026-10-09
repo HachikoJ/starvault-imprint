@@ -20,6 +20,8 @@
   const snapshotBases = new WeakMap();
   const snapshotWrites = new WeakMap();
   const snapshotOperations = new WeakMap();
+  const snapshotTaskLeases = new WeakMap();
+  const TASK_LEASE_PREFIX = "taskLease:";
 
   let dbPromise = null;
   let cachedSnapshot = null;
@@ -334,6 +336,175 @@
     return completion;
   }
 
+  function taskOwnershipLost() {
+    return Object.assign(new Error("Task ownership was lost; this execution cannot commit"), { code: "TASK_OWNERSHIP_LOST" });
+  }
+
+  function leaseDuration(value) {
+    return Number.isFinite(Number(value)) && Number(value) > 0 ? Number(value) : 30000;
+  }
+
+  function leaseNow(options = {}) {
+    const now = Number(options.now ?? Date.now());
+    if (!Number.isFinite(now)) throw taskOwnershipLost();
+    return now;
+  }
+
+  async function readTaskLease(tx, taskId) {
+    return (await requestToPromise(tx.objectStore(STORES.meta).get(`${TASK_LEASE_PREFIX}${taskId}`)))?.value || null;
+  }
+
+  async function assertTaskLeaseWithinTransaction(tx, guard, options = {}) {
+    if (!guard?.taskId || !guard?.token) throw taskOwnershipLost();
+    const meta = tx.objectStore(STORES.meta);
+    const [lease, record] = await Promise.all([
+      readTaskLease(tx, guard.taskId), requestToPromise(meta.get(CORE_KEY))
+    ]);
+    const task = record?.value?.store?.tasks?.[guard.taskId];
+    const terminalCleanup = options.allowTerminal && ["completed", "failed"].includes(task?.status) && lease?.released === true && lease?.terminalDelivered === true;
+    if (!lease || lease.token !== guard.token || !task ||
+      lease.inputIdentity !== stableJson([task.type, task.key || "", task.input || {}]) ||
+      (!terminalCleanup && (task.status !== "running" || lease.released || !Number.isFinite(Number(lease.expiresAt)) || Number(lease.expiresAt) <= leaseNow(options)))) {
+      throw taskOwnershipLost();
+    }
+    return { lease, task, record };
+  }
+
+  async function taskMetaMutation(mutate) {
+    const db = await openDb();
+    const tx = db.transaction(STORES.meta, "readwrite");
+    const done = transactionDone(tx);
+    done.catch(() => {});
+    try {
+      const result = await mutate(tx);
+      await done;
+      return result;
+    } catch (error) {
+      try { tx.abort(); } catch { /* transaction already finished */ }
+      await done.catch(() => {});
+      throw error;
+    }
+  }
+
+  async function writeTaskCore(tx, record) {
+    const revision = await bumpSnapshotRevision(tx);
+    record.value.localRevision = revision;
+    record.updatedAt = new Date().toISOString();
+    tx.objectStore(STORES.meta).put(record);
+  }
+
+  async function enqueueTask(candidate, options = {}) {
+    if (!candidate?.id || !candidate.type) throw new Error("Task requires an id and type");
+    return taskMetaMutation(async (tx) => {
+      const meta = tx.objectStore(STORES.meta);
+      const record = await requestToPromise(meta.get(CORE_KEY));
+      if (!record?.value) throw new Error("Task snapshot is unavailable");
+      const core = record.value;
+      core.store = core.store || {};
+      const tasks = core.store.tasks || {};
+      const existing = Object.values(tasks).find(task => task.type === candidate.type && task.key === candidate.key &&
+        ["queued", "running"].includes(task.status) && (!options.sameInput || options.sameInput(task.input || {})));
+      if (existing) return cloneValue(existing);
+      if (Object.values(tasks).filter(task => ["queued", "running"].includes(task.status)).length >= 60) {
+        throw Object.assign(new Error("Task queue is full; wait for active tasks to finish"), { code: "TASK_QUEUE_FULL" });
+      }
+      if (tasks[candidate.id]) throw new Error("Task id already exists");
+      const next = cloneValue(candidate);
+      const ordered = [...Object.values(tasks), next].sort((a, b) => String(b.updatedAt || "").localeCompare(String(a.updatedAt || "")));
+      const pending = ordered.filter(task => ["queued", "running"].includes(task.status));
+      const finished = ordered.filter(task => !["queued", "running"].includes(task.status)).slice(0, Math.max(0, 60 - pending.length));
+      core.store.tasks = Object.fromEntries([...pending, ...finished].map(task => [task.id, task]));
+      for (const id of Object.keys(tasks)) {
+        if (!core.store.tasks[id]) meta.delete(`${TASK_LEASE_PREFIX}${id}`);
+      }
+      await writeTaskCore(tx, record);
+      return cloneValue(next);
+    });
+  }
+
+  async function claimTask(taskId, options = {}) {
+    const ownerId = String(options.ownerId || "");
+    if (!ownerId) throw new Error("Task owner id is required");
+    const now = leaseNow(options);
+    return taskMetaMutation(async tx => {
+      const meta = tx.objectStore(STORES.meta);
+      const [record, previous] = await Promise.all([requestToPromise(meta.get(CORE_KEY)), readTaskLease(tx, taskId)]);
+      const task = record?.value?.store?.tasks?.[taskId];
+      if (!task || !["queued", "running"].includes(task.status)) return { claimed: false, task: cloneValue(task), lease: cloneValue(previous) };
+      if (task.status === "running" && previous && !previous.released && Number(previous.expiresAt) > now) {
+        return { claimed: false, task: cloneValue(task), lease: cloneValue(previous) };
+      }
+      if ((task.status === "running" && !previous) || previous?.nonReplayableInFlight) {
+        task.status = "failed";
+        task.result = null;
+        task.error = "Previous external request outcome is unknown; it may have executed or been charged. Submit a new request explicitly; automatic replay is disabled";
+        task.recoveryRequired = true;
+        task.errorCode = "TASK_OUTCOME_UNKNOWN";
+        task.finishedAt = task.updatedAt = new Date(now).toISOString();
+        if (previous) meta.put({ key: `${TASK_LEASE_PREFIX}${taskId}`, value: { ...previous, released: true, terminalDelivered: false, expiresAt: 0 } });
+        await writeTaskCore(tx, record);
+        return { claimed: false, task: cloneValue(task), lease: null };
+      }
+      if (Number(task.attempts || 0) >= 3) {
+        task.status = "failed";
+        task.error = "Task was interrupted too many times";
+        task.finishedAt = task.updatedAt = new Date(now).toISOString();
+        if (previous) meta.put({ key: `${TASK_LEASE_PREFIX}${taskId}`, value: { ...previous, released: true, terminalDelivered: false, expiresAt: 0 } });
+        await writeTaskCore(tx, record);
+        return { claimed: false, task: cloneValue(task), lease: null };
+      }
+      const token = window.crypto?.randomUUID?.() || `${ownerId}:${now}:${Math.random().toString(36).slice(2)}:${Math.random().toString(36).slice(2)}`;
+      const lease = { taskId, token, ownerId, expiresAt: now + leaseDuration(options.leaseMs), released: false, terminalDelivered: false,
+        nonReplayableInFlight: false, inputIdentity: stableJson([task.type, task.key || "", task.input || {}]) };
+      task.status = "running";
+      task.attempts = Number(task.attempts || 0) + 1;
+      task.startedAt = task.updatedAt = new Date(now).toISOString();
+      task.error = "";
+      task.cooldown = null;
+      meta.put({ key: `${TASK_LEASE_PREFIX}${taskId}`, value: lease });
+      await writeTaskCore(tx, record);
+      return { claimed: true, task: cloneValue(task), lease: cloneValue(lease) };
+    });
+  }
+
+  async function renewTaskLease(guard, options = {}) {
+    return taskMetaMutation(async tx => {
+      const { lease } = await assertTaskLeaseWithinTransaction(tx, guard, options);
+      lease.expiresAt = leaseNow(options) + leaseDuration(options.leaseMs);
+      tx.objectStore(STORES.meta).put({ key: `${TASK_LEASE_PREFIX}${guard.taskId}`, value: lease });
+      await bumpSnapshotRevision(tx);
+      return cloneValue(lease);
+    });
+  }
+
+  async function markTaskExternalRequest(guard, options = {}) {
+    return taskMetaMutation(async tx => {
+      const { lease } = await assertTaskLeaseWithinTransaction(tx, guard, options);
+      // This marker stays set until durable terminal delivery. Receiving a
+      // response alone cannot prove that its result survived a tab crash.
+      lease.nonReplayableInFlight = lease.nonReplayableInFlight || options.nonReplayable !== false;
+      lease.requestStartedAt = new Date(leaseNow(options)).toISOString();
+      tx.objectStore(STORES.meta).put({ key: `${TASK_LEASE_PREFIX}${guard.taskId}`, value: lease });
+      await bumpSnapshotRevision(tx);
+      return cloneValue(lease);
+    });
+  }
+
+  function bindTaskSnapshot(snapshot, guard) {
+    if (!snapshot || !guard?.taskId || !guard?.token) throw taskOwnershipLost();
+    snapshotTaskLeases.set(snapshot, cloneValue(guard));
+    return snapshot;
+  }
+
+  async function getTaskLease(taskId) {
+    const db = await openDb();
+    const tx = db.transaction(STORES.meta, "readonly");
+    const done = transactionDone(tx);
+    const lease = await readTaskLease(tx, taskId);
+    await done;
+    return cloneValue(lease);
+  }
+
   async function protectCacheWithinTransaction(tx) {
     const meta = tx.objectStore(STORES.meta);
     const [core, baseline, dirty, plans, scans] = await Promise.all([
@@ -544,6 +715,7 @@
         requestToPromise(projectStore.count())
       ]);
       revision = Number(revisionRecord?.value || 0);
+      const guarded = options.taskLease ? await assertTaskLeaseWithinTransaction(tx, options.taskLease) : null;
       if (!force && !base && coreRecord && options.expectedRevision === undefined) throw snapshotConflict();
       if (!force && replace && revision !== expectedRevision && (coreRecord || options.expectedRevision !== undefined)) throw snapshotConflict();
       if (!replace && base && !coreRecord) throw snapshotConflict();
@@ -581,6 +753,21 @@
         applySnapshotOperations(local, current, merged, operations);
       }
       merged.store = merged.store || {};
+      if (guarded) {
+        const taskId = options.taskLease.taskId;
+        const owned = merged.store.tasks?.[taskId];
+        if (!owned || owned.id !== taskId || !["running", "completed", "failed"].includes(owned.status) ||
+          stableJson([owned.type, owned.key || "", owned.input || {}]) !== guarded.lease.inputIdentity) throw taskOwnershipLost();
+        // A task execution may merge unrelated concurrent tasks, but cannot
+        // submit its own patches to their lifecycle or input records.
+        for (const id of new Set([...Object.keys(base?.store?.tasks || {}), ...Object.keys(local.store?.tasks || {})])) {
+          if (id !== taskId && stableJson(base?.store?.tasks?.[id]) !== stableJson(local.store?.tasks?.[id])) throw taskOwnershipLost();
+        }
+      }
+      if (guarded && ["completed", "failed"].includes(merged.store.tasks?.[options.taskLease.taskId]?.status)) {
+        metaStore.put({ key: `${TASK_LEASE_PREFIX}${options.taskLease.taskId}`,
+          value: { ...guarded.lease, released: true, terminalDelivered: true, expiresAt: 0, nonReplayableInFlight: false } });
+      }
       const plans = merged.store.observationPlans || {};
       for (const plan of Object.values(plans)) {
         const memory = plan.memory;
@@ -751,21 +938,40 @@
     return `${encodeURIComponent(String(taskId || ""))}|${encodeURIComponent(String(key || ""))}`;
   }
 
-  async function putTaskArtifact(taskId, key, value) {
+  async function putTaskArtifact(taskId, key, value, options = {}) {
     const safeTaskId = String(taskId || "");
     const safeKey = String(key || "");
     if (!safeTaskId || !safeKey) throw new Error("Task artifact requires a task id and key");
     const db = await openDb();
     const updatedAt = new Date().toISOString();
-    const tx = db.transaction(STORES.taskArtifacts, "readwrite");
-    tx.objectStore(STORES.taskArtifacts).put({
-      id: taskArtifactId(safeTaskId, safeKey),
-      taskId: safeTaskId,
-      key: safeKey,
-      value,
-      updatedAt
-    });
-    await transactionDone(tx);
+    const tx = db.transaction(options.taskLease ? [STORES.meta, STORES.taskArtifacts] : STORES.taskArtifacts, "readwrite");
+    const done = transactionDone(tx);
+    done.catch(() => {});
+    try {
+      let guarded;
+      if (options.completeExternalRequest && (!options.taskLease || safeKey !== "external-discovery")) throw taskOwnershipLost();
+      if (options.taskLease) {
+        if (options.taskLease.taskId !== safeTaskId) throw taskOwnershipLost();
+        guarded = await assertTaskLeaseWithinTransaction(tx, options.taskLease);
+      }
+      tx.objectStore(STORES.taskArtifacts).put({
+        id: taskArtifactId(safeTaskId, safeKey),
+        taskId: safeTaskId,
+        key: safeKey,
+        value,
+        updatedAt
+      });
+      if (options.completeExternalRequest) {
+        tx.objectStore(STORES.meta).put({ key: `${TASK_LEASE_PREFIX}${safeTaskId}`,
+          value: { ...guarded.lease, nonReplayableInFlight: false } });
+      }
+      if (options.taskLease) await bumpSnapshotRevision(tx);
+      await done;
+    } catch (error) {
+      try { tx.abort(); } catch { /* transaction already finished */ }
+      await done.catch(() => {});
+      throw error;
+    }
     return { taskId: safeTaskId, key: safeKey, updatedAt };
   }
 
@@ -780,23 +986,36 @@
     return Object.fromEntries(records.map((record) => [record.key, cloneValue(record.value, null)]));
   }
 
-  async function clearTaskArtifacts(taskId) {
+  async function clearTaskArtifacts(taskId, options = {}) {
     const safeTaskId = String(taskId || "");
     if (!safeTaskId) return { deleted: 0 };
     const db = await openDb();
-    const tx = db.transaction(STORES.taskArtifacts, "readwrite");
-    const keyRange = (window.IDBKeyRange || globalThis.IDBKeyRange).only(safeTaskId);
-    const request = tx.objectStore(STORES.taskArtifacts).index("taskId").openCursor(keyRange);
-    let deleted = 0;
-    request.onsuccess = () => {
-      const cursor = request.result;
-      if (!cursor) return;
-      cursor.delete();
-      deleted += 1;
-      cursor.continue();
-    };
-    await transactionDone(tx);
-    return { deleted };
+    const tx = db.transaction(options.taskLease ? [STORES.meta, STORES.taskArtifacts] : STORES.taskArtifacts, "readwrite");
+    const done = transactionDone(tx);
+    done.catch(() => {});
+    try {
+      if (options.taskLease) {
+        if (options.taskLease.taskId !== safeTaskId) throw taskOwnershipLost();
+        await assertTaskLeaseWithinTransaction(tx, options.taskLease, { allowTerminal: true });
+      }
+      const keyRange = (window.IDBKeyRange || globalThis.IDBKeyRange).only(safeTaskId);
+      const request = tx.objectStore(STORES.taskArtifacts).index("taskId").openCursor(keyRange);
+      let deleted = 0;
+      request.onsuccess = () => {
+        const cursor = request.result;
+        if (!cursor) return;
+        cursor.delete();
+        deleted += 1;
+        cursor.continue();
+      };
+      if (options.taskLease) await bumpSnapshotRevision(tx);
+      await done;
+      return { deleted };
+    } catch (error) {
+      try { tx.abort(); } catch { /* transaction already finished */ }
+      await done.catch(() => {});
+      throw error;
+    }
   }
 
   async function getSnapshot(options = {}) {
@@ -842,6 +1061,7 @@
     if (!snapshot || snapshot.schema !== "starvault-indexeddb-snapshot/v1") {
       throw new Error("Invalid StarVault IndexedDB snapshot");
     }
+    options = { ...options, taskLease: snapshotTaskLeases.get(snapshot) || options.taskLease };
     const submitted = cloneValue(snapshot);
     const submittedOperations = (snapshotOperations.get(snapshot)?.entries || []).map((operation) => ({ ...operation, path: [...operation.path] }));
     const previous = snapshotWrites.get(snapshot) || Promise.resolve();
@@ -1058,6 +1278,7 @@
     const store = writeTx.objectStore(STORES.projects);
     const committed = new Map();
     try {
+      if (options.taskLease) await assertTaskLeaseWithinTransaction(writeTx, options.taskLease);
       const index = store.index("scopePlanIds");
       const keyRange = (window.IDBKeyRange || globalThis.IDBKeyRange).only(safePlanId);
       // New scope matches need the global row too. Read both inputs inside
@@ -1249,6 +1470,12 @@
     getValue,
     putValue,
     removeValue,
+    enqueueTask,
+    claimTask,
+    renewTaskLease,
+    markTaskExternalRequest,
+    bindTaskSnapshot,
+    getTaskLease,
     putTaskArtifact,
     getTaskArtifacts,
     clearTaskArtifacts,

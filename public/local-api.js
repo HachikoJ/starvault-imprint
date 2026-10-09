@@ -50,6 +50,24 @@
     dismiss_project: -0.35
   };
   const localTaskPromises = new Map();
+  const localTaskStarts = new Map();
+  const taskExecutions = new WeakMap();
+  const taskOwnerId = `browser-owner-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+  const TASK_LEASE_MS = 30000;
+
+  function taskWriteOptions(snapshot) {
+    const execution = taskExecutions.get(snapshot);
+    return execution ? { taskLease: execution.lease } : {};
+  }
+
+  async function beforeTaskRequest(snapshot, nonReplayable = false) {
+    const execution = snapshot && taskExecutions.get(snapshot);
+    if (!execution) return undefined;
+    if (execution.controller.signal.aborted) throw execution.controller.signal.reason;
+    await storage().markTaskExternalRequest(execution.lease, { nonReplayable });
+    if (execution.controller.signal.aborted) throw execution.controller.signal.reason;
+    return execution.controller.signal;
+  }
   const githubRateBudgets = new Map();
   let demoSeedPromise = null;
   let demoSeedAttempts = 0;
@@ -1040,7 +1058,15 @@
     };
   }
 
-  const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, Math.max(0, Number(ms || 0))));
+  function sleep(ms, signal) {
+    if (signal?.aborted) return Promise.reject(signal.reason);
+    return new Promise((resolve, reject) => {
+      const finish = error => { clearTimeout(timer); signal?.removeEventListener("abort", cancel); error ? reject(error) : resolve(); };
+      const cancel = () => finish(signal.reason);
+      const timer = setTimeout(() => finish(), Math.max(0, Number(ms || 0)));
+      signal?.addEventListener("abort", cancel, { once: true });
+    });
+  }
 
   function githubHeader(response, name) {
     return response?.headers?.get?.(name) || response?.headers?.get?.(name.toLowerCase()) || null;
@@ -1192,7 +1218,7 @@
     });
   }
 
-  async function waitForGithubWindow(path) {
+  async function waitForGithubWindow(path, signal) {
     await restoreGithubCooldownState();
     const entryCooldown = ensureGithubCooldownFresh();
     if (entryCooldown.active) throw createGithubCooldownError(entryCooldown);
@@ -1208,7 +1234,8 @@
       const budgetCooldown = githubBudgetCooldown(githubResource(path));
       if (budgetCooldown) throw createGithubCooldownError(budgetCooldown);
       const wait = Math.max(0, githubNextRequestAt - Date.now());
-      if (wait) await sleep(wait);
+      if (signal?.aborted) throw signal.reason;
+      if (wait) await sleep(wait, signal);
       githubNextRequestAt = Date.now() + githubRequestSpacing(path);
     } finally {
       release();
@@ -1226,9 +1253,12 @@
     const secrets = await getSecrets();
     const retries = Math.max(0, Number(requestOptions.retries ?? 2));
     for (let attempt = 0; attempt <= retries; attempt += 1) {
-      await waitForGithubWindow(path);
+      const taskSignal = requestOptions.snapshot && taskExecutions.get(requestOptions.snapshot)?.controller.signal;
+      await waitForGithubWindow(path, options.signal || taskSignal);
+      const signal = await beforeTaskRequest(requestOptions.snapshot, !["GET", "HEAD", "OPTIONS"].includes(String(options.method || "GET").toUpperCase()));
       const response = await fetchWithTimeout(`https://api.github.com${path}`, {
         ...options,
+        signal: options.signal || signal,
         headers: { ...githubHeaders(secrets.githubToken), ...(options.headers || {}) }
       }, 20000);
       updateGithubBudget(response, path);
@@ -1265,8 +1295,8 @@
     throw githubError("GitHub request failed", 500);
   }
 
-  async function validateGithubScanToken() {
-    const status = await githubFetch("/rate_limit", {}, { retries: 0 });
+  async function validateGithubScanToken(snapshot) {
+    const status = await githubFetch("/rate_limit", {}, { retries: 0, snapshot });
     for (const [resource, budget] of Object.entries(status.resources || {})) {
       const remaining = Number(budget?.remaining);
       const reset = Number(budget?.reset);
@@ -1746,7 +1776,7 @@
     return anchors.length ? anchors : browserPlanAnchorFallback(plan);
   }
 
-  async function browserScanExternalDiscovery(plan) {
+  async function browserScanExternalDiscovery(plan, snapshot) {
     const secrets = await getSecrets();
     const logic = plan.searchLogic || plan.strategy || {};
     const query = [
@@ -1758,10 +1788,10 @@
     const result = { signals: [], errors: [] };
     const jobs = [];
     if (secrets.tavilyKey) {
-      jobs.push(browserTavilySearch(query, secrets.tavilyKey).then((items) => result.signals.push(...items)).catch((error) => result.errors.push(`Tavily: ${error.message}`)));
+      jobs.push(browserTavilySearch(query, secrets.tavilyKey, 6, snapshot).then((items) => result.signals.push(...items)).catch((error) => result.errors.push(`Tavily: ${error.message}`)));
     }
     if (secrets.exaKey) {
-      jobs.push(browserExaSearch(query, secrets.exaKey).then((items) => result.signals.push(...items)).catch((error) => result.errors.push(`Exa: ${error.message}`)));
+      jobs.push(browserExaSearch(query, secrets.exaKey, 6, snapshot).then((items) => result.signals.push(...items)).catch((error) => result.errors.push(`Exa: ${error.message}`)));
     }
     await Promise.all(jobs);
     result.repositories = githubNamesFromSignals(result.signals);
@@ -1849,12 +1879,12 @@
   // per profile: an auth failure or an active cooldown means every remaining
   // request would fail the same way (and a cooldown must reach the task record).
   function isFatalGithubScanError(error) {
-    return ["github-auth", "github-rate-limit"].includes(error?.code) ||
+    return ["github-auth", "github-rate-limit", "TASK_OWNERSHIP_LOST"].includes(error?.code) || error?.name === "AbortError" ||
       isGithubCooldownError(error) ||
       Boolean(error?.cooldown?.active);
   }
 
-  async function browserSearchProfile(plan, profile) {
+  async function browserSearchProfile(plan, profile, snapshot) {
     const projects = [];
     const errors = [];
     const relaxations = [];
@@ -1869,7 +1899,7 @@
         per_page: String(profile.perPage),
         page: "1"
       });
-      const result = await githubFetch(`/search/repositories?${params.toString()}`);
+      const result = await githubFetch(`/search/repositories?${params.toString()}`, {}, { snapshot });
       if (result?.incomplete_results === true) errors.push("GitHub search returned incomplete results");
       totalCount = Number(result?.total_count || 0);
       let localAccepted = 0;
@@ -1913,9 +1943,9 @@
     const planId = String(requestedPlanId || snapshot.activeObservationPlanId || "default");
     const plan = snapshot.store.observationPlans?.[planId];
     if (!plan) throw new Error("扫描任务对应的观察方案已不存在。");
-    await validateGithubScanToken();
+    await validateGithubScanToken(snapshot);
     if (task?.checkpoint?.planId && task.checkpoint.planId !== planId) {
-      await storage().clearTaskArtifacts?.(task.id);
+      await storage().clearTaskArtifacts?.(task.id, taskWriteOptions(snapshot));
       task.checkpoint = null;
     }
     let checkpoint = initialBrowserScanCheckpoint(task, planId);
@@ -1933,9 +1963,9 @@
       const artifactKey = `github:${profile.index}:${profile.key}`;
       let artifact = checkpoint.completedProfiles.includes(artifactKey) ? artifacts[artifactKey] : null;
       if (!artifact) {
-        artifact = await browserSearchProfile(plan, profile);
+        artifact = await browserSearchProfile(plan, profile, snapshot);
         if (task) {
-          await storage().putTaskArtifact(task.id, artifactKey, artifact);
+          await storage().putTaskArtifact(task.id, artifactKey, artifact, taskWriteOptions(snapshot));
           artifacts[artifactKey] = artifact;
           checkpoint = await persistBrowserScanCheckpoint(snapshot, task, checkpoint, {
             stage: "github-search",
@@ -1952,9 +1982,9 @@
     };
     if (!seen.size && errors.length) throw new Error(errors[0]);
     const externalArtifactKey = "external-discovery";
-    let externalArtifact = checkpoint.externalCompleted ? artifacts[externalArtifactKey] : null;
+    let externalArtifact = artifacts[externalArtifactKey] || null;
     if (!externalArtifact) {
-      const external = await browserScanExternalDiscovery(plan);
+      const external = await browserScanExternalDiscovery(plan, snapshot);
       const externalProjects = [];
       const externalErrors = [...external.errors];
       const externalProfile = {
@@ -1977,7 +2007,7 @@
           continue;
         }
         try {
-          const repo = await githubFetch(`/repos/${fullName.split("/").map(encodeURIComponent).join("/")}`);
+          const repo = await githubFetch(`/repos/${fullName.split("/").map(encodeURIComponent).join("/")}`, {}, { snapshot });
           if (!browserRepositoryAllowed(externalProfile, repo)) continue;
           const project = githubRepoToProject(repo, plan, externalProfile);
           project.signals.externalWeb = matchedSignals;
@@ -1990,7 +2020,7 @@
       }
       externalArtifact = { projects: externalProjects, errors: externalErrors };
       if (task) {
-        await storage().putTaskArtifact(task.id, externalArtifactKey, externalArtifact);
+        await storage().putTaskArtifact(task.id, externalArtifactKey, externalArtifact, { ...taskWriteOptions(snapshot), completeExternalRequest: true });
         artifacts[externalArtifactKey] = externalArtifact;
         checkpoint = await persistBrowserScanCheckpoint(snapshot, task, checkpoint, {
           stage: "external-discovery",
@@ -2037,7 +2067,7 @@
             complete: false
           };
     }
-    await storage().replaceProjectsForPlan(plan.id, projects, { replace: discoveryCoverage.complete });
+    await storage().replaceProjectsForPlan(plan.id, projects, { replace: discoveryCoverage.complete, ...taskWriteOptions(snapshot) });
     checkpoint = await persistBrowserScanCheckpoint(snapshot, task, checkpoint, { stage: "persisted" });
     const scanId = task ? `browser-scan-${task.id}` : `browser-scan-${Date.now()}`;
     const scan = {
@@ -2127,12 +2157,13 @@
     const provider = activeProvider(snapshot, secrets);
     if (!provider.apiKey) throw new Error("请先在设置里配置并保存可用的 AI 模型 API Key");
     if (options.analysisProvider && JSON.stringify(domainCore.analysisProviderIdentity(provider)) !== JSON.stringify(options.analysisProvider)) throw new Error("Analysis provider changed; submit a new analysis request");
+    const taskSignal = await beforeTaskRequest(snapshot, true);
     let response;
     try {
       const planRequest = options.kind === "plan";
       response = await fetchWithTimeout(chatCompletionsUrl(provider), {
         method: "POST",
-        signal: options.signal,
+        signal: options.signal || taskSignal,
         headers: {
           "Content-Type": "application/json",
           Authorization: `Bearer ${provider.apiKey}`
@@ -2146,7 +2177,7 @@
         })
       }, planRequest ? 75000 : 45000);
     } catch (error) {
-      if (options.signal?.aborted || error?.name === "AbortError" || ["REQUEST_TIMEOUT", "RESPONSE_TOO_LARGE"].includes(error?.code)) throw error;
+      if (options.signal?.aborted || taskSignal?.aborted || error?.name === "AbortError" || ["REQUEST_TIMEOUT", "RESPONSE_TOO_LARGE", "TASK_OWNERSHIP_LOST"].includes(error?.code)) throw error;
       throw new Error(`模型接口无法从浏览器直连，可能被 CORS 拦截：${error.message}`);
     }
     const text = await response.text();
@@ -2336,10 +2367,12 @@
     };
   }
 
-  async function browserTavilySearch(query, key, maxResults = 6) {
+  async function browserTavilySearch(query, key, maxResults = 6, snapshot) {
     if (!key) return [];
+    const signal = await beforeTaskRequest(snapshot, true);
     const response = await fetchWithTimeout("https://api.tavily.com/search", {
       method: "POST",
+      signal,
       headers: { "Content-Type": "application/json", Authorization: `Bearer ${key}` },
       body: JSON.stringify({ query, search_depth: "basic", max_results: maxResults, include_answer: false, include_raw_content: false })
     });
@@ -2348,10 +2381,12 @@
     return (payload.results || []).slice(0, maxResults).map((item) => ({ source: "tavily", title: item.title || "", content: item.content || "", url: item.url || "" }));
   }
 
-  async function browserExaSearch(query, key, maxResults = 6) {
+  async function browserExaSearch(query, key, maxResults = 6, snapshot) {
     if (!key) return [];
+    const signal = await beforeTaskRequest(snapshot, true);
     const response = await fetchWithTimeout(exaSearchEndpoint(), {
       method: "POST",
+      signal,
       headers: { "Content-Type": "application/json", "x-api-key": key },
       body: JSON.stringify({
         query,
@@ -2377,7 +2412,7 @@
     const jobs = [];
     if (secrets.githubToken) {
       jobs.push(
-        githubFetch(`/search/repositories?${new URLSearchParams({ q: `${name} in:name,description,readme`, per_page: "5", page: "1" }).toString()}`)
+        githubFetch(`/search/repositories?${new URLSearchParams({ q: `${name} in:name,description,readme`, per_page: "5", page: "1" }).toString()}`, {}, { snapshot })
           .then((result) => {
             research.github = {
               totalCount: Number(result.total_count || 0),
@@ -2389,7 +2424,7 @@
     }
     if (secrets.tavilyKey) {
       jobs.push(
-        browserTavilySearch(query, secrets.tavilyKey)
+        browserTavilySearch(query, secrets.tavilyKey, 6, snapshot)
           .then((items) => {
             research.tavily = items;
           })
@@ -2398,7 +2433,7 @@
     }
     if (secrets.exaKey) {
       jobs.push(
-        browserExaSearch(query, secrets.exaKey)
+        browserExaSearch(query, secrets.exaKey, 6, snapshot)
           .then((items) => {
             research.exa = items;
           })
@@ -2581,112 +2616,92 @@
     throw new Error(`Unsupported task type: ${task.type}`);
   }
 
-  async function clearLocalTaskArtifacts(task) {
-    if (task?.type === "scan") await storage().clearTaskArtifacts?.(task.id);
+  async function clearLocalTaskArtifacts(task, snapshot) {
+    if (task?.type === "scan") await storage().clearTaskArtifacts?.(task.id, taskWriteOptions(snapshot));
   }
 
-  function startLocalTask(snapshot, task) {
-    if (!task?.id || localTaskPromises.has(task.id)) return;
-    if (task.type === "analysis" && !domainCore.analysisTaskIdentity(task.input)) {
-      task.status = "failed";
-      task.error = "Analysis task identity is unknown; submit a new analysis request";
-      task.finishedAt = task.updatedAt = nowIso();
-      saveSnapshot(snapshot).catch(() => {});
-      return;
-    }
-    // A scan stays queued (not failed) while GitHub is cooling down; the next
-    // queue pump after the countdown expires starts it for real.
-    if (task.type === "scan") {
-      const cooldown = githubCooldownState();
-      if (cooldown.active) {
-        task.status = "queued";
-        task.cooldown = cooldown;
-        task.updatedAt = nowIso();
-        saveSnapshot(snapshot).catch(() => {});
-        return;
-      }
-    }
-    if (Number(task.attempts || 0) >= 3) {
-      task.status = "failed";
-      task.error = "Task was interrupted too many times";
-      task.finishedAt = nowIso();
-      task.updatedAt = task.finishedAt;
-      saveSnapshot(snapshot).then(() => clearLocalTaskArtifacts(task)).catch(() => {});
-      return;
-    }
-    const startedAt = nowIso();
-    task.status = "running";
-    task.attempts = Number(task.attempts || 0) + 1;
-    task.startedAt = startedAt;
-    task.updatedAt = startedAt;
-    task.error = "";
-    task.cooldown = null;
-    const promise = saveSnapshot(snapshot)
-      .then(() => executeLocalTask(snapshot, task))
-      .then(async (result) => {
-        task.status = "completed";
-        task.result = result;
-        task.cooldown = null;
-        if (task.type === "analysis" || task.type === "plan-generation") {
-          updateProviderStatus(snapshot, "deepseek", { lastTestAt: nowIso(), testStatus: "ok" });
-        }
-        task.finishedAt = nowIso();
-        task.updatedAt = task.finishedAt;
-        await saveSnapshot(snapshot);
-        await clearLocalTaskArtifacts(task).catch(() => {});
-      })
-      .catch(async (error) => {
-        task.status = "failed";
-        task.result = null;
-        task.error = error?.message || "Task failed";
-        task.cooldown = error?.cooldown?.active ? clone(error.cooldown) : isGithubCooldownError(error) ? clone(error.cooldown) : null;
-        if ((task.type === "analysis" || task.type === "plan-generation") && isProviderAuthError(error)) {
-          const provider = activeProvider(snapshot, await getSecrets());
-          updateProviderStatus(snapshot, "deepseek", {
-            lastTestAt: nowIso(),
-            testStatus: providerFailureStatus(provider, error)
-          });
-        }
-        task.finishedAt = nowIso();
-        task.updatedAt = task.finishedAt;
-        await saveSnapshot(snapshot).catch(() => {});
-        await clearLocalTaskArtifacts(task).catch(() => {});
-      })
-      .finally(() => localTaskPromises.delete(task.id));
-    localTaskPromises.set(task.id, promise);
+  async function startLocalTask(snapshot, task) {
+    if (!task?.id || localTaskPromises.has(task.id)) return task;
+    if (localTaskStarts.has(task.id)) return localTaskStarts.get(task.id);
+    if (task.type === "scan" && githubCooldownState().active) return task;
+    const starting = (async () => {
+      const db = storage();
+      if (!db?.claimTask || !db?.bindTaskSnapshot) throw new Error("Atomic task ownership is unavailable; task was not started");
+      const claim = await db.claimTask(task.id, { ownerId: taskOwnerId, leaseMs: TASK_LEASE_MS });
+      if (!claim.claimed) return claim.task || task;
+      const ownedSnapshot = await getSnapshot({ includeProjects: false, includeLeaderboards: true });
+      const ownedTask = ownedSnapshot.store.tasks[task.id];
+      db.bindTaskSnapshot(ownedSnapshot, claim.lease);
+      const execution = { lease: claim.lease, controller: new AbortController(), timer: null, stopped: false };
+      taskExecutions.set(ownedSnapshot, execution);
+      const renew = async () => {
+        if (execution.stopped) return;
+        try { await db.renewTaskLease(execution.lease, { leaseMs: TASK_LEASE_MS }); }
+        catch (error) { execution.controller.abort(error); return; }
+        if (!execution.stopped) execution.timer = setTimeout(renew, 10000);
+      };
+      execution.timer = setTimeout(renew, 10000);
+      const promise = Promise.resolve()
+        .then(() => {
+          if (ownedTask.type === "analysis" && !domainCore.analysisTaskIdentity(ownedTask.input)) throw new Error("Analysis task identity is unknown; submit a new analysis request");
+          return executeLocalTask(ownedSnapshot, ownedTask);
+        })
+        .then(async result => {
+          ownedTask.status = "completed";
+          ownedTask.result = result;
+          ownedTask.cooldown = null;
+          if (ownedTask.type === "analysis" || ownedTask.type === "plan-generation") updateProviderStatus(ownedSnapshot, "deepseek", { lastTestAt: nowIso(), testStatus: "ok" });
+          ownedTask.finishedAt = ownedTask.updatedAt = nowIso();
+          await saveSnapshot(ownedSnapshot);
+          await clearLocalTaskArtifacts(ownedTask, ownedSnapshot).catch(() => {});
+        })
+        .catch(async error => {
+          // A former owner cannot write even its failure over the new owner.
+          if (execution.controller.signal.aborted || error?.code === "TASK_OWNERSHIP_LOST") return;
+          ownedTask.status = "failed";
+          ownedTask.result = null;
+          ownedTask.error = error?.message || "Task failed";
+          ownedTask.cooldown = error?.cooldown?.active ? clone(error.cooldown) : isGithubCooldownError(error) ? clone(error.cooldown) : null;
+          if ((ownedTask.type === "analysis" || ownedTask.type === "plan-generation") && isProviderAuthError(error)) {
+            const provider = activeProvider(ownedSnapshot, await getSecrets());
+            updateProviderStatus(ownedSnapshot, "deepseek", { lastTestAt: nowIso(), testStatus: providerFailureStatus(provider, error) });
+          }
+          ownedTask.finishedAt = ownedTask.updatedAt = nowIso();
+          await saveSnapshot(ownedSnapshot).catch(() => {});
+          await clearLocalTaskArtifacts(ownedTask, ownedSnapshot).catch(() => {});
+        })
+        .finally(() => {
+          execution.stopped = true; clearTimeout(execution.timer);
+          taskExecutions.delete(ownedSnapshot); localTaskPromises.delete(task.id);
+        });
+      localTaskPromises.set(task.id, promise);
+      return ownedTask;
+    })();
+    localTaskStarts.set(task.id, starting);
+    try { return await starting; }
+    finally { localTaskStarts.delete(task.id); }
   }
 
   async function enqueueLocalTask(snapshot, type, key, input = {}) {
-    const existing = Object.values(snapshot.store.tasks || {}).find(
-      (task) => task.type === type && task.key === key && ["queued", "running"].includes(task.status) &&
-        (type !== "analysis" || domainCore.analysisTaskIdentity(task.input) === domainCore.analysisTaskIdentity(input))
-    );
-    if (existing) {
-      startLocalTask(snapshot, existing);
-      return existing;
-    }
     const createdAt = nowIso();
-    const task = {
+    const candidate = {
       id: `local-task-${Date.now()}-${Math.random().toString(36).slice(2, 9)}`,
-      type,
-      key,
-      status: "queued",
-      attempts: 0,
-      input: clone(input, {}),
-      result: null,
-      error: "",
-      createdAt,
-      updatedAt: createdAt,
-      startedAt: "",
-      finishedAt: ""
+      type, key, status: "queued", attempts: 0, input: clone(input, {}), result: null, error: "",
+      createdAt, updatedAt: createdAt, startedAt: "", finishedAt: ""
     };
-    snapshot.store.tasks = snapshot.store.tasks || {};
-    snapshot.store.tasks[task.id] = task;
-    const ordered = Object.values(snapshot.store.tasks).sort((a, b) => String(b.updatedAt || "").localeCompare(String(a.updatedAt || "")));
-    snapshot.store.tasks = Object.fromEntries(ordered.slice(0, 60).map((item) => [item.id, item]));
-    await saveSnapshot(snapshot);
-    startLocalTask(snapshot, task);
-    return task;
+    const db = storage();
+    if (!db?.enqueueTask) throw new Error("Atomic task ownership is unavailable; task was not queued");
+    if (!await db.getSnapshot({ includeProjects: false, includeLeaderboards: false })) {
+      try { await saveSnapshot(snapshot); }
+      catch (error) {
+        // Another tab may initialize this empty workspace first. Its state wins.
+        if (error?.code !== "SNAPSHOT_CONFLICT" || !await db.getSnapshot({ includeProjects: false, includeLeaderboards: false })) throw error;
+      }
+    }
+    const task = await db.enqueueTask(candidate, {
+      sameInput: existing => type !== "analysis" || domainCore.analysisTaskIdentity(existing) === domainCore.analysisTaskIdentity(input)
+    });
+    return startLocalTask(snapshot, task);
   }
 
   function portableData(snapshot) {
@@ -3208,7 +3223,10 @@
         })
         .sort((a, b) => String(b.updatedAt || "").localeCompare(String(a.updatedAt || "")))
         .slice(0, Math.max(1, Math.min(60, Number(params.limit || 30))));
-      if (!options.readOnlyCache) tasks.filter((task) => task.status === "queued" || task.status === "running").forEach((task) => startLocalTask(snapshot, task));
+      if (!options.readOnlyCache) {
+        const resumed = await Promise.all(tasks.map(task => ["queued", "running"].includes(task.status) ? startLocalTask(snapshot, task) : task));
+        tasks.splice(0, tasks.length, ...resumed);
+      }
       const cooldown = githubCooldownState();
       return {
         tasks: tasks.map(publicLocalTask),
@@ -3218,9 +3236,9 @@
     }
     if (method === "GET" && url.pathname.startsWith("/api/tasks/")) {
       const id = decodeURIComponent(url.pathname.slice("/api/tasks/".length));
-      const task = snapshot.store.tasks?.[id];
+      let task = snapshot.store.tasks?.[id];
       if (!task) throw new Error("Task not found");
-      if (!options.readOnlyCache && (task.status === "queued" || task.status === "running")) startLocalTask(snapshot, task);
+      if (!options.readOnlyCache && ["queued", "running"].includes(task.status)) task = await startLocalTask(snapshot, task);
       return { task: publicLocalTask(task) };
     }
 
@@ -3585,7 +3603,7 @@
       // also the recovery point that releases the queued task.
       const running = taskPending && !cooldown.active;
       if (!options.readOnlyCache && running && task?.status === "queued") {
-        startLocalTask(snapshot, task);
+        await startLocalTask(snapshot, task);
       }
       const hasScan = Boolean(lastScan) || task?.status === "completed";
       const failed = !cooldown.active && !running && task?.status === "failed" && !hasScan;
