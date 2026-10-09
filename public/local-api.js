@@ -1227,10 +1227,10 @@
     const retries = Math.max(0, Number(requestOptions.retries ?? 2));
     for (let attempt = 0; attempt <= retries; attempt += 1) {
       await waitForGithubWindow(path);
-      const response = await fetch(`https://api.github.com${path}`, {
+      const response = await fetchWithTimeout(`https://api.github.com${path}`, {
         ...options,
         headers: { ...githubHeaders(secrets.githubToken), ...(options.headers || {}) }
-      });
+      }, 20000);
       updateGithubBudget(response, path);
       const text = await response.text();
       let json = {};
@@ -1282,13 +1282,55 @@
     return { configured: Boolean(configured), valid: configured ? Boolean(valid) : null, message };
   }
 
-  async function fetchWithTimeout(url, options = {}, timeoutMs = 10000) {
+  async function fetchWithTimeout(url, options = {}, timeoutMs = 10000, maxResponseBytes = 16 * 1024 * 1024) {
+    const caller = options.signal;
+    const cancelled = () => caller?.reason instanceof Error ? caller.reason : Object.assign(new Error("Request aborted"), { name: "AbortError" });
+    if (caller?.aborted) throw cancelled();
     const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), timeoutMs);
+    const cancel = () => controller.abort(cancelled());
+    caller?.addEventListener("abort", cancel, { once: true });
+    const aborted = new Promise((_, reject) => controller.signal.addEventListener("abort", () => reject(controller.signal.reason), { once: true }));
+    const timer = setTimeout(() => controller.abort(Object.assign(new Error("Request timed out"), { code: "REQUEST_TIMEOUT" })), timeoutMs);
+    let reader;
+    const cancelReader = () => { reader?.cancel(controller.signal.reason).catch(() => {}); };
+    controller.signal.addEventListener("abort", cancelReader, { once: true });
     try {
-      return await fetch(url, { ...options, signal: controller.signal });
+      return await Promise.race([aborted, (async () => {
+        const response = await fetch(url, { ...options, signal: controller.signal });
+        if (controller.signal.aborted) throw controller.signal.reason;
+        let text;
+        if (response.body?.getReader) {
+          reader = response.body.getReader();
+          const chunks = []; let bytes = 0;
+          while (true) {
+            if (controller.signal.aborted) throw controller.signal.reason;
+            const next = await reader.read();
+            if (next.done) break;
+            bytes += next.value.byteLength;
+            if (bytes > maxResponseBytes) throw Object.assign(new Error("Provider response is too large"), { code: "RESPONSE_TOO_LARGE" });
+            chunks.push(next.value);
+          }
+          const payload = new Uint8Array(bytes); let offset = 0;
+          for (const chunk of chunks) { payload.set(chunk, offset); offset += chunk.byteLength; }
+          text = new TextDecoder().decode(payload);
+        } else {
+          text = await response.text();
+          const bytes = Array.from(text).reduce((sum, char) => { const point = char.codePointAt(0); return sum + (point < 128 ? 1 : point < 2048 ? 2 : point < 65536 ? 3 : 4); }, 0);
+          if (bytes > maxResponseBytes) throw Object.assign(new Error("Provider response is too large"), { code: "RESPONSE_TOO_LARGE" });
+        }
+        if (controller.signal.aborted) throw controller.signal.reason;
+        let consumed = false;
+        const read = async () => { if (consumed) throw new Error("Response body already consumed"); consumed = true; return text; };
+        return { ok: response.ok, status: response.status, headers: response.headers, url: response.url, text: read, json: async () => JSON.parse(await read()) };
+      })()]);
+    } catch (error) {
+      controller.abort(error);
+      throw error;
     } finally {
       clearTimeout(timer);
+      caller?.removeEventListener("abort", cancel);
+      controller.signal.removeEventListener("abort", cancelReader);
+      reader?.releaseLock();
     }
   }
 
@@ -2080,14 +2122,16 @@
     }
   }
 
-  async function callModelJson(snapshot, messages) {
+  async function callModelJson(snapshot, messages, options = {}) {
     const secrets = await getSecrets();
     const provider = activeProvider(snapshot, secrets);
     if (!provider.apiKey) throw new Error("请先在设置里配置并保存可用的 AI 模型 API Key");
     let response;
     try {
-      response = await fetch(chatCompletionsUrl(provider), {
+      const planRequest = options.kind === "plan";
+      response = await fetchWithTimeout(chatCompletionsUrl(provider), {
         method: "POST",
+        signal: options.signal,
         headers: {
           "Content-Type": "application/json",
           Authorization: `Bearer ${provider.apiKey}`
@@ -2095,11 +2139,13 @@
         body: JSON.stringify({
           model: provider.model || DEFAULT_PROVIDER.model,
           temperature: 0.2,
+          max_tokens: planRequest ? 16000 : options.kind === "test" ? 700 : 2000,
           response_format: { type: "json_object" },
           messages
         })
-      });
+      }, planRequest ? 75000 : 45000);
     } catch (error) {
+      if (options.signal?.aborted || error?.name === "AbortError" || ["REQUEST_TIMEOUT", "RESPONSE_TOO_LARGE"].includes(error?.code)) throw error;
       throw new Error(`模型接口无法从浏览器直连，可能被 CORS 拦截：${error.message}`);
     }
     const text = await response.text();
@@ -2491,14 +2537,14 @@
     const idea = [body.idea, body.detailedNeed].map((item) => String(item || "").trim()).filter(Boolean).join("\n");
     if (!name || !idea) throw new Error("方案名称和详细需求不能为空");
     const research = await browserPlanResearch(snapshot, name, idea);
-    const first = await callModelJson(snapshot, [{ role: "user", content: browserPlanGenerationPrompt(name, idea, research) }]);
+    const first = await callModelJson(snapshot, [{ role: "user", content: browserPlanGenerationPrompt(name, idea, research) }], { kind: "plan" });
     let raw = first.raw;
     let plan = normalizeBrowserPlan(first.json, { name, idea });
     let issues = browserPlanQualityIssues(plan, name, research, idea);
     if (issues.length) {
       const repaired = await callModelJson(snapshot, [
         { role: "user", content: browserPlanGenerationPrompt(name, idea, research, { issues, raw }) }
-      ]);
+      ], { kind: "plan" });
       raw = repaired.raw;
       plan = normalizeBrowserPlan(repaired.json, { name, idea });
       issues = browserPlanQualityIssues(plan, name, research, idea);
@@ -3565,7 +3611,7 @@
         const result = await callModelJson(snapshot, [
           { role: "system", content: "Return JSON only." },
           { role: "user", content: "{\"ok\":true}" }
-        ]);
+        ], { kind: "test", signal: options.signal });
         updateProviderStatus(snapshot, "deepseek", { lastTestAt: nowIso(), testStatus: "ok" });
         await saveSnapshot(snapshot);
         return { ok: true, settings: settingsResponse(snapshot, secrets) };

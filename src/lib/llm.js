@@ -6,8 +6,8 @@ const {
   readProviderResponse
 } = require("./provider-response");
 
-// LLM calls can take a while; allow one retry on transient 429/5xx/network errors.
-const LLM_HTTP_OPTS = { timeoutMs: 45_000, retries: 1 };
+// A failed/late POST response does not prove the provider did not execute it.
+const LLM_HTTP_OPTS = { timeoutMs: 45_000, retries: 0 };
 // Observation-plan JSON can contain up to 30 executable GitHub profiles. Give
 // that single response enough time, but do not repeat an already expensive
 // generation request after a timeout.

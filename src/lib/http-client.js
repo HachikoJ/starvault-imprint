@@ -10,9 +10,24 @@ const DEFAULT_TIMEOUT_MS = 20_000;
 const DEFAULT_RETRIES = 2;
 const DEFAULT_BASE_DELAY_MS = 500;
 const DEFAULT_MAX_DELAY_MS = 8_000;
+const DEFAULT_MAX_RESPONSE_BYTES = 16 * 1024 * 1024;
 
-function sleep(ms) {
-  return new Promise((resolve) => setTimeout(resolve, ms));
+function positiveNumber(value, fallback) {
+  return Number.isFinite(Number(value)) && Number(value) > 0 ? Number(value) : fallback;
+}
+
+function abortReason(signal) {
+  return signal?.reason instanceof Error ? signal.reason : Object.assign(new Error("Request aborted"), { name: "AbortError", cause: signal?.reason });
+}
+
+function sleep(ms, signal) {
+  if (signal?.aborted) return Promise.reject(abortReason(signal));
+  return new Promise((resolve, reject) => {
+    const finish = (error) => { clearTimeout(timer); signal?.removeEventListener("abort", cancel); error ? reject(error) : resolve(); };
+    const cancel = () => finish(abortReason(signal));
+    const timer = setTimeout(() => finish(), ms);
+    signal?.addEventListener("abort", cancel, { once: true });
+  });
 }
 
 // Run an async mapper over items with bounded concurrency. Preserves input order.
@@ -78,15 +93,55 @@ function defaultRetryDelay(response, error, attempt, baseMs, maxMs) {
   return Math.min(maxMs, Math.round(exp * jitter()));
 }
 
-function mergeSignal(userSignal, internalSignal) {
-  if (!userSignal) return internalSignal;
+async function bufferResponse(response, signal, maxBytes) {
+  if (!response.body?.getReader) return response;
+  const reader = response.body.getReader();
+  const chunks = []; let bytes = 0;
+  const cancel = () => { reader.cancel(abortReason(signal)).catch(() => {}); };
+  signal.addEventListener("abort", cancel, { once: true });
+  try {
+    while (true) {
+      if (signal.aborted) throw abortReason(signal);
+      const { done, value } = await reader.read();
+      if (done) break;
+      bytes += value.byteLength;
+      if (bytes > maxBytes) {
+        await reader.cancel();
+        throw Object.assign(new Error("Provider response is too large"), { code: "RESPONSE_TOO_LARGE" });
+      }
+      chunks.push(Buffer.from(value));
+    }
+    if (signal.aborted) throw abortReason(signal);
+    const buffered = new Response(bytes ? Buffer.concat(chunks) : null, { status: response.status, statusText: response.statusText, headers: response.headers });
+    Object.defineProperty(buffered, "url", { value: response.url });
+    return buffered;
+  } finally { signal.removeEventListener("abort", cancel); reader.releaseLock(); }
+}
+
+async function boundedRequest(request, userSignal, timeoutMs, maxBytes) {
+  if (userSignal?.aborted) throw abortReason(userSignal);
   const controller = new AbortController();
-  const onAbort = (reason) => {
-    controller.abort(typeof reason === "string" ? new Error(reason) : reason);
-  };
-  internalSignal.addEventListener("abort", () => onAbort(internalSignal.reason), { once: true });
-  userSignal.addEventListener("abort", () => onAbort(userSignal.reason), { once: true });
-  return controller.signal;
+  const cancel = () => controller.abort(abortReason(userSignal));
+  userSignal?.addEventListener("abort", cancel, { once: true });
+  let rejectAbort;
+  const aborted = new Promise((_, reject) => { rejectAbort = reject; });
+  const onAbort = () => rejectAbort(abortReason(controller.signal));
+  controller.signal.addEventListener("abort", onAbort, { once: true });
+  const duration = positiveNumber(timeoutMs, DEFAULT_TIMEOUT_MS);
+  const limit = positiveNumber(maxBytes, DEFAULT_MAX_RESPONSE_BYTES);
+  const timer = setTimeout(() => controller.abort(Object.assign(new Error("Request timed out"), { code: "REQUEST_TIMEOUT" })), duration);
+  try {
+    return await Promise.race([aborted, (async () => {
+      const response = await request(controller.signal);
+      if (controller.signal.aborted) throw abortReason(controller.signal);
+      return bufferResponse(response, controller.signal, limit);
+    })()]);
+  } catch (error) { controller.abort(error); throw error; }
+  finally {
+    clearTimeout(timer);
+    userSignal?.removeEventListener("abort", cancel);
+    controller.signal.removeEventListener("abort", onAbort);
+  }
 }
 
 function headersToObject(headers) {
@@ -112,8 +167,10 @@ function pinnedLookupResult(addresses, lookupOptions = {}) {
   return lookupOptions?.all ? compatible.map((entry) => ({ ...entry })) : compatible[0];
 }
 
-async function fetchPinnedHttps(urlValue, init = {}, policy = {}) {
+async function requestPinnedHttps(urlValue, init = {}, policy = {}) {
+  if (init.signal?.aborted) throw abortReason(init.signal);
   const resolved = await resolveSafeExternalUrl(urlValue, policy);
+  if (init.signal?.aborted) throw abortReason(init.signal);
   if (!resolved.addresses.length) return fetch(urlValue, { ...init, redirect: "manual" });
   const url = resolved.url;
   const addresses = normalizePinnedAddresses(resolved.addresses);
@@ -123,7 +180,7 @@ async function fetchPinnedHttps(urlValue, init = {}, policy = {}) {
   const headers = headersToObject(init.headers);
   if (!Object.keys(headers).some((key) => key.toLowerCase() === "accept-encoding")) headers["accept-encoding"] = "identity";
   const body = init.body === undefined || init.body === null ? null : init.body;
-  const maxResponseBytes = Math.max(64 * 1024, Number(policy.maxResponseBytes || 16 * 1024 * 1024));
+  const maxResponseBytes = positiveNumber(policy.maxResponseBytes, DEFAULT_MAX_RESPONSE_BYTES);
 
   return new Promise((resolve, reject) => {
     let settled = false;
@@ -176,7 +233,7 @@ async function fetchPinnedHttps(urlValue, init = {}, policy = {}) {
         response.on("data", (chunk) => {
           bytesRead += chunk.length;
           if (bytesRead > maxResponseBytes) {
-            request.destroy(new Error("Provider response is too large"));
+            request.destroy(Object.assign(new Error("Provider response is too large"), { code: "RESPONSE_TOO_LARGE" }));
             return;
           }
           chunks.push(chunk);
@@ -194,12 +251,17 @@ async function fetchPinnedHttps(urlValue, init = {}, policy = {}) {
       }
     );
     request.once("error", finish);
-    request.setTimeout(Number(policy.timeoutMs || DEFAULT_TIMEOUT_MS), () => request.destroy(new Error("Request timed out")));
+    request.setTimeout(positiveNumber(policy.timeoutMs, DEFAULT_TIMEOUT_MS), () => request.destroy(new Error("Request timed out")));
     if (signal) signal.addEventListener("abort", onAbort, { once: true });
     request.once("close", () => signal?.removeEventListener?.("abort", onAbort));
     if (body !== null) request.write(typeof body === "string" || Buffer.isBuffer(body) ? body : Buffer.from(body));
     request.end();
   });
+}
+
+async function fetchPinnedHttps(urlValue, init = {}, policy = {}) {
+  return boundedRequest(signal => requestPinnedHttps(urlValue, { ...init, signal }, policy), init.signal,
+    policy.timeoutMs || DEFAULT_TIMEOUT_MS, policy.maxResponseBytes || DEFAULT_MAX_RESPONSE_BYTES);
 }
 
 /**
@@ -211,6 +273,7 @@ async function fetchPinnedHttps(urlValue, init = {}, policy = {}) {
  * @param {number} [opts.retries]
  * @param {number} [opts.baseDelayMs]
  * @param {number} [opts.maxDelayMs]
+ * @param {number} [opts.maxResponseBytes] - full decoded-body cap (default 16 MiB)
  * @param {(res: Response|null, err: Error|null, attempt: number) => boolean|Promise<boolean>} [opts.shouldRetry]
  * @param {(res: Response|null, err: Error|null, attempt: number) => number|Promise<number>} [opts.retryDelay]
  */
@@ -227,29 +290,30 @@ async function fetchWithRetries(url, init = {}, opts = {}) {
   let attempt = 0;
   // eslint-disable-next-line no-constant-condition
   while (true) {
-    const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(new Error("Request timed out")), timeoutMs);
+    if (init.signal?.aborted) throw abortReason(init.signal);
     try {
-      const requestInit = { ...init, signal: mergeSignal(init.signal, controller.signal) };
-      const response = opts.externalUrlPolicy
-        ? await fetchPinnedHttps(url, requestInit, { ...opts.externalUrlPolicy, timeoutMs })
-        : await fetch(url, requestInit);
-      clearTimeout(timer);
+      const maxResponseBytes = opts.maxResponseBytes ?? opts.externalUrlPolicy?.maxResponseBytes ?? DEFAULT_MAX_RESPONSE_BYTES;
+      const response = await boundedRequest(signal => {
+        const requestInit = { ...init, signal };
+        return opts.externalUrlPolicy
+          ? requestPinnedHttps(url, requestInit, { ...opts.externalUrlPolicy, timeoutMs, maxResponseBytes })
+          : fetch(url, requestInit);
+      }, init.signal, timeoutMs, maxResponseBytes);
       if (attempt < retries && (await shouldRetry(response, null, attempt))) {
         const delay = await retryDelay(response, null, attempt, baseDelayMs, maxDelayMs);
-        await sleep(delay);
+        await sleep(delay, init.signal);
         attempt += 1;
         continue;
       }
       return response;
     } catch (error) {
-      clearTimeout(timer);
       // The merged signal can preserve a caller's arbitrary abort reason (which
       // is not necessarily named AbortError), so check the original signal too.
       const callerAborted = Boolean(init.signal?.aborted);
-      if (!callerAborted && attempt < retries && (await shouldRetry(null, error, attempt))) {
+      const safeToRepeat = ["GET", "HEAD", "OPTIONS"].includes(String(init.method || "GET").toUpperCase());
+      if (!callerAborted && safeToRepeat && error?.code !== "RESPONSE_TOO_LARGE" && attempt < retries && (await shouldRetry(null, error, attempt))) {
         const delay = await retryDelay(null, error, attempt, baseDelayMs, maxDelayMs);
-        await sleep(delay);
+        await sleep(delay, init.signal);
         attempt += 1;
         continue;
       }

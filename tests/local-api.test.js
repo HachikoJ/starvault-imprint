@@ -56,9 +56,10 @@ async function createBrowserRuntime(fetchImpl, options = {}) {
     IDBKeyRange,
     location: window.location,
     fetch: (...args) => fetchImpl(...args),
-    setTimeout,
+    setTimeout: options.setTimeout || setTimeout,
     clearTimeout,
     AbortController,
+    TextDecoder,
     Date,
     JSON,
     Map,
@@ -283,6 +284,50 @@ async function waitForTask(api, id) {
   }
   throw new Error(`Task ${id} did not finish`);
 }
+
+test("T-11 browser analysis and plan deadlines fail tasks without replay or CORS misclassification", async () => {
+  const deadlines = []; let calls = 0; let cancelled = 0;
+  const { api, storage } = await createBrowserRuntime(async (url, init) => {
+    assert.ok(init.signal, "provider calls must carry a signal"); calls++;
+    return new Response(new ReadableStream({ start(controller) { controller.enqueue(new TextEncoder().encode('{')); }, cancel() { cancelled++; } }));
+  }, { setTimeout: (callback, ms) => { if (ms >= 10000) deadlines.push(ms); return setTimeout(callback, ms >= 10000 ? 20 : ms); } });
+  await api.handle('/api/settings', { method: 'POST', body: JSON.stringify({ validateProvider: false, llmProviders: [{id:'deepseek',apiKey:'fixture-t11-model-key'}] }) });
+  await storage.putProjects([{ fullName:'fixture/deadline',description:'fixture' }]);
+  for (const [endpoint, body] of [
+    ['/api/analyze', {fullName:'fixture/deadline'}],
+    ['/api/observation-plans/generate', {name:'Fixture',idea:'Fixture telemetry tools'}]
+  ]) {
+    const started = await api.handle(endpoint, {method:'POST',body:JSON.stringify(body)});
+    const task = await waitForTask(api, started.task.id);
+    assert.equal(task.status,'failed'); assert.match(task.error,/timed out/i); assert.doesNotMatch(task.error,/CORS/);
+  }
+  assert.deepEqual(deadlines,[45000,75000]); assert.equal(calls,2); assert.equal(cancelled,2);
+  assert.equal(Object.keys((await storage.getSnapshot()).store.observationPlans.default.userData.analysis || {}).length,0);
+});
+
+test("T-11 browser rejects an oversized model body without saving analysis or repeating it", async () => {
+  let calls=0;let cancelled=0;
+  const { api, storage } = await createBrowserRuntime(async()=>{
+    calls++;
+    return new Response(new ReadableStream({ start(controller) { controller.enqueue(new Uint8Array(16*1024*1024+1)); },cancel(){cancelled++;} }));
+  });
+  await api.handle('/api/settings',{method:'POST',body:JSON.stringify({validateProvider:false,llmProviders:[{id:'deepseek',apiKey:'fixture-t11-body-key'}]})});
+  await storage.putProjects([{fullName:'fixture/body-limit',description:'fixture'}]);
+  const started=await api.handle('/api/analyze',{method:'POST',body:JSON.stringify({fullName:'fixture/body-limit'})});
+  const task=await waitForTask(api,started.task.id);
+  assert.equal(task.status,'failed');assert.match(task.error,/too large/i);assert.doesNotMatch(task.error,/CORS/);
+  assert.equal(calls,1);assert.equal(cancelled,1);
+  assert.equal(Object.keys((await storage.getSnapshot()).store.observationPlans.default.userData.analysis || {}).length,0);
+});
+
+test("T-11 pre-cancelled browser model request sends no provider request", async () => {
+  let calls=0;
+  const { api } = await createBrowserRuntime(async()=>{calls++;throw new Error('must not send');});
+  await api.handle('/api/settings',{method:'POST',body:JSON.stringify({validateProvider:false,llmProviders:[{id:'deepseek',apiKey:'fixture-t11-cancel-key'}]})});
+  const controller=new AbortController();controller.abort(Object.assign(new Error('Fixture pre-cancelled'),{name:'AbortError'}));
+  await assert.rejects(api.handle('/api/provider-test',{method:'POST',body:'{}',signal:controller.signal}),/Fixture pre-cancelled/);
+  assert.equal(calls,0);
+});
 
 test("browser scan tasks stay bound to the plan that created them", async () => {
   const searchQueries = [];

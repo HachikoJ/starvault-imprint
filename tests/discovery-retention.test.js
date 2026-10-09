@@ -43,7 +43,7 @@ function browserRuntime(fetchImpl, indexedDB = new IDBFactory()) {
   const context = {
     window, globalThis: { IDBKeyRange }, indexedDB, IDBKeyRange,
     location: window.location, fetch: fetchImpl, setTimeout, clearTimeout,
-    AbortController, Date, JSON, Map, Set, Promise, Error, Object,
+    AbortController, TextDecoder, Date, JSON, Map, Set, Promise, Error, Object,
     Array, String, Number, Boolean, URL, URLSearchParams, Math
   };
   vm.runInNewContext(source("domain-core.js"), context);

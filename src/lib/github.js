@@ -1354,27 +1354,20 @@ async function fetchTrendingHtml(period = "daily", token = "", options = {}) {
   // request footprint, so it goes through the same gate, spacing and breaker.
   await waitForGithubRequestWindow(target);
   const timeoutMs = Math.max(3000, Math.min(Number(options.timeoutMs || 12000), 30000));
-  const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), timeoutMs);
-
-  try {
-    const response = await fetch(target, {
-      headers: htmlHeaders(token),
-      signal: controller.signal
-    });
-    updateGithubRateBudgetFromHeaders(response, target);
-    const rateLimitInfo = await githubRateLimitInfo(response);
-    if (isGithubRateLimitedResponse(response, rateLimitInfo)) {
-      throw githubRateLimitErrorForResponse(rateLimitInfo);
-    }
-    if (!response.ok) {
-      const text = await response.text();
-      throw new Error(`GitHub Trending request failed ${response.status}: ${text.slice(0, 180)}`);
-    }
-    return response.text();
-  } finally {
-    clearTimeout(timeout);
+  const response = await fetchWithRetries(target, {
+    headers: htmlHeaders(token),
+    signal: options.signal
+  }, { timeoutMs, retries: 0 });
+  updateGithubRateBudgetFromHeaders(response, target);
+  const rateLimitInfo = await githubRateLimitInfo(response);
+  if (isGithubRateLimitedResponse(response, rateLimitInfo)) {
+    throw githubRateLimitErrorForResponse(rateLimitInfo);
   }
+  if (!response.ok) {
+    const text = await response.text();
+    throw new Error(`GitHub Trending request failed ${response.status}: ${text.slice(0, 180)}`);
+  }
+  return response.text();
 }
 
 function trendingSignal(item) {
