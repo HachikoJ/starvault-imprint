@@ -1,4 +1,5 @@
 const { fetchWithRetries, mapWithConcurrency } = require("./http-client");
+const { externalSignalOutcome } = require("../../public/domain-core");
 
 const TAVILY_URL = "https://api.tavily.com/search";
 const TAVILY_TIMEOUT_MS = 15_000;
@@ -39,7 +40,7 @@ async function searchWebSignals(project, tavilyKey) {
   );
 
   if (!response.ok) {
-    throw new Error(`Tavily request failed with ${response.status}`);
+    throw Object.assign(new Error(`Tavily request failed with ${response.status}`), { status: response.status });
   }
 
   const json = await response.json();
@@ -98,17 +99,9 @@ async function enrichTopProjectsWithTavily(projects, tavilyKey, count = 24, onPr
     async (project) => {
       let value;
       try {
-        value = await searchWebSignals(project, tavilyKey);
+        value = externalSignalOutcome(await searchWebSignals(project, tavilyKey), "tavily", project.fullName);
       } catch (error) {
-        value = [
-          {
-            source: "tavily",
-            title: "Tavily enrichment failed",
-            url: "",
-            score: 0,
-            content: error.message
-          }
-        ];
+        value = externalSignalOutcome({ status: "error", errors: [{ source: "tavily", fullName: project.fullName, status: error.status, code: error.code, message: error.message }] }, "tavily", project.fullName);
       } finally {
         completed += 1;
         if (typeof onProgress === "function") {

@@ -1059,6 +1059,10 @@ function restoreSignalMap(value) {
   return new Map(Object.entries(value || {}).map(([key, signals]) => [key, Array.isArray(signals) ? signals : []]));
 }
 
+function restoreProviderSignalMap(value, source) {
+  return new Map(Object.entries(value || {}).map(([key, outcome]) => [key, domainCore.externalSignalOutcome(outcome, source, key)]));
+}
+
 function saveScanCheckpoint(taskId, checkpoint = {}) {
   if (!taskId) return;
   const task = storage.getTask(taskId);
@@ -2978,7 +2982,7 @@ async function runScan(options = {}) {
       progressUnits: 64
     });
     const externalSignals = checkpointStageReached(checkpoint, "tavily") && checkpoint.tavily
-      ? restoreSignalMap(checkpoint.tavily)
+      ? restoreProviderSignalMap(checkpoint.tavily, "tavily")
       : await enrichTopProjectsWithTavily(
           preScoredRepositories,
           effectiveTavilyKey(),
@@ -3008,7 +3012,7 @@ async function runScan(options = {}) {
       progressUnits: 78
     });
     const exaSignals = checkpointStageReached(checkpoint, "exa") && checkpoint.exa
-      ? restoreSignalMap(checkpoint.exa)
+      ? restoreProviderSignalMap(checkpoint.exa, "exa")
       : await enrichTopProjectsWithExa(
           preScoredRepositories,
           effectiveExaKey(),
@@ -3038,10 +3042,11 @@ async function runScan(options = {}) {
       total: repositories.length,
       progressUnits: 92
     });
+    const providerDiagnostics = [...externalSignals.values(), ...exaSignals.values()].flatMap(outcome => outcome.errors || []);
     const enriched = repositories.map((repo) => {
       const trending = signalsForRepository(trendingSignals, repo.fullName);
-      const tavily = externalSignals.get(repo.fullName) || [];
-      const exa = exaSignals.get(repo.fullName) || [];
+      const tavily = externalSignals.get(repo.fullName)?.signals || [];
+      const exa = exaSignals.get(repo.fullName)?.signals || [];
       return enrichRepository(repo, previous.get(repo.fullName), [...trending, ...tavily, ...exa]);
     });
 
@@ -3060,7 +3065,7 @@ async function runScan(options = {}) {
       storage.upsertProjects(enriched, {
         id: scanId,
         mode: options.mode || "manual",
-        status: scanErrors.length ? "completed-with-errors" : "completed",
+        status: scanErrors.length || providerDiagnostics.length ? "completed-with-errors" : "completed",
         observationPlanId: activePlan.id,
         observationPlanName: activePlan.name,
         profiles: [...result.profiles, ...(trendingResult.profiles || [])],
@@ -3073,6 +3078,7 @@ async function runScan(options = {}) {
         trendLimit,
         githubRateBudget: githubScanBudget,
         errors: scanErrors,
+        providerDiagnostics,
         discoveryCoverage,
         startedAt,
         taskId: options.taskId || "",
@@ -3195,6 +3201,7 @@ async function runScan(options = {}) {
       githubTrendingFound: trendingResult.found || 0,
       githubTrendingAdded: combined.added,
       errors: scanErrors,
+      providerDiagnostics,
       profiles: result.profiles.length + (trendingResult.profiles || []).length
     };
   } catch (error) {

@@ -1,4 +1,5 @@
 const { fetchWithRetries, mapWithConcurrency } = require("./http-client");
+const { externalSignalOutcome } = require("../../public/domain-core");
 
 const EXA_URL = "https://api.exa.ai/search";
 const EXA_TIMEOUT_MS = 15_000;
@@ -177,17 +178,9 @@ async function enrichTopProjectsWithExa(projects, exaKey, count = 24, onProgress
     async (project) => {
       let value;
       try {
-        value = await searchExaSignals(project, exaKey);
+        value = externalSignalOutcome(await searchExaSignals(project, exaKey), "exa", project.fullName);
       } catch (error) {
-        value = [
-          {
-            source: "exa",
-            title: "Exa enrichment failed",
-            url: "",
-            score: 0,
-            content: error.message
-          }
-        ];
+        value = externalSignalOutcome({ status: "error", errors: [{ source: "exa", fullName: project.fullName, status: error.status, code: error.code, message: error.message }] }, "exa", project.fullName);
       } finally {
         completed += 1;
         if (typeof onProgress === "function") {

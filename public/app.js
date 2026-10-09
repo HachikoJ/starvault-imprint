@@ -556,6 +556,7 @@ const I18N = {
     seenToday: "今日更新",
     receivedRepos: "本次扫描",
     scanErrors: "扫描异常",
+    scanProviderIssues: "外部信号补充失败（{count}），失败结果未计入评分",
     reviewQueue: "需复核许可",
     trendQueue: "热度变化",
     noReviewQueue: "暂无需要优先复核的许可项",
@@ -1272,6 +1273,7 @@ const I18N = {
     seenToday: "Updated today",
     receivedRepos: "This scan",
     scanErrors: "Scan issues",
+    scanProviderIssues: "External signal enrichment failed ({count}); failed results excluded from scores",
     reviewQueue: "License checks",
     trendQueue: "Heat changes",
     noReviewQueue: "No urgent license review items",
@@ -2787,6 +2789,7 @@ const elements = {
   metricWatch: document.querySelector("#metric-watch"),
   metricScan: document.querySelector("#metric-scan"),
   metricScanCoverage: document.querySelector("#metric-scan-coverage"),
+  metricProviderDiagnostics: document.querySelector("#metric-provider-diagnostics"),
   projectCount: document.querySelector("#project-count"),
   projectRows: document.querySelector("#project-rows"),
   detailPanel: document.querySelector("#detail-panel"),
@@ -7242,6 +7245,12 @@ function renderSummary(summary) {
   if (elements.metricScanCoverage) {
     elements.metricScanCoverage.hidden = summary.lastScan?.discoveryCoverage?.complete !== false;
     elements.metricScanCoverage.textContent = elements.metricScanCoverage.hidden ? "" : t("scanCoverageIncomplete");
+  }
+  if (elements.metricProviderDiagnostics) {
+    const diagnostics = summary.lastScan?.providerDiagnostics || [];
+    elements.metricProviderDiagnostics.hidden = !diagnostics.length;
+    elements.metricProviderDiagnostics.textContent = diagnostics.length ? t("scanProviderIssues").replace("{count}", diagnostics.length) : "";
+    elements.metricProviderDiagnostics.title = diagnostics.map(item => `${item.source}${item.fullName ? ` ${item.fullName}` : ""}: ${item.message}`).join("\n");
   }
 
   const distribution = summary.distribution || {};

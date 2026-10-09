@@ -1,4 +1,4 @@
-const { classifyLicensePolicy } = require("../../public/domain-core");
+const { classifyLicensePolicy, externalSignalOutcome } = require("../../public/domain-core");
 
 const CATEGORY_RULES = [
   {
@@ -1133,6 +1133,7 @@ function getLicensePolicy(license) {
 }
 
 function scoreRepository(repo, previous = null, externalSignals = []) {
+  externalSignals = externalSignalOutcome(externalSignals).signals;
   const now = new Date();
   const ageDays = Math.max(1, daysBetween(repo.createdAt, now));
   const pushedDays = daysBetween(repo.pushedAt || repo.updatedAt, now);
@@ -1163,7 +1164,10 @@ function scoreRepository(repo, previous = null, externalSignals = []) {
     return score + periodWeight + rankBoost;
   }, 0);
   const trendingAttentionBoost = Math.min(10, trendingRankBoost * 2.2);
-  const externalScore = Math.min(20, externalSignals.reduce((score, signal) => score + Number(signal.weight || 1), 0) * 4);
+  const externalScore = Math.min(20, externalSignals.reduce((score, signal) => {
+    const weight = Number(signal.weight ?? 1);
+    return score + (Number.isFinite(weight) ? Math.max(0, weight) : 0);
+  }, 0) * 4);
 
   const momentum = clamp(
     logScore(starsPerDay + 1, 24) +

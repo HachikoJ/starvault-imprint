@@ -182,6 +182,33 @@
     return `analysis:${input.observationPlanId}:${input.fullName}:${stableHash(analysisTaskIdentity(input))}`;
   }
 
+  function externalSignalOutcome(value, source = "", fullName = "") {
+    const diagnostic = error => {
+      const status = Number(error?.httpStatus ?? error?.status);
+      return { source: String(error?.source || source), fullName: String(error?.fullName || fullName),
+        httpStatus: Number.isFinite(status) && status >= 100 && status <= 599 ? status : 0,
+        code: String(error?.code || ""), message: String(error?.message || error?.content || error || "External enrichment failed").slice(0, 500) };
+    };
+    const errors = Array.isArray(value?.errors) ? value.errors.map(diagnostic) : [];
+    const entries = Array.isArray(value) ? value : Array.isArray(value?.signals) ? value.signals : [];
+    const signals = [];
+    for (const signal of entries) {
+      if (!signal || typeof signal !== "object" || Array.isArray(signal) || !String(signal.source || "").trim()) continue;
+      const provider = String(signal.source).toLowerCase();
+      const legacyFailure = ["tavily", "exa"].includes(provider) &&
+        String(signal.title || "").toLowerCase() === `${provider} enrichment failed` && !signal.url && signal.score === 0;
+      if (legacyFailure || signal.status === "error") errors.push(diagnostic(signal));
+      else signals.push(signal);
+    }
+    if (value?.status === "error") {
+      signals.length = 0;
+      if (!errors.length) errors.push(diagnostic(value));
+    }
+    const uniqueErrors = Array.from(new Map(errors.map(error => [JSON.stringify(error), error])).values());
+    return { status: uniqueErrors.length ? signals.length ? "partial" : "error" : value == null || value.status === "skipped" ? "skipped" : "success",
+      signals, errors: uniqueErrors };
+  }
+
   function normalizedId(value = "") {
     return String(value || "")
       .toLowerCase()
@@ -816,6 +843,7 @@
   return {
     assertAnalysisDelivery,
     validateAnalysisResult,
+    externalSignalOutcome,
     analysisProviderIdentity,
     analysisTaskIdentity,
     analysisTaskKey,

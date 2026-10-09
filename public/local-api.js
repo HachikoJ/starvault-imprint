@@ -1784,15 +1784,20 @@
       ...(Array.isArray(logic.keywords) ? logic.keywords.slice(0, 12) : []),
       "GitHub repositories"
     ].join(" ").replace(/\s+/g, " ").trim();
-    const result = { signals: [], errors: [] };
+    const result = { signals: [], errors: [], providerDiagnostics: [] };
+    const failed = (source, error) => {
+      result.errors.push(`${source}: ${error.message}`);
+      result.providerDiagnostics.push(...domainCore.externalSignalOutcome({ status: "error", errors: [{ source: source.toLowerCase(), status: error.status, code: error.code, message: error.message }] }).errors);
+    };
     const jobs = [];
     if (secrets.tavilyKey) {
-      jobs.push(browserTavilySearch(query, secrets.tavilyKey, 6, snapshot).then((items) => result.signals.push(...items)).catch((error) => result.errors.push(`Tavily: ${error.message}`)));
+      jobs.push(browserTavilySearch(query, secrets.tavilyKey, 6, snapshot).then((items) => result.signals.push(...items)).catch((error) => failed("Tavily", error)));
     }
     if (secrets.exaKey) {
-      jobs.push(browserExaSearch(query, secrets.exaKey, 6, snapshot).then((items) => result.signals.push(...items)).catch((error) => result.errors.push(`Exa: ${error.message}`)));
+      jobs.push(browserExaSearch(query, secrets.exaKey, 6, snapshot).then((items) => result.signals.push(...items)).catch((error) => failed("Exa", error)));
     }
     await Promise.all(jobs);
+    result.signals = domainCore.externalSignalOutcome(result.signals).signals;
     result.repositories = githubNamesFromSignals(result.signals);
     return result;
   }
@@ -2016,7 +2021,7 @@
           externalErrors.push(`External discovery ${fullName}: ${error.message}`);
         }
       }
-      externalArtifact = { projects: externalProjects, errors: externalErrors };
+      externalArtifact = { projects: externalProjects, errors: externalErrors, providerDiagnostics: external.providerDiagnostics };
       if (task) {
         await storage().putTaskArtifact(task.id, externalArtifactKey, externalArtifact, { ...taskWriteOptions(snapshot), completeExternalRequest: true });
         artifacts[externalArtifactKey] = externalArtifact;
@@ -2027,6 +2032,7 @@
       }
     }
     applyBrowserScanArtifact(seen, errors, relaxations, externalArtifact, plan.id);
+    const providerDiagnostics = externalArtifact.providerDiagnostics || (externalArtifact.errors || []).filter(error => /^(Tavily|Exa):/.test(error)).map(error => ({ source: error.split(":")[0].toLowerCase(), fullName: "", httpStatus: 0, code: "", message: error.slice(error.indexOf(":") + 1).trim() }));
     const projects = Array.from(seen.values());
     const previousProjects = await storage().getProjects(projects.map((project) => project.fullName));
     const previousByKey = new Map(previousProjects.map((project) => [projectKey(project.fullName), project]));
@@ -2079,6 +2085,7 @@
       insertedOrUpdated: seen.size,
       profiles: profiles.map((profile) => profile.key),
       errors,
+      providerDiagnostics,
       discoveryCoverage,
       // Controlled sparse-domain relaxations actually executed by this scan.
       relaxations
@@ -2370,7 +2377,7 @@
       headers: { "Content-Type": "application/json", Authorization: `Bearer ${key}` },
       body: JSON.stringify({ query, search_depth: "basic", max_results: maxResults, include_answer: false, include_raw_content: false })
     });
-    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+    if (!response.ok) throw Object.assign(new Error(`HTTP ${response.status}`), { status: response.status });
     const payload = await response.json();
     return (payload.results || []).slice(0, maxResults).map((item) => ({ source: "tavily", title: item.title || "", content: item.content || "", url: item.url || "" }));
   }

@@ -31,16 +31,18 @@ async function main() {
 
   const preScoredRepositories = result.repositories.map((repo) => enrichRepository(repo, previous.get(repo.fullName), []));
   const externalSignals = await enrichTopProjectsWithTavily(preScoredRepositories, config.tavilyKey, 24);
+  const providerDiagnostics = [...externalSignals.values()].flatMap(outcome => outcome.errors || []);
   const enriched = result.repositories.map((repo) =>
-    enrichRepository(repo, previous.get(repo.fullName), externalSignals.get(repo.fullName) || [])
+    enrichRepository(repo, previous.get(repo.fullName), externalSignals.get(repo.fullName)?.signals || [])
   );
 
   storage.upsertProjects(enriched, {
-    status: result.errors.length ? "completed-with-errors" : "completed",
+    status: result.errors.length || providerDiagnostics.length ? "completed-with-errors" : "completed",
     mode: "cli",
     profiles: result.profiles,
     received: result.repositories.length,
-    errors: result.errors
+    errors: result.errors,
+    providerDiagnostics
   });
 
   console.log(
@@ -48,7 +50,8 @@ async function main() {
       {
         insertedOrUpdated: enriched.length,
         profiles: result.profiles.length,
-        errors: result.errors.length
+        errors: result.errors.length,
+        providerDiagnostics
       },
       null,
       2

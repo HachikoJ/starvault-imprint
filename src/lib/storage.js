@@ -4965,6 +4965,7 @@ function createStorage(filePath) {
       githubTrendingFound: scanMeta.githubTrendingFound || 0,
       githubTrendingAdded: scanMeta.githubTrendingAdded || 0,
       errors: scanMeta.errors || [],
+      providerDiagnostics: cloneJson(scanMeta.providerDiagnostics || [], []),
       discoveryCoverage: cloneJson(scanMeta.discoveryCoverage || null, null),
       // Controlled sparse-domain relaxations actually executed during this scan.
       // The saved query is never rewritten; each entry records the extra pass.
