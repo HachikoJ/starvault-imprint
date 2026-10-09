@@ -2644,7 +2644,7 @@ function startDurableTask(task) {
   // Keep queued scans queued while another scan owns the single GitHub scan slot.
   // This avoids consuming an attempt merely because the process-level worker
   // pool has capacity for a different task type.
-  if (task.type === "scan" && scanInProgress) return task;
+  if (task.type === "scan" && (scanInProgress || [...runningTasks.keys()].some(id => storage.getTask(id)?.type === "scan"))) return task;
   const runner = taskRunner(task);
   if (!runner) return storage.updateTask(task.id, { status: "failed", error: `Unsupported task type: ${task.type}`, finishedAt: new Date().toISOString() });
   const startedAt = new Date().toISOString();
@@ -2706,10 +2706,16 @@ function startDurableTask(task) {
 function pumpDurableTaskQueue() {
   if (activeDurableTaskCount >= MAX_DURABLE_TASK_CONCURRENCY) return;
   const cooling = Boolean(activeGithubCooldown());
-  const queued = storage.listTasks({ status: "queued", limit: MAX_DURABLE_TASK_CONCURRENCY - activeDurableTaskCount });
-  queued
-    .filter((task) => !(cooling && task.type === "scan"))
-    .forEach(startDurableTask);
+  // Storage retains at most 120 tasks. Consider the whole retained queue before
+  // filling slots so blocked scans cannot hide older runnable work. Creation
+  // time, then id, gives a stable FIFO order unaffected by status polling.
+  const queued = storage.listTasks({ status: "queued", limit: 120 })
+    .sort((a, b) => String(a.createdAt || "").localeCompare(String(b.createdAt || "")) || String(a.id).localeCompare(String(b.id)));
+  for (const task of queued) {
+    if (activeDurableTaskCount >= MAX_DURABLE_TASK_CONCURRENCY) break;
+    if (cooling && task.type === "scan") continue;
+    startDurableTask(task);
+  }
 }
 
 function enqueueDurableTask(type, key, input = {}) {
@@ -2718,11 +2724,11 @@ function enqueueDurableTask(type, key, input = {}) {
     .find((task) => ["queued", "running"].includes(task.status) &&
       (type !== "analysis" || domainCore.analysisTaskIdentity(task.input) === domainCore.analysisTaskIdentity(input)));
   if (existing) {
-    if (existing.status === "queued") startDurableTask(existing);
+    if (existing.status === "queued") pumpDurableTaskQueue();
     return publicTask(storage.getTask(existing.id));
   }
   const task = storage.createTask({ type, key, input, status: "queued" });
-  startDurableTask(task);
+  pumpDurableTaskQueue();
   return publicTask(storage.getTask(task.id));
 }
 
@@ -2770,11 +2776,8 @@ function resumeDurableTasks() {
       });
       continue;
     }
-    // Scans stay queued (not failed) while the account is cooling down; the
-    // resume timer plus pumpDurableTaskQueue restart them once it expires.
-    if (task.type === "scan" && activeGithubCooldown()) continue;
-    startDurableTask(task);
   }
+  pumpDurableTaskQueue();
 }
 
 async function runScan(options = {}) {
