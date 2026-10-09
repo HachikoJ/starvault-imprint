@@ -38,6 +38,56 @@
     return (hash >>> 0).toString(36);
   }
 
+  function normalizeAnalysisContext(context = {}) {
+    const methods = ["balanced", "commercial", "cleanRoom", "technical", "niche"];
+    const method = String(context.method || "balanced").trim();
+    return {
+      method: methods.includes(method) ? method : "balanced",
+      methodLabel: String(context.methodLabel || "").replace(/\s+/g, " ").trim().slice(0, 80),
+      userNeed: String(context.userNeed || "")
+        .replace(/[\u0000-\u0008\u000B-\u001F\u007F\u200B-\u200D\uFEFF]/g, "")
+        .replace(/<\|[^|]*\|>/g, "").replace(/\s+/g, " ").trim().slice(0, 1000)
+    };
+  }
+
+  function canonicalJson(value) {
+    if (Array.isArray(value)) return `[${value.map(item => canonicalJson(item) ?? "null").join(",")}]`;
+    if (value && typeof value === "object") return `{${Object.keys(value).sort()
+      .filter(key => value[key] !== undefined).map(key => `${JSON.stringify(key)}:${canonicalJson(value[key])}`).join(",")}}`;
+    return JSON.stringify(value);
+  }
+
+  function analysisProviderIdentity(provider = {}) {
+    // Persist only the endpoint contract, never URL credentials or API keys.
+    const url = new URL(String(provider.baseUrl || ""));
+    if (url.username || url.password || url.search || url.hash) throw new Error("Analysis provider URL must not contain credentials, query or fragment");
+    return { id: String(provider.id || ""), model: String(provider.model || ""), protocol: String(provider.protocol || "openai-compatible"),
+      endpoint: url.toString().replace(/\/+$/, "") };
+  }
+
+  function createAnalysisTaskInput(body, planId, project, provider, language = "zh") {
+    const fullName = String(project?.fullName || body.fullName || "").trim().toLowerCase().slice(0, 240);
+    const captured = {};
+    for (const field of ["description", "url", "language", "topics", "stars", "forks", "openIssues", "category", "useCase", "licensePolicy", "scores", "signals", "reasons", "actions", "observationPlanMatches", "observationMatches"]) {
+      if (project?.[field] !== undefined) captured[field] = JSON.parse(JSON.stringify(project[field]));
+    }
+    captured.fullName = fullName;
+    return { fullName, ...normalizeAnalysisContext(body), observationPlanId: String(planId || "").trim(),
+      analysisRequest: { version: 1, project: captured, provider: analysisProviderIdentity(provider), language } };
+  }
+
+  function analysisTaskIdentity(input = {}) {
+    const request = input.analysisRequest;
+    if (request?.version !== 1 || !input.observationPlanId || !input.fullName ||
+        request.project?.fullName !== input.fullName || !request.provider?.id || !request.provider?.endpoint) return "";
+    return canonicalJson({ fullName: input.fullName, ...normalizeAnalysisContext(input),
+      observationPlanId: input.observationPlanId, analysisRequest: request });
+  }
+
+  function analysisTaskKey(input) {
+    return `analysis:${input.observationPlanId}:${input.fullName}:${stableHash(analysisTaskIdentity(input))}`;
+  }
+
   function normalizedId(value = "") {
     return String(value || "")
       .toLowerCase()
@@ -670,6 +720,11 @@
   }
 
   return {
+    analysisProviderIdentity,
+    analysisTaskIdentity,
+    analysisTaskKey,
+    createAnalysisTaskInput,
+    normalizeAnalysisContext,
     assignProfileIds,
     classifyLicensePolicy,
     compactPlanSearchText,

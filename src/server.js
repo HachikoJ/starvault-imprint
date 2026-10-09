@@ -1,3 +1,4 @@
+const domainCore = require("../public/domain-core");
 const http = require("node:http");
 const fs = require("node:fs");
 const path = require("node:path");
@@ -2522,28 +2523,28 @@ function exportProjects(format, filters) {
 
 async function executeProjectAnalysisTask(input = {}) {
   const observationPlanId = String(input.observationPlanId || "").trim();
-  const project = storage.getProject(input.fullName, { observationPlanId });
+  if (!domainCore.analysisTaskIdentity(input)) throw new Error("Analysis task identity is unknown; submit a new analysis request");
+  storage.getObservationPlan(observationPlanId);
+  const project = input.analysisRequest.project;
   if (!project) throw new Error("Project not found");
   const settings = storage.getSettings(true);
   const provider = activeProvider(settings);
   if (!provider?.apiKey) throw new Error("请先在设置里配置并保存可用的 AI 模型 API Key");
+  if (JSON.stringify(domainCore.analysisProviderIdentity(provider)) !== JSON.stringify(input.analysisRequest.provider)) throw new Error("Analysis provider changed; submit a new analysis request");
   const networkProvider = await assertProviderNetworkTarget(provider);
-  const analysisContext = {
-    method: String(input.method || "balanced").slice(0, 40),
-    methodLabel: String(input.methodLabel || "").slice(0, 80),
-    userNeed: String(input.userNeed || "").slice(0, 1000)
-  };
+  const analysisContext = domainCore.normalizeAnalysisContext(input);
+  const language = input.analysisRequest.language;
   const analysis = await analyzeWithProvider({
     provider: networkProvider,
     project,
-    language: settings.language || "zh",
+    language,
     context: analysisContext
   });
   const savedProject = storage.setAnalysis(input.fullName, analysis.result, {
     raw: analysis.raw,
     provider: provider?.name || "",
     model: provider?.model || "",
-    language: settings.language || "zh",
+    language,
     context: analysisContext,
     observationPlanId
   });
@@ -2628,6 +2629,7 @@ function taskRunner(task = {}) {
 
 function startDurableTask(task) {
   if (!task?.id || runningTasks.has(task.id)) return task;
+  if (task.type === "analysis" && !domainCore.analysisTaskIdentity(task.input)) return storage.updateTask(task.id, { status: "failed", error: "Analysis task identity is unknown; submit a new analysis request", finishedAt: new Date().toISOString() });
   if (activeDurableTaskCount >= MAX_DURABLE_TASK_CONCURRENCY) return storage.updateTask(task.id, { status: "queued" });
   // While GitHub is cooling down the scan stays queued; other task types are
   // unaffected because they do not touch the GitHub API budget.
@@ -2707,8 +2709,9 @@ function pumpDurableTaskQueue() {
 
 function enqueueDurableTask(type, key, input = {}) {
   const existing = storage
-    .listTasks({ type, key, limit: 10 })
-    .find((task) => task.status === "queued" || task.status === "running");
+    .listTasks({ type, key, limit: 120 })
+    .find((task) => ["queued", "running"].includes(task.status) &&
+      (type !== "analysis" || domainCore.analysisTaskIdentity(task.input) === domainCore.analysisTaskIdentity(input)));
   if (existing) {
     if (existing.status === "queued") startDurableTask(existing);
     return publicTask(storage.getTask(existing.id));
@@ -4113,7 +4116,7 @@ async function routeApi(req, res, url) {
   if (req.method === "POST" && url.pathname === "/api/analyze") {
     try {
       const body = await parseBody(req);
-      const project = storage.getProject(body.fullName);
+      const project = storage.getProject(String(body.fullName || "").trim());
       if (!project) {
         sendError(res, 404, "Project not found");
         return;
@@ -4124,13 +4127,8 @@ async function routeApi(req, res, url) {
         sendError(res, 400, "请先在设置里配置并保存可用的 AI 模型 API Key");
         return;
       }
-      const task = enqueueDurableTask("analysis", `analysis:${String(body.fullName || "").toLowerCase()}`, {
-        fullName: String(body.fullName || "").slice(0, 240),
-        method: String(body.method || "balanced").slice(0, 40),
-        methodLabel: String(body.methodLabel || "").slice(0, 80),
-        userNeed: String(body.userNeed || "").slice(0, 1000),
-        observationPlanId: storage.getObservationPlan().id
-      });
+      const input = domainCore.createAnalysisTaskInput(body, storage.getObservationPlan().id, project, provider, settings.language || "zh");
+      const task = enqueueDurableTask("analysis", domainCore.analysisTaskKey(input), input);
       sendJson(res, 202, { status: "started", task });
     } catch (error) {
       sendError(res, 400, error.message);

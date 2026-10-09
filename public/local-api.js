@@ -2126,6 +2126,7 @@
     const secrets = await getSecrets();
     const provider = activeProvider(snapshot, secrets);
     if (!provider.apiKey) throw new Error("请先在设置里配置并保存可用的 AI 模型 API Key");
+    if (options.analysisProvider && JSON.stringify(domainCore.analysisProviderIdentity(provider)) !== JSON.stringify(options.analysisProvider)) throw new Error("Analysis provider changed; submit a new analysis request");
     let response;
     try {
       const planRequest = options.kind === "plan";
@@ -2191,16 +2192,14 @@
     };
   }
 
-  async function analyzeProjectWithModel(snapshot, body = {}, sourceProject = null) {
+  async function analyzeProjectWithModel(snapshot, body = {}) {
     const planId = String(body.observationPlanId || snapshot.activeObservationPlanId || "default");
     const key = projectKey(body.fullName);
-    const project = sourceProject?.fullName ? withUserState(sourceProject, snapshot, planId) : await hydratedProject(snapshot, key, planId);
+    if (!domainCore.analysisTaskIdentity(body)) throw new Error("Analysis task identity is unknown; submit a new analysis request");
+    if (!snapshot.store.observationPlans?.[planId]) throw new Error("Observation plan not found");
+    const project = body.analysisRequest.project;
     if (!project?.fullName) throw new Error("Project not found");
-    const context = {
-      method: String(body.method || "balanced").slice(0, 40),
-      methodLabel: String(body.methodLabel || "").slice(0, 80),
-      userNeed: String(body.userNeed || "").slice(0, 1000)
-    };
+    const context = domainCore.normalizeAnalysisContext(body);
     const { json, raw, provider } = await callModelJson(snapshot, [
       {
         role: "system",
@@ -2223,7 +2222,7 @@
           context
         })
       }
-    ]);
+    ], { analysisProvider: body.analysisRequest.provider });
     const analysis = normalizeBrowserAnalysis(json, project, context);
     analysis.provider = provider.name || provider.id || "browser-direct";
     analysis.model = provider.model || "";
@@ -2577,7 +2576,7 @@
     if (task.type === "scan") {
       return { status: "completed", scan: await runBrowserScan(snapshot, task.input?.observationPlanId, task) };
     }
-    if (task.type === "analysis") return analyzeProjectWithModel(snapshot, task.input, await projectForKey(snapshot, task.input.fullName));
+    if (task.type === "analysis") return analyzeProjectWithModel(snapshot, task.input);
     if (task.type === "plan-generation") return generatePlanWithModel(snapshot, task.input);
     throw new Error(`Unsupported task type: ${task.type}`);
   }
@@ -2588,6 +2587,13 @@
 
   function startLocalTask(snapshot, task) {
     if (!task?.id || localTaskPromises.has(task.id)) return;
+    if (task.type === "analysis" && !domainCore.analysisTaskIdentity(task.input)) {
+      task.status = "failed";
+      task.error = "Analysis task identity is unknown; submit a new analysis request";
+      task.finishedAt = task.updatedAt = nowIso();
+      saveSnapshot(snapshot).catch(() => {});
+      return;
+    }
     // A scan stays queued (not failed) while GitHub is cooling down; the next
     // queue pump after the countdown expires starts it for real.
     if (task.type === "scan") {
@@ -2652,7 +2658,8 @@
 
   async function enqueueLocalTask(snapshot, type, key, input = {}) {
     const existing = Object.values(snapshot.store.tasks || {}).find(
-      (task) => task.type === type && task.key === key && ["queued", "running"].includes(task.status)
+      (task) => task.type === type && task.key === key && ["queued", "running"].includes(task.status) &&
+        (type !== "analysis" || domainCore.analysisTaskIdentity(task.input) === domainCore.analysisTaskIdentity(input))
     );
     if (existing) {
       startLocalTask(snapshot, existing);
@@ -3544,12 +3551,11 @@
       return { status: "started", observationPlanId: activeId, task: publicLocalTask(task) };
     }
     if (method === "POST" && url.pathname === "/api/analyze") {
-      const task = await enqueueLocalTask(snapshot, "analysis", `analysis:${projectKey(body.fullName)}`, {
-        fullName: String(body.fullName || "").slice(0, 240),
-        method: String(body.method || "balanced").slice(0, 40),
-        userNeed: String(body.userNeed || "").slice(0, 1000),
-        observationPlanId: activeId
-      });
+      const project = await hydratedProject(snapshot, projectKey(String(body.fullName || "").trim()), activeId);
+      if (!project?.fullName) throw new Error("Project not found");
+      const provider = activeProvider(snapshot, await getSecrets());
+      const input = domainCore.createAnalysisTaskInput(body, activeId, project, provider, snapshot.settings.language || "zh");
+      const task = await enqueueLocalTask(snapshot, "analysis", domainCore.analysisTaskKey(input), input);
       return { status: "started", task: publicLocalTask(task) };
     }
     if (method === "POST" && url.pathname === "/api/observation-plans/generate") {

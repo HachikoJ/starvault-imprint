@@ -1,3 +1,4 @@
+const { normalizeAnalysisContext } = require("../../public/domain-core");
 const { fetchWithRetries } = require("./http-client");
 const {
   extractJsonObject,
@@ -34,16 +35,6 @@ function isRequestTimeout(error) {
   return /request timed out|timed out|timeout/i.test(String(error?.message || ""));
 }
 
-// Defense-in-depth against prompt injection via the free-form user need field.
-// Strips control/zero-width chars and chat-template token markers; length is
-// capped separately in normalizeAnalysisContext.
-function sanitizeUserNeed(value) {
-  return String(value || "")
-    .replace(/[\u0000-\u0008\u000B-\u001F\u007F\u200B-\u200D\uFEFF]/g, "")
-    .replace(/<\|[^|]*\|>/g, "")
-    .replace(/\s+/g, " ")
-    .trim();
-}
 
 function activeProvider(settings) {
   const providers = settings.llmProviders || [];
@@ -73,14 +64,6 @@ const ANALYSIS_METHODS = {
   }
 };
 
-function normalizeAnalysisContext(context = {}) {
-  const method = ANALYSIS_METHODS[context.method] ? context.method : "balanced";
-  return {
-    method,
-    methodLabel: context.methodLabel || "",
-    userNeed: sanitizeUserNeed(context.userNeed).slice(0, 1000)
-  };
-}
 
 function projectPrompt(project, language = "zh", context = {}) {
   const analysisContext = normalizeAnalysisContext(context);

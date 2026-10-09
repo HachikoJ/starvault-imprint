@@ -108,3 +108,20 @@ test("camelCase repository names keep domain anchors without admitting arbitrary
   assert.equal(domainCore.planTextMatches("DouyinLiveWebFetcher", "douyin"), true);
   assert.equal(domainCore.planTextMatches("mydouyincopy", "douyin"), false);
 });
+
+
+test("T-12 analysis identity preserves effective input and excludes credentials and irrelevant note state", () => {
+  const provider = { id: "deepseek", model: "fixture", baseUrl: "https://fixture.example/v1", apiKey: "fixture-secret" };
+  const first = domainCore.createAnalysisTaskInput({ fullName: "acme/tool", userNeed: "  ship\n tool " }, "alpha",
+    { fullName: "ACME/Tool", scores: { risk: 5, opportunity: 20 }, note: "Unrelated note", apiKey: "forbidden-project-field" }, provider);
+  const second = domainCore.createAnalysisTaskInput({ userNeed: "ship tool" }, "alpha",
+    { scores: { opportunity: 20, risk: 5 }, fullName: "acme/tool", note: "Changed note" }, { ...provider, apiKey: "rotated-secret" });
+  assert.equal(domainCore.analysisTaskIdentity(first), domainCore.analysisTaskIdentity(second));
+  assert.notEqual(domainCore.analysisTaskIdentity({ ...first, userNeed: "learn tool" }), domainCore.analysisTaskIdentity(first));
+  assert.notEqual(domainCore.analysisTaskIdentity({ ...first, observationPlanId: "beta" }), domainCore.analysisTaskIdentity(first));
+  assert.doesNotMatch(JSON.stringify(first), /secret|apiKey|note/i);
+  for (const baseUrl of ["https://user:secret@fixture.example", "https://fixture.example?key=secret", "https://fixture.example#secret"]) {
+    assert.throws(() => domainCore.createAnalysisTaskInput({}, "alpha", { fullName: "acme/tool" }, { ...provider, baseUrl }), /credentials, query or fragment/);
+  }
+  assert.equal(domainCore.analysisTaskIdentity({ fullName: "acme/tool", observationPlanId: "alpha" }), "");
+});

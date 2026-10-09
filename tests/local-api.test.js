@@ -1542,3 +1542,62 @@ test("a long analysis preserves edits, new plans, learning and active selection 
   assert.deepEqual(persisted.store.memory, persisted.store.observationPlans.other.memory);
   assert.equal(persisted.store.observationPlans.other.userData.analysis?.["acme/example"], undefined);
 });
+
+
+test("T-12 browser analysis deduplicates only the same plan and effective request", async () => {
+  let release; const gate = new Promise(resolve => { release = resolve; });
+  const calls = [];
+  const runtime = await createBrowserRuntime(async (url, init) => {
+    const payload = JSON.parse(init.body); calls.push(JSON.parse(payload.messages[1].content));
+    await gate;
+    return response({ choices: [{ message: { content: JSON.stringify({ recommendation: "watch", riskLevel: "low",
+      summary: calls.length ? "Confirmed owning-plan fixture" : "Unused", risks: [], boundaries: [], inspirations: [], validations: [] }) } }] });
+  });
+  const post = (url, body) => runtime.api.handle(url, { method: "POST", body: JSON.stringify(body) });
+  try {
+    await post("/api/settings", { validateProvider: false, llmProviders: [{ id: "deepseek", apiKey: "fixture-t12-secret" }] });
+    await savePlan(runtime.api, { id: "identity-a", name: "Identity A" });
+    await savePlan(runtime.api, { id: "identity-b", name: "Identity B" });
+    await runtime.storage.putProjects([{ fullName: "acme/identity", description: "Captured fixture description", stars: 50,
+      scores: { risk: 12 }, observationPlanMatches: { "identity-a": { planId: "identity-a" }, "identity-b": { planId: "identity-b" } } }]);
+    await post("/api/observation-plans/active", { id: "identity-a" });
+    const a = await post("/api/analyze", { fullName: "acme/identity", userNeed: "  ship  tool ", method: "technical" });
+    const duplicate = await post("/api/analyze", { fullName: " ACME/IDENTITY ", userNeed: "ship\n tool", method: " technical " });
+    assert.equal(duplicate.task.id, a.task.id);
+    const need = await post("/api/analyze", { fullName: "acme/identity", userNeed: "learn tool", method: "technical" });
+    const method = await post("/api/analyze", { fullName: "acme/identity", userNeed: "ship tool", method: "commercial" });
+    assert.notEqual(need.task.id, a.task.id); assert.notEqual(method.task.id, a.task.id);
+    await post("/api/observation-plans/active", { id: "identity-b" });
+    const b = await post("/api/analyze", { fullName: "acme/identity", userNeed: "ship tool", method: "technical" });
+    assert.notEqual(b.task.id, a.task.id);
+    const captured = await runtime.storage.getSnapshot();
+    const inputs = [a, need, method, b].map(item => captured.store.tasks[item.task.id].input);
+    assert.deepEqual(inputs.map(input => input.observationPlanId), ["identity-a", "identity-a", "identity-a", "identity-b"]);
+    assert.ok(inputs.every(input => input.analysisRequest.project.description === "Captured fixture description"));
+    assert.doesNotMatch(JSON.stringify(inputs), /fixture-t12-secret|apiKey|authorization/i);
+    release();
+    for (const item of [a, need, method, b]) { const finished = await waitForTask(runtime.api, item.task.id); assert.equal(finished.status, "completed", finished.error); }
+    const after = await runtime.storage.getSnapshot();
+    assert.equal(after.activeObservationPlanId, "identity-b");
+    assert.ok(after.store.observationPlans["identity-a"].userData.analysis["acme/identity"]);
+    assert.ok(after.store.observationPlans["identity-b"].userData.analysis["acme/identity"]);
+    assert.equal(calls.length, 4);
+    assert.ok(calls.some(row => row.context.userNeed === "learn tool"));
+    assert.ok(calls.some(row => row.context.method === "commercial"));
+  } finally { release(); }
+});
+
+test("T-12 browser legacy running analysis is not rebound or automatically replayed", async () => {
+  let calls = 0; const runtime = await createBrowserRuntime(async () => { calls++; throw new Error("No provider call is allowed"); });
+  await runtime.api.handle("/api/settings", { method: "POST", body: JSON.stringify({ validateProvider: false }) });
+  const snapshot = await runtime.storage.getSnapshot();
+  snapshot.store.tasks = { legacy: { id: "legacy", type: "analysis", key: "analysis:acme/legacy", status: "running",
+    attempts: 1, input: { fullName: "acme/legacy", userNeed: "Old unbound request" }, createdAt: new Date().toISOString() } };
+  await runtime.storage.putSnapshot(snapshot);
+  const result = await runtime.api.handle("/api/tasks/legacy");
+  assert.equal(result.task.status, "failed"); assert.match(result.task.error, /identity is unknown/);
+  await new Promise(resolve => setTimeout(resolve, 10));
+  assert.equal(calls, 0);
+  const persisted = (await runtime.storage.getSnapshot()).store.tasks.legacy;
+  assert.equal(persisted.status, "failed"); assert.equal(persisted.input.observationPlanId, undefined);
+});
