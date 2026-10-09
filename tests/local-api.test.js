@@ -1703,3 +1703,91 @@ test("T-06 atomic enqueue initializes an empty workspace without a demo or saved
   const snapshot = await runtime.storage.getSnapshot();
   assert.ok(snapshot.store.observationPlans.default);assert.equal((await runtime.storage.getTaskLease(task.id)).released, true);
 });
+
+for (const switchDuringScan of [false, true]) {
+  test(`T-13 scan derives only its owning plan when ${switchDuringScan ? 'another tab switches mid-scan' : 'resuming while another plan is active'}`, async () => {
+    let release; const gate = new Promise(resolve => { release = resolve; });
+    let searching; const searchStarted = new Promise(resolve => { searching = resolve; });
+    const runtime = await createBrowserRuntime(async url => {
+      if (new URL(url).pathname === '/search/repositories') {
+        searching(); await gate;
+        return githubResponse(url, { total_count: 2, items: [
+          repository('fixture/alpha-only', 501, { description: 'alpha CLI toolkit' }),
+          repository('fixture/shared', 502, { description: 'alpha beta CLI toolkit' })
+        ] });
+      }
+      return githubResponse(url, {});
+    });
+    const post = (api, url, body) => api.handle(url, { method: 'POST', body: JSON.stringify(body) });
+    try {
+      await post(runtime.api, '/api/settings', { validateProvider: false, githubToken: 'fixture-scope-key' });
+      for (const id of ['alpha', 'beta']) await savePlan(runtime.api, { id, name: id, searchLogic: { baseMode: 'only', keywords: [id], customQueries: [{ key: `${id}-core`, label: id, query: `${id} in:name` }] } });
+      await runtime.storage.putProjects([
+        { fullName: 'fixture/beta-only', description: 'beta CLI toolkit', observationPlanMatches: { beta: { planId: 'beta' } } },
+        { fullName: 'fixture/shared', description: 'alpha beta CLI toolkit', observationPlanMatches: { alpha: { planId: 'alpha' }, beta: { planId: 'beta' } } }
+      ]);
+      const fixture = await runtime.storage.getSnapshot();
+      const a = fixture.store.observationPlans.alpha, b = fixture.store.observationPlans.beta;
+      a.memory.preferences.riskLevels = { low: 20, medium: 20, high: 20, critical: 20 };
+      b.memory.negativePreferences.riskLevels = { low: 20, medium: 20, high: 20, critical: 20 };
+      a.userData.notes['fixture/shared'] = { text: 'Alpha private note', status: 'watch' };
+      a.userData.watchlist['fixture/shared'] = { fullName: 'fixture/shared' };
+      b.userData.notes['fixture/shared'] = { text: 'Beta private note', status: 'pause' };
+      b.userData.dismissedProjects['fixture/shared'] = { fullName: 'fixture/shared', reason: 'Only beta hides this project' };
+      const betaArchive = { observationPlan: { id: 'beta' }, items: [{ fullName: 'fixture/beta-only' }], fixtureMarker: 'Beta archive untouched' };
+      fixture.store.leaderboards.byPlan = { beta: { daily: { '2026-01-01': betaArchive } } };
+      await runtime.storage.putSnapshot(fixture);
+      await activatePlan(runtime.api, switchDuringScan ? 'alpha' : 'beta');
+      const captures = []; const originalPut = runtime.storage.putSnapshot;
+      runtime.storage.putSnapshot = async (snapshot, options) => {
+        if (snapshot.store.scans.some(row => row.observationPlanId === 'alpha')) captures.push(JSON.parse(JSON.stringify(snapshot.summary)));
+        return originalPut(snapshot, options);
+      };
+      const task = await runtime.storage.enqueueTask({ id: `t13-${switchDuringScan}`, type: 'scan', key: 'scan:alpha', status: 'queued', attempts: 0,
+        input: { observationPlanId: 'alpha', mode: 'manual' }, createdAt: new Date().toISOString(), updatedAt: new Date().toISOString() });
+      await runtime.api.handle(`/api/tasks/${task.id}`);
+      await searchStarted;
+      const observer = await createBrowserRuntime(async () => { throw new Error('Observer must not execute owner scan'); }, { reset: false });
+      if (switchDuringScan) await activatePlan(observer.api, 'beta');
+      const mirror = await observer.storage.getSnapshot();
+      mirror.summary = { fixtureMarker: 'Latest beta summary', top: [{ fullName: 'fixture/beta-only' }] };
+      mirror.leaderboard = { ...betaArchive, fixtureMarker: 'Latest beta leaderboard' };
+      await observer.storage.putSnapshot(mirror);
+      release();
+      const completed = await waitForTask(runtime.api, task.id); assert.equal(completed.status, 'completed', completed.error);
+      const after = await observer.storage.getSnapshot();
+      const archive = Object.values(after.store.leaderboards.byPlan.alpha.daily)[0];
+      assert.equal(archive.observationPlan.id, 'alpha');
+      assert.deepEqual(archive.items.map(row => row.fullName).sort(), ['fixture/alpha-only', 'fixture/shared']);
+      assert.equal(archive.items.find(row => row.fullName === 'fixture/shared').note, 'Alpha private note');
+      assert.equal(archive.items.find(row => row.fullName === 'fixture/shared').watched, true);
+      assert.ok(archive.items.every(row => row.scoreParts.memoryBoost > 0), 'Alpha preferences determine its ranks');
+      assert.equal(archive.memory.preferences.riskLevels.low, 20);
+      assert.ok(captures.some(row => row.totalProjects === 2 && row.watched === 1 && row.top.map(item => item.fullName).sort().join() === 'fixture/alpha-only,fixture/shared'));
+      assert.deepEqual(after.store.leaderboards.byPlan.beta.daily['2026-01-01'], betaArchive);
+      assert.equal(after.activeObservationPlanId, 'beta');assert.equal(after.settings.activeObservationPlanId, 'beta');
+      assert.deepEqual(after.summary, mirror.summary);assert.deepEqual(after.leaderboard, mirror.leaderboard);
+      assert.equal(after.store.observationPlans.beta.userData.notes['fixture/shared'].text, 'Beta private note');
+      assert.equal(after.store.scans[0].observationPlanId, 'alpha');
+    } finally { release(); }
+  });
+}
+
+
+for (const mismatch of [false, true]) {
+  test(`T-13 ${mismatch ? 'mismatched checkpoint' : 'unknown owning plan'} never infers active selection or erases evidence`, async () => {
+    let calls = 0; const runtime = await createBrowserRuntime(async url => { calls++; return githubResponse(url, {}); });
+    await runtime.api.handle('/api/settings', { method: 'POST', body: JSON.stringify({ validateProvider: false, githubToken: 'fixture-legacy-scan' }) });
+    await savePlan(runtime.api, { id: 'beta', name: 'Beta' });await activatePlan(runtime.api, 'beta');
+    calls = 0;
+    const task = await runtime.storage.enqueueTask({ id: `unknown-scan-${mismatch}`, type: 'scan', key: 'scan:legacy', status: 'queued', attempts: 0,
+      input: mismatch ? { observationPlanId: 'beta' } : {}, checkpoint: mismatch ? { planId: 'default', externalCompleted: true } : null,
+      createdAt: new Date().toISOString(), updatedAt: new Date().toISOString() });
+    const evidence = { projects: [], errors: ['Historical evidence; do not infer its owner'] };
+    await runtime.storage.putTaskArtifact(task.id, 'external-discovery', evidence);
+    const finished = await waitForTask(runtime.api, task.id);
+    assert.equal(finished.status, 'failed');assert.match(finished.error, mismatch ? /checkpoint.*owning plan.*match/i : /owning plan.*unknown/i);
+    assert.equal(calls, 0);assert.deepEqual(await runtime.storage.getTaskArtifacts(task.id), { 'external-discovery': evidence });
+    assert.equal((await runtime.storage.getSnapshot()).activeObservationPlanId, 'beta');
+  });
+}

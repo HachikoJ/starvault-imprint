@@ -717,8 +717,8 @@
     };
   }
 
-  function projectMatchesPlan(project, snapshot) {
-    const plan = activePlan(snapshot);
+  function projectMatchesPlan(project, snapshot, planId = "") {
+    const plan = planById(snapshot, planId);
     const matches = project.observationPlanMatches || project.observationMatches || [];
     const matchIds = Array.isArray(matches)
       ? matches.map((item) => String(typeof item === "string" ? item : item?.planId || item?.id || "")).filter(Boolean)
@@ -779,10 +779,10 @@
     return parts.some((part) => haystack.includes(part));
   }
 
-  async function projectsForActivePlan(snapshot) {
+  async function projectsForActivePlan(snapshot, planId = snapshot.activeObservationPlanId || "default") {
     const db = storage();
-    if (db?.getProjectsByPlan) return db.getProjectsByPlan(snapshot.activeObservationPlanId || "default");
-    return Object.values(snapshot.store.projects || {});
+    if (db?.getProjectsByPlan) return db.getProjectsByPlan(planId);
+    return Object.values(snapshot.store.projects || {}).filter(project => projectMatchesPlan(project, snapshot, planId));
   }
 
   async function projectsForKeys(snapshot, keys = []) {
@@ -802,10 +802,10 @@
     return project?.fullName ? withUserState(project, snapshot, planId) : null;
   }
 
-  function filterProjects(snapshot, params = {}, sourceProjects = null) {
+  function filterProjects(snapshot, params = {}, sourceProjects = null, planId = "") {
     let items = (sourceProjects || Object.values(snapshot.store.projects || {}))
-      .map((project) => withUserState(project, snapshot))
-      .filter((project) => projectMatchesPlan(project, snapshot));
+      .map((project) => withUserState(project, snapshot, planId))
+      .filter((project) => projectMatchesPlan(project, snapshot, planId));
 
     if (params.includeDismissed !== "true") items = items.filter((project) => !project.dismissed);
     if (params.q) {
@@ -831,7 +831,7 @@
     for (const tag of [params.semanticProblem, params.semanticAudience, params.semanticShape]) {
       if (tag && tag !== "all") items = items.filter((project) => tagMatches(project, tag));
     }
-    sortProjects(items, params.sort || snapshot.settings?.defaultSort || "opportunity", memoryForPlan(snapshot));
+    sortProjects(items, params.sort || snapshot.settings?.defaultSort || "opportunity", memoryForPlan(snapshot, planId));
     return items;
   }
 
@@ -934,13 +934,13 @@
     };
   }
 
-  function summary(snapshot, params = {}, sourceProjects = null) {
-    const planProjects = sourceProjects || Object.values(snapshot.store.projects || {}).filter((project) => projectMatchesPlan(project, snapshot));
-    const activePlanId = snapshot.activeObservationPlanId || "default";
+  function summary(snapshot, params = {}, sourceProjects = null, planId = snapshot.activeObservationPlanId || "default") {
+    const planProjects = sourceProjects || Object.values(snapshot.store.projects || {}).filter((project) => projectMatchesPlan(project, snapshot, planId));
+    const activePlanId = planId;
     // Scans are per observation plan; a plan that was never scanned must not
     // inherit another plan's latest scan (or its "已完成" state).
     const planScans = (snapshot.store.scans || []).filter((scan) => (scan.observationPlanId || "default") === activePlanId);
-    const items = filterProjects(snapshot, { ...params, limit: "all" }, planProjects);
+    const items = filterProjects(snapshot, { ...params, limit: "all" }, planProjects, planId);
     const counts = {};
     const languages = {};
     const licenses = {};
@@ -960,7 +960,7 @@
       poolTotal: items.length,
       poolLimit: items.length,
       poolSort: params.sort || snapshot.settings?.defaultSort || "opportunity",
-      watched: Object.keys(activeUserData(snapshot).watchlist || {}).length,
+      watched: Object.keys(userDataForPlan(snapshot, planId).watchlist || {}).length,
       scans: planScans.slice(0, 10),
       lastScan: planScans[0] || null,
       hasScan: planScans.length > 0,
@@ -1020,11 +1020,11 @@
     return { score: Number((base + trendBoost + memoryBoost).toFixed(2)), memoryBoost: Number(memoryBoost.toFixed(2)), starDelta, forkDelta };
   }
 
-  function buildLeaderboard(snapshot, params = {}, sourceProjects = null) {
+  function buildLeaderboard(snapshot, params = {}, sourceProjects = null, planId = snapshot.activeObservationPlanId || "default") {
     const limit = Math.max(5, Math.min(Number(params.limit || 20), 30));
     const period = ["daily", "weekly", "monthly", "all"].includes(params.period) ? params.period : "daily";
-    const memory = memoryForPlan(snapshot);
-    const ranked = filterProjects(snapshot, { sort: "opportunity", limit: "all" }, sourceProjects)
+    const memory = memoryForPlan(snapshot, planId);
+    const ranked = filterProjects(snapshot, { sort: "opportunity", limit: "all" }, sourceProjects, planId)
       .map((project) => ({ project, parts: browserLeaderboardScore(project, period, memory) }))
       .sort((a, b) => b.parts.score - a.parts.score || Number(b.project.stars || 0) - Number(a.project.stars || 0));
     const items = ranked.slice(0, limit).map(({ project, parts }, index) => ({
@@ -1034,7 +1034,6 @@
         rankChange: null,
         scoreParts: parts
       }));
-    const planId = snapshot.activeObservationPlanId || "default";
     const dailyArchive = planId === "default" ? snapshot.store.leaderboards?.daily || {} : snapshot.store.leaderboards?.byPlan?.[planId]?.daily || {};
     return {
       period,
@@ -1043,7 +1042,7 @@
       limit,
       discoveryCoverage: clone((snapshot.store.scans || []).find((scan) => String(scan.observationPlanId || "default") === planId)?.discoveryCoverage),
       memory,
-      observationPlan: publicPlan(activePlan(snapshot), snapshot.activeObservationPlanId, false),
+      observationPlan: publicPlan(planById(snapshot, planId), snapshot.activeObservationPlanId, false),
       items,
       archiveDates: Object.keys(dailyArchive).sort().reverse()
     };
@@ -1943,11 +1942,10 @@
     const planId = String(requestedPlanId || snapshot.activeObservationPlanId || "default");
     const plan = snapshot.store.observationPlans?.[planId];
     if (!plan) throw new Error("扫描任务对应的观察方案已不存在。");
-    await validateGithubScanToken(snapshot);
     if (task?.checkpoint?.planId && task.checkpoint.planId !== planId) {
-      await storage().clearTaskArtifacts?.(task.id, taskWriteOptions(snapshot));
-      task.checkpoint = null;
+      throw Object.assign(new Error("Scan task checkpoint and owning plan do not match; submit a new scan"), { code: "SCAN_PLAN_MISMATCH" });
     }
+    await validateGithubScanToken(snapshot);
     let checkpoint = initialBrowserScanCheckpoint(task, planId);
     const completedScan = checkpoint.stage === "completed" && checkpoint.scanId
       ? (snapshot.store.scans || []).find((item) => item.id === checkpoint.scanId)
@@ -2086,10 +2084,11 @@
       relaxations
     };
     snapshot.store.scans = [scan, ...(snapshot.store.scans || []).filter((item) => item.id !== scan.id)].slice(0, 120);
-    const planProjects = await projectsForActivePlan(snapshot);
+    const planProjects = await projectsForActivePlan(snapshot, plan.id);
     snapshot.counts = { ...(snapshot.counts || {}), projects: await storage().countProjects() };
-    snapshot.summary = summary(snapshot, {}, planProjects);
-    snapshot.leaderboard = buildLeaderboard(snapshot, { limit: 20 }, planProjects);
+    snapshot.summary = summary(snapshot, {}, planProjects, plan.id);
+    snapshot.leaderboard = buildLeaderboard(snapshot, { limit: 20 }, planProjects, plan.id);
+    if (snapshot.leaderboard.observationPlan?.id !== plan.id || snapshot.leaderboard.items.some(project => !projectMatchesPlan(project, snapshot, plan.id))) throw new Error("Scan archive does not belong to its owning observation plan");
     const archiveDate = scannedAt.slice(0, 10);
     if (plan.id === "default") {
       snapshot.store.leaderboards.daily = snapshot.store.leaderboards.daily || {};
@@ -2609,7 +2608,9 @@
 
   async function executeLocalTask(snapshot, task) {
     if (task.type === "scan") {
-      return { status: "completed", scan: await runBrowserScan(snapshot, task.input?.observationPlanId, task) };
+      const planId = String(task.input?.observationPlanId || task.checkpoint?.planId || "").trim();
+      if (!planId) throw Object.assign(new Error("Scan task owning plan is unknown; submit a new scan"), { code: "SCAN_PLAN_UNKNOWN" });
+      return { status: "completed", scan: await runBrowserScan(snapshot, planId, task) };
     }
     if (task.type === "analysis") return analyzeProjectWithModel(snapshot, task.input);
     if (task.type === "plan-generation") return generatePlanWithModel(snapshot, task.input);
@@ -2617,7 +2618,7 @@
   }
 
   async function clearLocalTaskArtifacts(task, snapshot) {
-    if (task?.type === "scan") await storage().clearTaskArtifacts?.(task.id, taskWriteOptions(snapshot));
+    if (task?.type === "scan" && !["SCAN_PLAN_UNKNOWN", "SCAN_PLAN_MISMATCH"].includes(task.errorCode)) await storage().clearTaskArtifacts?.(task.id, taskWriteOptions(snapshot));
   }
 
   async function startLocalTask(snapshot, task) {
@@ -2661,6 +2662,7 @@
           ownedTask.status = "failed";
           ownedTask.result = null;
           ownedTask.error = error?.message || "Task failed";
+          ownedTask.errorCode = error?.code || "";
           ownedTask.cooldown = error?.cooldown?.active ? clone(error.cooldown) : isGithubCooldownError(error) ? clone(error.cooldown) : null;
           if ((ownedTask.type === "analysis" || ownedTask.type === "plan-generation") && isProviderAuthError(error)) {
             const provider = activeProvider(ownedSnapshot, await getSecrets());

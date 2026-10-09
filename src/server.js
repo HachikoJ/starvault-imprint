@@ -2621,7 +2621,12 @@ async function executeObservationPlanGenerationTask(input = {}) {
 }
 
 function taskRunner(task = {}) {
-  if (task.type === "scan") return () => runScan({ ...(task.input || {}), taskId: task.id, checkpoint: task.checkpoint || null });
+  if (task.type === "scan") return () => {
+    const planId = String(task.input?.observationPlanId || task.checkpoint?.planId || "").trim();
+    if (!planId) throw new Error("Scan task owning plan is unknown; submit a new scan");
+    if (task.checkpoint?.planId && task.checkpoint.planId !== planId) throw new Error("Scan task checkpoint and owning plan do not match; submit a new scan");
+    return runScan({ ...(task.input || {}), observationPlanId: planId, taskId: task.id, checkpoint: task.checkpoint || null });
+  };
   if (task.type === "analysis") return () => executeProjectAnalysisTask(task.input || {});
   if (task.type === "plan-generation") return () => executeObservationPlanGenerationTask(task.input || {});
   return null;

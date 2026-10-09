@@ -32,6 +32,8 @@ test('T-12 Node API binds distinct analysis requests and refuses unknown legacy 
   storage.upsertProjects([project],{observationPlanId:'identity-b'});
   storage.updateSettings({ llmProviders:[{id:'deepseek',name:'Fixture',enabled:true,baseUrl:'https://127.0.0.1:41991/model',model:'fixture',apiKey:'fixture-t12-node-secret'}] });
   const legacy=storage.createTask({type:'analysis',key:'analysis:acme/identity',status:'running',attempts:1,input:{fullName:'acme/identity',userNeed:'Old unbound need'}});
+  const legacyScan=storage.createTask({type:'scan',key:'scan:legacy',status:'queued',input:{}});
+  const mismatchedScan=storage.createTask({type:'scan',key:'scan:mismatch',status:'queued',input:{observationPlanId:'identity-b'},checkpoint:{planId:'identity-a',stage:'github-search'}});
   initializeRuntime();
   await new Promise(resolve=>server.listen(0,'127.0.0.1',resolve));
   const base=`http://127.0.0.1:${server.address().port}`;
@@ -68,4 +70,7 @@ test('T-12 Node API binds distinct analysis requests and refuses unknown legacy 
   assert.ok(storage.getProject('acme/identity',{observationPlanId:'identity-a'}).analysis);
   assert.ok(storage.getProject('acme/identity',{observationPlanId:'identity-b'}).analysis);
   assert.equal(storage.getTask(legacy.id).input.observationPlanId,undefined);
+  assert.equal(storage.getTask(legacyScan.id).status,'failed');assert.match(storage.getTask(legacyScan.id).error,/owning plan.*unknown/i);
+  assert.equal(storage.getTask(mismatchedScan.id).status,'failed');assert.match(storage.getTask(mismatchedScan.id).error,/checkpoint.*owning plan.*match/i);
+  assert.equal(storage.getTask(mismatchedScan.id).checkpoint.planId,'identity-a');
 });

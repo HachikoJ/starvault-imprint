@@ -777,6 +777,14 @@
       const activeId = merged.activeObservationPlanId || merged.settings?.activeObservationPlanId || "default";
       merged.activeObservationPlanId = plans[activeId] ? activeId : "default";
       merged.settings = { ...(merged.settings || {}), activeObservationPlanId: merged.activeObservationPlanId };
+      if (guarded?.task.type === "scan" && guarded.task.input?.observationPlanId !== merged.activeObservationPlanId) {
+        // Background archives are plan-owned; these two fields mirror the
+        // currently selected plan and must retain its latest concurrent view.
+        for (const key of ["summary", "leaderboard"]) {
+          if (Object.prototype.hasOwnProperty.call(current, key)) merged[key] = cloneValue(current[key]);
+          else delete merged[key];
+        }
+      }
       if (plans[merged.activeObservationPlanId]) merged.store.memory = cloneValue(plans[merged.activeObservationPlanId].memory || {});
       merged.counts = {
         ...(merged.counts || {}),

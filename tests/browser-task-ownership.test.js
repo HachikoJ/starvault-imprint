@@ -76,7 +76,7 @@ test('T-06 real tabs without Web Locks reuse one owner, renew, and fence a late 
   assert.equal(saved.store.observationPlans.default.userData.analysis['fixture/owner'],undefined);
   assert.equal(saved.store.observationPlans.default.memory.stats.eventCounts.ai_analyze||0,0);
 });
-test('T-06 closing owners allows expired readonly scan recovery but never automatic paid replay', {timeout:65000},async t=>{
+test('T-06/T-13 closing owners recovers the owning scan while another plan is active without paid replay', {timeout:65000},async t=>{
   const f=await fixture(t);
   const started=await f.post(f.a,'/api/analyze',{fullName:'fixture/owner',userNeed:'Unknown closing-owner result'});
   await f.wait(()=>f.model.length===1);
@@ -88,6 +88,20 @@ test('T-06 closing owners allows expired readonly scan recovery but never automa
   await f.wait(()=>f.search.length===1);
   const aLease=await f.lease(f.b,started.task.id),sLease=await f.lease(f.b,scan.task.id);
   await f.a.close();await scanOwner.close();
+  await f.post(f.b,'/api/observation-plans',{plan:{id:'observer-beta',name:'Observer Beta',searchLogic:{baseMode:'only',keywords:['beta'],customQueries:[{key:'beta-core',label:'Beta',query:'beta in:name'}]}}});
+  await f.post(f.b,'/api/observation-plans/active',{id:'observer-beta'});
+  await f.b.evaluate(async()=>{
+    await window.StarVaultIndexedDB.putProjects([{fullName:'fixture/beta-only',description:'beta toolkit',observationPlanMatches:{'observer-beta':{planId:'observer-beta'}}}]);
+    const snapshot=await window.StarVaultIndexedDB.getSnapshot();
+    snapshot.store.observationPlans.ownerprobe.memory.preferences.riskLevels={low:20,medium:20,high:20,critical:20};
+    snapshot.store.observationPlans['observer-beta'].memory.negativePreferences.riskLevels={low:20,medium:20,high:20,critical:20};
+    const archive={observationPlan:{id:'observer-beta'},items:[{fullName:'fixture/beta-only'}],fixtureMarker:'Beta archive'};
+    snapshot.store.leaderboards.byPlan['observer-beta']={daily:{'2026-01-01':archive}};
+    snapshot.summary={fixtureMarker:'Latest beta summary',top:[{fullName:'fixture/beta-only'}]};
+    snapshot.leaderboard={...archive,fixtureMarker:'Latest beta leaderboard'};
+    await window.StarVaultIndexedDB.putSnapshot(snapshot);
+  });
+  const betaBefore=await f.b.evaluate(()=>window.StarVaultIndexedDB.getSnapshot());
   const until=Math.max(aLease.expiresAt,sLease.expiresAt)+150;
   await new Promise(resolve=>setTimeout(resolve,Math.max(0,until-Date.now())));
   const unknown=await f.task(f.b,started.task.id);assert.equal(unknown.task.status,'failed');assert.match(unknown.task.error,/outcome is unknown/);
@@ -100,6 +114,13 @@ test('T-06 closing owners allows expired readonly scan recovery but never automa
   const owned=await f.b.evaluate(()=>window.StarVaultIndexedDB.getProjectsByPlan('ownerprobe'));
   assert.deepEqual(owned.map(row=>row.fullName),['fixture/ownerprobe']);
   assert.equal((await f.lease(f.b,scan.task.id)).released,true);
+  const after=await f.b.evaluate(()=>window.StarVaultIndexedDB.getSnapshot());
+  const archive=Object.values(after.store.leaderboards.byPlan.ownerprobe.daily)[0];
+  assert.equal(archive.observationPlan.id,'ownerprobe');assert.deepEqual(archive.items.map(row=>row.fullName),['fixture/ownerprobe']);
+  assert.equal(archive.memory.preferences.riskLevels.low,20);assert.ok(archive.items[0].scoreParts.memoryBoost>0);
+  assert.equal(after.activeObservationPlanId,'observer-beta');assert.equal(after.settings.activeObservationPlanId,'observer-beta');
+  assert.deepEqual(after.store.leaderboards.byPlan['observer-beta'],betaBefore.store.leaderboards.byPlan['observer-beta']);
+  assert.deepEqual(after.summary,betaBefore.summary);assert.deepEqual(after.leaderboard,betaBefore.leaderboard);
   const unknownRaw=await f.b.evaluate(id=>window.StarVaultIndexedDB.getSnapshot().then(s=>s.store.tasks[id]),started.task.id);
   assert.equal(unknownRaw.recoveryRequired,true);assert.equal(unknownRaw.errorCode,'TASK_OUTCOME_UNKNOWN');
 });
