@@ -707,6 +707,7 @@
     const note = userData.notes?.[key] || {};
     return {
       ...project,
+      ...domainCore.watcherFact(project),
       watched: Boolean(userData.watchlist?.[key]),
       note: note.text || "",
       triageStatus: note.status || "",
@@ -931,6 +932,7 @@
       language: project.language,
       stars: project.stars,
       forks: project.forks,
+      ...domainCore.watcherFact(project),
       openIssues: project.openIssues,
       pushedAt: project.pushedAt,
       firstSeenAt: project.firstSeenAt,
@@ -1577,7 +1579,7 @@
       topics: Array.isArray(repo.topics) ? repo.topics : [],
       stars: repo.stargazers_count || 0,
       forks: repo.forks_count || 0,
-      watchers: repo.watchers_count || 0,
+      ...domainCore.githubWatchers(repo),
       openIssues: repo.open_issues_count || 0,
       defaultBranch: repo.default_branch || "main",
       createdAt: repo.created_at || "",
@@ -2721,6 +2723,7 @@
     const localized = (value = {}) => language === "zh" ? value.labelZh || value.label || value.labelEn || "" : value.labelEn || value.label || value.labelZh || "";
     const trend = domainCore.describeTrend(project.trend);
     const rawTrend = project.trend || {};
+    const watch = domainCore.watcherFact(project);
     const trendStatus = rawTrend.error || rawTrend.unavailable ? language === "zh" ? "趋势统计失败" : "trend failed"
       : rawTrend.cached === false ? language === "zh" ? "未纳入趋势缓存" : "not in trend cache"
       : rawTrend.pending ? language === "zh" ? "等待扫描更新" : "awaiting scan"
@@ -2746,6 +2749,9 @@
           主题: (project.topics || []).join(" / "),
           Stars: project.stars,
           Forks: project.forks,
+          Watch: watch.watchers,
+          Watch状态: ({ known: "已知", unknown: "未知", legacy: "历史来源未知" })[watch.watchersStatus],
+          Watch来源: watch.watchersSource,
           Issues: project.openIssues,
           "趋势 Stars": trend.stars,
           "趋势 Forks": trend.forks,
@@ -2789,6 +2795,9 @@
           topics: (project.topics || []).join(" / "),
           stars: project.stars,
           forks: project.forks,
+          watchers: watch.watchers,
+          watchersStatus: watch.watchersStatus,
+          watchersSource: watch.watchersSource,
           issues: project.openIssues,
           trendStars: trend.stars,
           trendForks: trend.forks,
@@ -3377,6 +3386,7 @@
       if ((params.period || "daily") === "daily" && params.date && archive[params.date]) {
         return {
           ...clone(archive[params.date], archive[params.date]),
+          items: (archive[params.date].items || []).map(item => ({ ...item, ...domainCore.watcherFact(item) })),
           period: "daily",
           date: params.date,
           memory: memoryForPlan(snapshot),

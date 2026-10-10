@@ -1,4 +1,4 @@
-const { classifyLicensePolicy, externalSignalOutcome } = require("../../public/domain-core");
+const { classifyLicensePolicy, externalSignalOutcome, watcherFact } = require("../../public/domain-core");
 
 const CATEGORY_RULES = [
   {
@@ -1193,7 +1193,7 @@ function scoreRepository(repo, previous = null, externalSignals = []) {
     logScore(stars, 22) +
       logScore(forks, 25) +
       Math.min(18, issues / 8) +
-      Math.min(16, repo.watchers || 0) +
+      Math.min(16, watcherFact(repo).watchers ?? 0) +
       (repo.fork ? -24 : 0)
   );
 

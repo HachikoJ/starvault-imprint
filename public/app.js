@@ -106,6 +106,10 @@ const I18N = {
     stars: "Stars",
     forks: "Forks",
     issues: "Issues",
+    watchSubscribers: "Watch（GitHub 订阅）",
+    watchUnknown: "未知",
+    watchLegacy: "未知（历史来源未确认）",
+    watchKnownSource: "来源：GitHub subscribers_count",
     sort: "排序",
     all: "全部",
     watchOnly: "仅看收藏",
@@ -832,6 +836,10 @@ const I18N = {
     stars: "stars",
     forks: "forks",
     issues: "issues",
+    watchSubscribers: "Watch (GitHub subscribers)",
+    watchUnknown: "Unknown",
+    watchLegacy: "Unknown (legacy source unconfirmed)",
+    watchKnownSource: "Source: GitHub subscribers_count",
     sort: "Sort",
     all: "All",
     watchOnly: "Favorites only",
@@ -8980,6 +8988,12 @@ function renderDetail(project) {
     : "";
   const dataRows = [
     [t("language"), escapeHtml(languageLabel(project.language))],
+    [t("watchSubscribers"), (() => {
+      const watch = window.StarVaultDomainCore.watcherFact(project);
+      return watch.watchersStatus === "known"
+        ? `<span title="${escapeHtml(t("watchKnownSource"))}">${escapeHtml(fmtNumber(watch.watchers))}</span>`
+        : escapeHtml(t(watch.watchersStatus === "legacy" ? "watchLegacy" : "watchUnknown"));
+    })()],
     [t("issues"), escapeHtml(fmtNumber(project.openIssues || 0))],
     [t("updated"), escapeHtml(fmtDate(project.pushedAt || project.updatedAt))],
     [t("projectHomepage"), homepageUrl ? `<a href="${escapeHtml(homepageUrl)}" target="_blank" rel="noopener noreferrer">${escapeHtml(homepageLabel)}</a>` : `<span>${escapeHtml(t("noHomepage"))}</span>`]

@@ -233,6 +233,7 @@ function demoRepositoryRecord(raw) {
     stargazers_count: Number(raw.stargazers_count || 0),
     forks_count: Number(raw.forks_count || 0),
     watchers_count: Number(raw.watchers_count || 0),
+    ...(Number.isInteger(raw.subscribers_count) && raw.subscribers_count >= 0 ? { subscribers_count: raw.subscribers_count } : {}),
     open_issues_count: Number(raw.open_issues_count || 0),
     default_branch: raw.default_branch || "",
     created_at: raw.created_at || "",

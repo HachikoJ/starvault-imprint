@@ -209,6 +209,21 @@
       signals, errors: uniqueErrors };
   }
 
+  function githubWatchers(repository = {}) {
+    const value = repository.subscribers_count;
+    const known = Number.isInteger(value) && value >= 0;
+    return { watchers: known ? value : null, watchersSource: known ? "github-subscribers" : "unknown", watchersStatus: known ? "known" : "unknown" };
+  }
+
+  function watcherFact(project = {}) {
+    if (project.watchersSource === "github-subscribers" && Number.isInteger(project.watchers) && project.watchers >= 0) {
+      return { watchers: project.watchers, watchersSource: "github-subscribers", watchersStatus: "known" };
+    }
+    const legacy = project.watchersSource === "legacy-unknown" || project.watchersStatus === "legacy" ||
+      (!project.watchersSource && project.watchers !== undefined && project.watchers !== null);
+    return { watchers: null, watchersSource: legacy ? "legacy-unknown" : "unknown", watchersStatus: legacy ? "legacy" : "unknown" };
+  }
+
   function measurementTime(value) {
     if (typeof value !== "string") return NaN;
     const parts = /^(\d{4})-(\d{2})-(\d{2})T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})$/i.exec(value);
@@ -924,6 +939,8 @@
     assertAnalysisDelivery,
     validateAnalysisResult,
     externalSignalOutcome,
+    githubWatchers,
+    watcherFact,
     describeTrend,
     snapshotTrend,
     snapshotGrowth,

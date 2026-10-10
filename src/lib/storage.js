@@ -2,7 +2,7 @@ const fs = require("node:fs");
 const path = require("node:path");
 const { createHash, randomUUID } = require("node:crypto");
 const { classifyRepository, inferUseCase } = require("./scoring");
-const { assignProfileIds, describeTrend, projectProfileMatches, snapshotGrowth } = require("../../public/domain-core");
+const { assignProfileIds, describeTrend, projectProfileMatches, snapshotGrowth, watcherFact } = require("../../public/domain-core");
 const { buildQueryProfiles } = require("./github");
 const { getSqliteRevision, inheritSqliteSnapshot, isSqlitePath, readSqliteStore, snapshotRevision, withSqliteTransaction, writeSqliteStore } = require("./sqlite-store");
 
@@ -1440,6 +1440,7 @@ function withComputedUseCase(project) {
   const licensePolicy = normalizeProjectLicensePolicy(project.licensePolicy);
   const computed = {
     ...project,
+    ...watcherFact(project),
     licensePolicy,
     category,
     useCase: inferUseCase({ ...project, category }, category)
@@ -2208,6 +2209,7 @@ function leaderboardItem(project, rank, period, memory = {}, previousRanks = new
     language: project.language,
     stars: project.stars,
     forks: project.forks,
+    ...watcherFact(project),
     licensePolicy: project.licensePolicy,
     scores: project.scores,
     signals: project.signals,
@@ -2237,6 +2239,7 @@ function hydrateLeaderboardRecordState(item, userData = {}) {
   const note = userData.notes?.[key] || {};
   return {
     ...item,
+    ...watcherFact(item),
     note: note.text || item.note || "",
     triageStatus: note.status || item.triageStatus || "",
     noteUpdatedAt: note.updatedAt || item.noteUpdatedAt || "",
@@ -5392,6 +5395,7 @@ function createStorage(filePath) {
       language: project.language,
       stars: project.stars,
       forks: project.forks,
+      ...watcherFact(project),
       openIssues: project.openIssues,
       pushedAt: project.pushedAt,
       firstSeenAt: project.firstSeenAt,

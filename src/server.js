@@ -2485,6 +2485,12 @@ const EXPORT_FIELDS = [
   ["topics", "主题", "topics", (project) => (project.topics || []).join(" / ")],
   ["stars", "Stars", "stars", (project) => project.stars],
   ["forks", "Forks", "forks", (project) => project.forks],
+  ["watchers", "Watch", "watchers", (project) => domainCore.watcherFact(project).watchers],
+  ["watchersStatus", "Watch状态", "watchersStatus", (project, language) => {
+    const status = domainCore.watcherFact(project).watchersStatus;
+    return language === "zh" ? ({ known: "已知", unknown: "未知", legacy: "历史来源未知" })[status] : status;
+  }],
+  ["watchersSource", "Watch来源", "watchersSource", (project) => domainCore.watcherFact(project).watchersSource],
   ["openIssues", "Issues", "issues", (project) => project.openIssues],
   ["trendStars", "趋势 Stars", "trendStars", (project) => exportTrendValue(project, "stars")],
   ["trendForks", "趋势 Forks", "trendForks", (project) => exportTrendValue(project, "forks")],

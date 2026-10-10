@@ -2,6 +2,7 @@ const { fetchWithRetries, parseRetryAfter, defaultRetryDelay } = require("./http
 const {
   completePlanQuery,
   escapeRegExp,
+  githubWatchers,
   isLowValuePlanContainer,
   legacyProfileKey,
   mergeProfileMatches,
@@ -1242,7 +1243,7 @@ function normalizeRepo(item, profile) {
     topics: item.topics || [],
     stars: item.stargazers_count || 0,
     forks: item.forks_count || 0,
-    watchers: item.watchers_count || 0,
+    ...githubWatchers(item),
     openIssues: item.open_issues_count || 0,
     defaultBranch: item.default_branch || "",
     createdAt: item.created_at,
