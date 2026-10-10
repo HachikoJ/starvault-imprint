@@ -3268,7 +3268,12 @@
       const persistence = await storage().storageStatus?.() || { supported: false, persisted: false };
       const lastPortableExportAt = String((await storage().getValue?.(LAST_PORTABLE_EXPORT_KEY)) || "");
       const backupDue = !lastPortableExportAt || Date.now() - new Date(lastPortableExportAt).getTime() > 7 * 86400000;
-      return { port: "", host: location.host, runtime: "browser-indexeddb", githubConfigured: Boolean(secrets.githubToken), tavilyConfigured: Boolean(secrets.tavilyKey), exaConfigured: Boolean(secrets.exaKey), scanHour: 8, scanMaxRepos: 800, githubSearchPages: 2, githubTrendLimit: 80, githubTrendingMaxRepos: 60, githubTrendingPerPeriod: 25, storagePersistence: persistence, lastPortableExportAt, backupDue };
+      return { port: "", host: location.host, runtime: options.readOnlyCache ? "node-offline-cache" : "browser-indexeddb",
+        schedulerEnabled: options.readOnlyCache ? null : false,
+        scanCapabilities: { manual: !options.readOnlyCache, scheduled: options.readOnlyCache ? null : false },
+        timeZone: "", scanHour: null,
+        githubConfigured: Boolean(secrets.githubToken), tavilyConfigured: Boolean(secrets.tavilyKey), exaConfigured: Boolean(secrets.exaKey),
+        scanMaxRepos: 800, githubSearchPages: 2, githubTrendLimit: 80, githubTrendingMaxRepos: 60, githubTrendingPerPeriod: 25, storagePersistence: persistence, lastPortableExportAt, backupDue };
     }
     if (method === "GET" && url.pathname === "/api/settings") return settingsResponse(snapshot, secrets, url.searchParams.get("reveal") || "");
     if (method === "POST" && url.pathname === "/api/settings") {

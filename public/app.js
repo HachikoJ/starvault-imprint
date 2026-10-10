@@ -53,7 +53,10 @@ const I18N = {
     runScanHint: "重新检索 GitHub Search、GitHub Trending 与外部搜索源，生成新的项目池结果。",
     configReadyHint: "打开 {name} 设置。",
     configMissingHint: "配置 {name}，点击进入设置。",
-    autoScanHint: "自动扫描：{time}",
+    autoScanHint: "自动扫描：每日 {time} 起（{timeZone}）",
+    manualScanHint: "手动扫描（未启用定时扫描）",
+    unknownScanHint: "定时扫描状态未知，可手动扫描",
+    offlineScanHint: "服务离线：缓存只读，无法扫描",
     totalProjects: "项目总数",
     watchlist: "收藏",
     lastScan: "最近扫描",
@@ -796,7 +799,10 @@ const I18N = {
     runScanHint: "Run GitHub Search, GitHub Trending, and web enrichment to rebuild the project pool.",
     configReadyHint: "Open {name} settings.",
     configMissingHint: "Configure {name}. Click to open settings.",
-    autoScanHint: "Auto scan: {time}",
+    autoScanHint: "Auto scan: daily from {time} ({timeZone})",
+    manualScanHint: "Manual scan (scheduled scans are disabled)",
+    unknownScanHint: "Scan schedule unknown; manual scan is available",
+    offlineScanHint: "Server offline: read-only cache; scanning unavailable",
     totalProjects: "Total projects",
     watchlist: "Favorites",
     lastScan: "Last scan",
@@ -7324,7 +7330,17 @@ function renderConfigDot(element, name, ready, extra = "", issue = "") {
     const nextDetail = hasIssue ? `${hint} ${issue}` : detail;
     target.dataset.tooltip = nextDetail;
     target.setAttribute("aria-label", nextDetail);
+    if (activeTooltipTarget === target) showFloatingTooltip(target);
   }
+}
+
+function scanCapabilityHint(config) {
+  if (config.scanCapabilities?.manual === false) return t("offlineScanHint");
+  if (config.schedulerEnabled === false) return t("manualScanHint");
+  if (config.schedulerEnabled === true && Number.isInteger(config.scanHour) && config.scanHour >= 0 && config.scanHour <= 23 && String(config.timeZone || "").trim()) {
+    return t("autoScanHint").replace("{time}", `${String(config.scanHour).padStart(2, "0")}:00`).replace("{timeZone}", config.timeZone);
+  }
+  return t("unknownScanHint");
 }
 
 function renderConfig(config) {
@@ -7333,12 +7349,11 @@ function renderConfig(config) {
   const authButton = document.querySelector("#server-auth-button");
   if (authButton) authButton.hidden = !state.serverAuthRequired;
   const activeProvider = (state.settings?.llmProviders || []).find((provider) => provider.id === "deepseek");
-  const scanTime = `${String(config.scanHour).padStart(2, "0")}:00`;
   renderConfigDot(
     elements.githubState,
     "GitHub",
     config.githubConfigured,
-    t("autoScanHint").replace("{time}", scanTime),
+    scanCapabilityHint(config),
     state.keyIssues?.github ? state.keyIssueMessages?.github || SERVICE_KEY_ISSUE_LABELS.github : ""
   );
   renderConfigDot(

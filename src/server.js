@@ -668,8 +668,13 @@ function effectiveExaKey() {
 }
 
 function publicEffectiveConfig() {
+  const schedulerStatus = scheduler?.status() || null;
   return {
     ...publicConfig(config),
+    schedulerEnabled: Boolean(schedulerStatus),
+    scanCapabilities: { manual: true, scheduled: Boolean(schedulerStatus) },
+    scanHour: schedulerStatus?.scanHour ?? config.scanHour,
+    timeZone: schedulerStatus?.timeZone || config.timeZone,
     githubConfigured: Boolean(effectiveGithubToken()),
     tavilyConfigured: Boolean(effectiveTavilyKey()),
     exaConfigured: Boolean(effectiveExaKey())
