@@ -21,11 +21,11 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
-          node-version: "22"
+          node-version: "22.13.0"
           cache: npm
       - run: npm ci
-      - run: npm run ci
       - run: npx playwright install --with-deps chromium
+      - run: npm run ci
       - run: npm run check:static
       # 镜像站没有后端，Exa 请求转发到腾讯云主站的同源代理。
       - name: Inject Exa proxy

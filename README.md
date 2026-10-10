@@ -10,7 +10,7 @@
 
 <p align="center">
   <a href="LICENSE"><img alt="License" src="https://img.shields.io/badge/license-source--available%20non--commercial-black"></a>
-  <a href="package.json"><img alt="Node" src="https://img.shields.io/badge/node-%3E%3D22.8.0-2f855a"></a>
+  <a href="package.json"><img alt="Node" src="https://img.shields.io/badge/node-%3E%3D22.13.0-2f855a"></a>
   <a href="PRD.md"><img alt="PRD" src="https://img.shields.io/badge/PRD-aligned-2563eb"></a>
   <a href="VISUAL_REGRESSION.md"><img alt="Visual checks" src="https://img.shields.io/badge/visual-regression-7c3aed"></a>
   <a href="https://starvault.deline.top/"><img alt="Online demo" src="https://img.shields.io/badge/demo-live-0ea5e9"></a>
@@ -206,7 +206,7 @@ flowchart LR
 
 ## 技术架构
 
-- Runtime: Node.js 22.8.0+（`node --test` 覆盖率阈值参数的最低支持版本）
+- Runtime: Node.js 22.13.0+（内置 `node:sqlite` 无需启动 flag；CI 覆盖精确最低版本）
 - Server: 原生 `node:http`
 - Frontend: 原生 HTML/CSS/JavaScript，无前端构建链
 - Storage: Node 使用 SQLite WAL；Web 静态模式使用 IndexedDB v5 记录级存储；桌面端沿用 SQLite 并规划 Keychain

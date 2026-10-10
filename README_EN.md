@@ -10,7 +10,7 @@
 
 <p align="center">
   <a href="LICENSE"><img alt="License" src="https://img.shields.io/badge/license-source--available%20non--commercial-black"></a>
-  <a href="package.json"><img alt="Node" src="https://img.shields.io/badge/node-%3E%3D22.8.0-2f855a"></a>
+  <a href="package.json"><img alt="Node" src="https://img.shields.io/badge/node-%3E%3D22.13.0-2f855a"></a>
   <a href="PRD.md"><img alt="PRD" src="https://img.shields.io/badge/PRD-aligned-2563eb"></a>
   <a href="https://starvault.deline.top/"><img alt="Online demo" src="https://img.shields.io/badge/demo-live-0ea5e9"></a>
   <a href="https://github.com/HachikoJ/starvault-imprint/stargazers"><img alt="GitHub stars" src="https://img.shields.io/github/stars/HachikoJ/starvault-imprint?style=social"></a>
@@ -73,6 +73,8 @@ Explicit actions drive learning: favorites, hides, Star/Fork actions, judgment n
 ![Learning hub](docs/assets/screenshot-learning-en.png)
 
 ## Architecture
+
+Runtime: Node.js 22.13.0 or later. The built-in `node:sqlite` module needs no startup flag; CI includes the exact minimum version.
 
 ```mermaid
 flowchart LR
