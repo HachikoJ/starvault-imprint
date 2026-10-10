@@ -58,8 +58,17 @@ test('T-06 real tabs without Web Locks reuse one owner, renew, and fence a late 
   const observer=await f.page();
   const before=await f.lease(observer,one.task.id);
   await Promise.all([f.task(f.a,one.task.id),f.task(observer,one.task.id)]);
-  await new Promise(resolve=>setTimeout(resolve,10500));
-  const renewed=await f.lease(observer,one.task.id);
+  // Observe the durable renewal, rather than assuming the browser timer and
+  // IndexedDB commit have finished exactly 500ms after the 10s timer fires.
+  // The 15s bound remains below the 30s owner expiry and the 25s test deadline.
+  let renewed;
+  const renewalWaitStarted=Date.now();
+  await f.wait(async()=>{
+    renewed=await f.lease(observer,one.task.id);
+    assert.equal(renewed.token,before.token);
+    return renewed.expiresAt>before.expiresAt+8000;
+  },15000);
+  t.diagnostic(`Observed renewal: before=${before.expiresAt}, after=${renewed.expiresAt}, waitedMs=${Date.now()-renewalWaitStarted}`);
   assert.equal(renewed.token,before.token);assert.ok(renewed.expiresAt>before.expiresAt+8000);
   assert.equal(f.model.length,1);
   // Simulate suspension past expiry while keeping the old network response live.
