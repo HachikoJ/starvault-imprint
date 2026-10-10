@@ -133,6 +133,8 @@ StarVault Imprint is a local-first, single-user product. Do not commit `.env`, `
 
 The Node server defaults to `127.0.0.1`. Do not expose it directly to the public internet. Public deployment requires TLS, an authentication gateway, an external secret manager, audit logging, a reverse proxy/CDN/WAF, and DDoS protection. See [SECURITY.md](SECURITY.md) for the full boundary.
 
+When a Node deployment configures `AUTH_TOKEN`, the first visit opens a service access token form. Enter the token from your deployment administrator to connect. The top-bar Access token button lets you reconnect or clear the saved token without deleting browser data. CSV/JSON downloads use authenticated requests; the token is not placed in URLs or exported files. Loopback services without authentication and the static edition do not require this token.
+
 ## Source License & Commercial Use
 
 The source is hosted at [HachikoJ/starvault-imprint](https://github.com/HachikoJ/starvault-imprint) and is **not published under an OSI-approved open-source license** such as MIT, Apache-2.0, or GPL. It uses the [StarVault Imprint Source-Available Non-Commercial License](LICENSE).

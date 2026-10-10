@@ -23931,6 +23931,25 @@ body {
   display: none;
 }
 
+#server-auth-button[hidden] { display: none !important; }
+.server-auth-dialog {
+  width: min(480px, calc(100vw - 32px));
+  max-height: 85dvh;
+  padding: 24px;
+  overflow: auto;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: #fff;
+  color: var(--ink);
+}
+.server-auth-dialog::backdrop { background: rgba(20, 24, 21, 0.62); }
+.server-auth-form { display: grid; gap: 12px; }
+.server-auth-form h2, .server-auth-form p { margin: 0; }
+.server-auth-form input { width: 100%; min-width: 0; box-sizing: border-box; }
+.server-auth-actions { display: flex; flex-wrap: wrap; gap: 8px; }
+#server-auth-status { min-height: 1.5em; overflow-wrap: anywhere; }
+#server-auth-status[data-status="error"] { color: #a33232; }
+
 .observation-plan-confirm-layer {
   position: fixed;
   inset: 0;

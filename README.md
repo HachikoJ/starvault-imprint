@@ -360,6 +360,8 @@ npm run release:check
 - Node UI 中配置的 Key 以本机明文形式保存在 SQLite；Web 静态模式的 Key 以独立记录保存在 IndexedDB。设备失守或同源脚本被攻破时不能视为加密密钥库。
 - portable JSON、核心快照、项目分页和榜单分页都排除真实 Key；桌面端发布前仍需接入 macOS Keychain。
 - 服务端默认监听 `127.0.0.1`。非本机监听强制要求 `AUTH_TOKEN`，并内置 Origin/Fetch Metadata、SSRF、URL 白名单、分级限流、敏感路径拦截、请求体限制、`robots.txt`/noindex 和安全响应头，但没有账号体系或多租户权限模型。
+
+配置了 `AUTH_TOKEN` 的 Node 服务会在首次访问时显示“服务访问令牌”输入框。输入部署管理员提供的令牌即可连接；顶部“访问令牌”可重新连接或清除已保存的令牌，清除不会删除浏览器数据。项目 CSV/JSON 通过带认证的请求下载，令牌不放入 URL 或导出文件。未配置认证的本机服务和纯静态版无需此令牌。
 - `/api/settings?reveal=...` 会按本地界面需要返回密钥明文，请只在可信本机环境使用。
 - GitHub Star/Fork 会使用你配置的 GitHub Token 操作你的账号。
 - AI 分析会把选中仓库信息和你填写的分析需求发送给配置的大模型服务商。

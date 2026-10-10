@@ -74,6 +74,7 @@
             <button type="button" data-language="en">EN</button>
           </div>
           <button class="ghost-button compact-action" id="guide-tour-button" type="button" data-action="start-guide-tour" data-i18n="guideTourButton">引导</button>
+          <button class="ghost-button compact-action" id="server-auth-button" type="button" data-i18n="serverAuthButton" hidden>访问令牌</button>
           <details class="export-menu" id="export-menu">
             <summary class="ghost-button compact-action" data-i18n="exportShort" data-i18n-title="exportHint">导出</summary>
             <div class="export-menu-panel" role="menu" aria-label="Export">
@@ -591,6 +592,20 @@
     </div>
 
     <div id="observation-plan-confirm-dialog"></div>
+    <dialog id="server-auth-dialog" class="server-auth-dialog" aria-labelledby="server-auth-title">
+      <form id="server-auth-form" class="server-auth-form">
+        <h2 id="server-auth-title" data-i18n="serverAuthTitle">服务访问令牌</h2>
+        <p data-i18n="serverAuthPrompt">输入部署管理员提供的访问令牌以连接此服务。</p>
+        <label for="server-auth-token" data-i18n="serverAuthTokenLabel">访问令牌</label>
+        <input id="server-auth-token" type="password" autocomplete="current-password" spellcheck="false" />
+        <p id="server-auth-status" role="status" aria-live="polite"></p>
+        <div class="server-auth-actions">
+          <button id="server-auth-submit" class="primary-button" type="submit" data-i18n="serverAuthConnect">连接</button>
+          <button id="server-auth-clear" class="ghost-button" type="button" data-i18n="serverAuthClear">清除已保存令牌</button>
+          <button id="server-auth-close" class="ghost-button" type="button" data-i18n="serverAuthClose">关闭</button>
+        </div>
+      </form>
+    </dialog>
 
     <button
       id="back-to-top"

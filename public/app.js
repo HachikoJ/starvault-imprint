@@ -106,6 +106,19 @@ const I18N = {
     stars: "Stars",
     forks: "Forks",
     issues: "Issues",
+    serverAuthButton: "访问令牌",
+    serverAuthTitle: "服务访问令牌",
+    serverAuthPrompt: "输入部署管理员提供的访问令牌以连接此服务。",
+    serverAuthTokenLabel: "访问令牌",
+    serverAuthConnect: "连接",
+    serverAuthClear: "清除已保存令牌",
+    serverAuthClose: "关闭",
+    serverAuthRequired: "服务需要访问令牌，请重新连接。",
+    serverAuthInvalid: "访问令牌无效，请检查后重试。",
+    serverAuthMissing: "请输入访问令牌。",
+    serverAuthCleared: "已清除访问令牌。浏览器数据保留，请重新连接。",
+    serverAuthConnecting: "正在连接…",
+    serverAuthFailed: "连接未完成，请检查服务状态后重试。",
     watchSubscribers: "Watch（GitHub 订阅）",
     watchUnknown: "未知",
     watchLegacy: "未知（历史来源未确认）",
@@ -836,6 +849,19 @@ const I18N = {
     stars: "stars",
     forks: "forks",
     issues: "issues",
+    serverAuthButton: "Access token",
+    serverAuthTitle: "Service access token",
+    serverAuthPrompt: "Enter the access token provided by your deployment administrator to connect to this service.",
+    serverAuthTokenLabel: "Access token",
+    serverAuthConnect: "Connect",
+    serverAuthClear: "Clear saved token",
+    serverAuthClose: "Close",
+    serverAuthRequired: "This service requires an access token. Please reconnect.",
+    serverAuthInvalid: "The access token is invalid. Check it and try again.",
+    serverAuthMissing: "Enter an access token.",
+    serverAuthCleared: "Access token cleared. Browser data is retained. Please reconnect.",
+    serverAuthConnecting: "Connecting…",
+    serverAuthFailed: "Connection did not complete. Check the service and try again.",
     watchSubscribers: "Watch (GitHub subscribers)",
     watchUnknown: "Unknown",
     watchLegacy: "Unknown (legacy source unconfirmed)",
@@ -4819,6 +4845,51 @@ function setAuthToken(token) {
   }
 }
 
+function renderServerAuthStatus(key = state.serverAuthStatus?.key || "serverAuthPrompt", status = state.serverAuthStatus?.status || "info") {
+  state.serverAuthStatus = { key, status };
+  const element = document.querySelector("#server-auth-status");
+  if (element) { element.textContent = t(key); element.dataset.status = status; }
+}
+
+function showServerAuthentication() {
+  state.serverAuthRequired = true;
+  document.querySelector("#server-auth-button").hidden = false;
+  const dialog = document.querySelector("#server-auth-dialog");
+  if (!dialog.open) {
+    document.querySelector("#server-auth-token").value = "";
+    renderServerAuthStatus("serverAuthRequired", "info");
+    dialog.showModal();
+    document.querySelector("#server-auth-token").focus();
+  }
+}
+
+async function connectServerAuthentication(event) {
+  event.preventDefault();
+  if (state.serverAuthBusy) return;
+  const token = document.querySelector("#server-auth-token").value.trim();
+  if (!token) { renderServerAuthStatus("serverAuthMissing", "error"); return; }
+  state.serverAuthBusy = true;
+  const controls = ["#server-auth-submit", "#server-auth-clear", "#server-auth-close"].map(selector => document.querySelector(selector));
+  controls.forEach(control => { control.disabled = true; });
+  renderServerAuthStatus("serverAuthConnecting", "info");
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 15000);
+  try {
+    const response = await fetch("/api/config", { headers: { Accept: "application/json", Authorization: `Bearer ${token}` }, cache: "no-store", signal: controller.signal });
+    if (!response.ok) throw Object.assign(new Error("Service authentication failed"), { status: response.status });
+    await response.json();
+    setAuthToken(token);
+    await loadAll();
+    document.querySelector("#server-auth-dialog").close();
+  } catch (error) {
+    renderServerAuthStatus(error.status === 401 ? "serverAuthInvalid" : "serverAuthFailed", "error");
+  } finally {
+    clearTimeout(timeout);
+    state.serverAuthBusy = false;
+    controls.forEach(control => { control.disabled = false; });
+  }
+}
+
 // Remove legacy query-string tokens from browser history. Authentication tokens
 // are accepted only through the in-app credential flow and request headers.
 (function cleanLegacyTokenParameter() {
@@ -4882,7 +4953,8 @@ async function api(path, options = {}) {
     json = await response.json();
   } catch (error) {
     if (response.status === 401 || response.status === 403) {
-      const authError = new Error("访问令牌未配置或无效，请联系部署管理员。", { cause: error });
+      if (response.status === 401) showServerAuthentication();
+      const authError = new Error(t("serverAuthRequired"), { cause: error });
       authError.status = response.status;
       throw authError;
     }
@@ -4892,8 +4964,9 @@ async function api(path, options = {}) {
     return cacheFallback(new Error("Server route unavailable"));
   }
   if (!response.ok) {
+    if (response.status === 401 && json.authRequired) showServerAuthentication();
     const message = json.message || json.error || "Request failed";
-    const error = new Error(json.authRequired ? "访问令牌未配置或无效，请联系部署管理员。" : message);
+    const error = new Error(json.authRequired ? t("serverAuthRequired") : message);
     error.status = response.status;
     error.code = String(json.code || (/^[A-Z0-9_]+$/.test(String(json.error || "")) ? json.error : "")) || "";
     error.cooldown = json.cooldown?.active ? json.cooldown : json.task?.cooldown?.active ? json.task.cooldown : null;
@@ -6385,6 +6458,7 @@ function applyTranslations() {
     node.classList.toggle("active", node.dataset.language === state.language);
   });
   decorateStaticIcons();
+  renderServerAuthStatus();
   renderScanStatus(state.scanProgress);
   renderTaskNotifications();
   if (state.guideTourActive) {
@@ -7255,6 +7329,9 @@ function renderConfigDot(element, name, ready, extra = "", issue = "") {
 
 function renderConfig(config) {
   if (!config) return;
+  state.serverAuthRequired = Boolean(config.authRequired);
+  const authButton = document.querySelector("#server-auth-button");
+  if (authButton) authButton.hidden = !state.serverAuthRequired;
   const activeProvider = (state.settings?.llmProviders || []).find((provider) => provider.id === "deepseek");
   const scanTime = `${String(config.scanHour).padStart(2, "0")}:00`;
   renderConfigDot(
@@ -10116,13 +10193,32 @@ function exportUrl(format) {
 }
 
 async function downloadLocalProjectExport(format) {
-  const payload = await api(exportUrl(format));
-  if (!payload?.content || !payload?.filename) throw new Error(t("exportFailed"));
-  const blob = new Blob([payload.content], { type: payload.mimeType || "application/octet-stream" });
+  const path = exportUrl(format);
+  const localApi = window.StarVaultLocalApi;
+  let blob, filename;
+  if (localApi?.shouldUseLocal?.(path)) {
+    const payload = await api(path);
+    if (!payload?.content || !payload?.filename) throw new Error(t("exportFailed"));
+    blob = new Blob([payload.content], { type: payload.mimeType || "application/octet-stream" });
+    filename = payload.filename;
+  } else {
+    const token = getAuthToken();
+    const response = await fetch(path, { headers: token ? { Authorization: `Bearer ${token}` } : {} });
+    if (!response.ok) {
+      if (response.status === 401) showServerAuthentication();
+      throw new Error(response.status === 401 ? t("serverAuthRequired") : t("exportFailed"));
+    }
+    blob = await response.blob();
+    const disposition = response.headers.get("Content-Disposition") || "";
+    const encoded = /filename\*=UTF-8''([^;]+)/i.exec(disposition);
+    const plain = /filename="([^"]+)"/i.exec(disposition) || /filename=([^;]+)/i.exec(disposition);
+    try { filename = encoded ? decodeURIComponent(encoded[1]) : plain?.[1]?.trim(); } catch { filename = plain?.[1]?.trim(); }
+    filename ||= `starvault-export-${new Date().toISOString().slice(0, 10)}.${format}`;
+  }
   const url = URL.createObjectURL(blob);
   const link = document.createElement("a");
   link.href = url;
-  link.download = payload.filename;
+  link.download = filename;
   document.body.appendChild(link);
   link.click();
   link.remove();
@@ -12522,6 +12618,16 @@ function wireFloatingTooltips() {
 }
 
 function wireEvents() {
+  document.querySelector("#server-auth-button")?.addEventListener("click", showServerAuthentication);
+  document.querySelector("#server-auth-form")?.addEventListener("submit", connectServerAuthentication);
+  document.querySelector("#server-auth-close")?.addEventListener("click", () => document.querySelector("#server-auth-dialog").close());
+  document.querySelector("#server-auth-dialog")?.addEventListener("close", () => { document.querySelector("#server-auth-token").value = ""; });
+  document.querySelector("#server-auth-clear")?.addEventListener("click", () => {
+    setAuthToken("");
+    document.querySelector("#server-auth-token").value = "";
+    renderServerAuthStatus("serverAuthCleared", "info");
+    document.querySelector("#server-auth-token").focus();
+  });
   wireFloatingTooltips();
   window.addEventListener("beforeunload", handleLongTaskBeforeUnload);
   window.addEventListener("resize", () => scheduleGuideTourPosition(60));
@@ -12565,14 +12671,9 @@ function wireEvents() {
     if (!button) return;
     event.preventDefault();
     elements.exportMenu.open = false;
-    const localApi = window.StarVaultLocalApi;
-    if (localApi?.localModeForced?.()) {
-      downloadLocalProjectExport(button.dataset.exportFormat)
-        .then(() => showExportActionStatus("saved"))
-        .catch(() => showExportActionStatus("failed"));
-      return;
-    }
-    window.location.href = exportUrl(button.dataset.exportFormat);
+    downloadLocalProjectExport(button.dataset.exportFormat)
+      .then(() => showExportActionStatus("saved"))
+      .catch(() => showExportActionStatus("failed"));
   });
   document.addEventListener("click", (event) => {
     if (!elements.exportMenu?.open || elements.exportMenu.contains(event.target)) return;
