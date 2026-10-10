@@ -143,13 +143,13 @@ function assertSiteFooter(assert, label, footer, language = "zh") {
   );
   if (language === "en") {
     assert(
-      footer.text.includes("© 2026 StarVault Imprint · MIT open source"),
+      footer.text.includes("© 2026 StarVault Imprint · Source-Available Non-Commercial"),
       `${label} English footer missed its localized copyright notice: ${footer.text}`
     );
     assert(!footer.text.includes("星仓印记"), `${label} English footer retained the Chinese product name: ${footer.text}`);
   } else {
     assert(
-      footer.text.includes("© 2026 星仓印记 · MIT 开源"),
+      footer.text.includes("© 2026 星仓印记 · 源码可用非商业许可"),
       `${label} Chinese footer missed its localized copyright notice: ${footer.text}`
     );
     assert(!footer.text.includes("StarVault Imprint"), `${label} Chinese footer retained the English product name: ${footer.text}`);
