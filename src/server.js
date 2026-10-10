@@ -839,7 +839,8 @@ function getProviderOrThrow(settings, providerId) {
 
 async function assertProviderNetworkTarget(provider = {}) {
   if (!provider.baseUrl) throw new Error("Provider base URL is empty");
-  await assertSafeExternalUrl(provider.baseUrl, { allowPrivate: config.allowPrivateProviderUrls });
+  const urls = domainCore.providerApiUrls(provider.baseUrl);
+  await assertSafeExternalUrl(urls.baseUrl, { allowPrivate: config.allowPrivateProviderUrls });
   return {
     ...provider,
     networkPolicy: {
@@ -3425,7 +3426,7 @@ async function routeApi(req, res, url) {
     try {
       const body = await parseBody(req);
       for (const provider of body.llmProviders || []) {
-        if (provider.baseUrl) await assertProviderNetworkTarget(provider);
+        if (provider.baseUrl !== undefined) await assertProviderNetworkTarget(provider);
       }
       storage.updateSettings(body);
       const keyValidation = await validateSavedServiceKeys({ includeProvider: body.validateProvider !== false });
@@ -3583,6 +3584,9 @@ async function routeApi(req, res, url) {
   if (req.method === "POST" && url.pathname === "/api/portable-data/import") {
     try {
       const body = await parseBody(req);
+      for (const provider of body.settings?.llmProviders || []) {
+        if (provider.baseUrl !== undefined) await assertProviderNetworkTarget(provider);
+      }
       const result = storage.importPortableData(body, { activate: body.activate !== false });
       sendJson(res, 200, {
         ok: true,
@@ -3603,6 +3607,9 @@ async function routeApi(req, res, url) {
   if (req.method === "POST" && url.pathname === "/api/observation-plans/import") {
     try {
       const body = await parseBody(req);
+      for (const provider of body.settings?.llmProviders || []) {
+        if (provider.baseUrl !== undefined) await assertProviderNetworkTarget(provider);
+      }
       const result = storage.importPortableData(body, { activate: body.activate !== false });
       sendJson(res, 200, {
         ok: true,

@@ -49,7 +49,7 @@ async function createBrowserRuntime(fetchImpl, options = {}) {
     location: {
       origin: "http://127.0.0.1:4173",
       host: "127.0.0.1:4173",
-      hostname: "127.0.0.1"
+      hostname: options.hostname || "127.0.0.1"
     }
   };
   // public/bootstrap.js sets this flag in the real page. Tests only opt in
@@ -107,6 +107,72 @@ function response(payload, status = 200, headers = {}) {
     text: async () => JSON.stringify(payload)
   };
 }
+
+test("T-19 browser settings/import validation and model calls share one API path", async () => {
+  const calls = [];
+  const keywords = ["Zigbee", "Matter", "Thread", "IEEE 802.15.4", "ZCL", "coordinator", "mesh network", "device bridge"];
+  const content = { ok: true, summary: "A local fixture workflow.", recommendation: "watch", riskLevel: "medium",
+    risks: [], boundaries: [], inspirations: [], validations: [], name: "家庭物联网协议", nameEn: "Home IoT protocols",
+    description: "持续观察家庭物联网协议与设备集成项目。", requirements: [{text: "关注协议栈、网关、设备桥接和自动化工具"}],
+    searchLogic: {baseMode: "only", keywords, excludeTerms: [], customQueries: keywords.slice(0,6).map(keyword => ({label: keyword, query: `${keyword} in:name,description,readme archived:false mirror:false`, stars: 0}))} };
+  const runtime = await createBrowserRuntime(async url => {
+    const value = String(url); calls.push(value);
+    assert.ok(value.startsWith("https://provider.invalid/") || value.startsWith("https://api.deepseek.com/"), "unconfigured upstream blocked");
+    return response(new URL(value).pathname.endsWith("/models") ? {data: [{id: "fixture"}]} : {choices: [{message: {content: JSON.stringify(content)}}]});
+  });
+  const post = (url, body) => runtime.api.handle(url, {method: "POST", body: JSON.stringify(body)});
+  await runtime.storage.putProjects([{fullName: "fixture/url", description: "Fixture", scores: {risk: 0}, observationPlanMatches: {default: {planId: "default"}}}]);
+  const cases = [
+    ["https://provider.invalid", "https://provider.invalid/v1"],
+    ["https://provider.invalid/v1/", "https://provider.invalid/v1"],
+    ["https://provider.invalid/gateway/v2///", "https://provider.invalid/gateway/v2"],
+    ["https://provider.invalid/v1/chat/completions/", "https://provider.invalid/v1"],
+    ["https://provider.invalid/model", "https://provider.invalid/model/v1"],
+    ["https://provider.invalid/custom/chat/completions", "https://provider.invalid/custom"],
+    ["https://api.deepseek.com/", "https://api.deepseek.com/v1"]
+  ];
+  for (const [baseUrl, apiBase] of cases) {
+    calls.length = 0;
+    const saved = await post("/api/settings", {llmProviders: [{id: "deepseek", baseUrl, enabled: true, model: "fixture", apiKey: "fixture-url-key"}]});
+    assert.equal(saved.keyValidation.provider.valid, true);
+    assert.deepEqual(calls, [apiBase + "/models"]);
+    await post("/api/portable-data/import", {schema: "starvault-portable-config/v1", settings: {llmProviders: [{id: "deepseek", baseUrl, model: "fixture", enabled: true}]}});
+    await post("/api/provider-test", {});
+    const started = await post("/api/analyze", {fullName: "fixture/url", userNeed: baseUrl});
+    const task = await waitForTask(runtime.api, started.task.id);
+    assert.equal(task.status, "completed", task.error);
+    if (baseUrl.includes("/v1")) {
+      const draft = await post("/api/observation-plans/generate", {name: "家庭物联网协议", detailedNeed: "关注 Zigbee、Matter、Thread 协议栈和设备集成"});
+      const done = await waitForTask(runtime.api, draft.task.id); assert.equal(done.status, "completed", done.error);
+    }
+    assert.ok(calls.slice(1).length >= 2);
+    assert.ok(calls.slice(1).every(url => url === apiBase + "/chat/completions"), JSON.stringify(calls));
+  }
+  const before = JSON.stringify(await runtime.storage.getSnapshot()), secrets = JSON.stringify(await runtime.storage.getValue("localSecrets"));
+  for (const baseUrl of ["", "https://provider.invalid/v1?key=fixture", "https://provider.invalid/v1#fragment", "https://user:pass@provider.invalid/v1", "http://provider.invalid/v1"]) {
+    for (const route of ["/api/settings", "/api/portable-data/import"]) {
+      const settings = {validateProvider: false, language: "en", llmProviders: [{id: "deepseek", baseUrl, apiKey: "fixture-replacement-key"}]};
+      await assert.rejects(post(route, route.endsWith("/import") ? {schema: "starvault-portable-config/v1", settings} : settings), /URL|地址|HTTPS|query|fragment/i);
+      assert.equal(JSON.stringify(await runtime.storage.getSnapshot()), before, "invalid configuration does not partially save");
+      assert.equal(JSON.stringify(await runtime.storage.getValue("localSecrets")), secrets, "invalid URL does not overwrite credentials");
+    }
+  }
+});
+
+test("T-19 public browser settings and import retain private-target restrictions before saving", async () => {
+  let calls = 0;
+  const runtime = await createBrowserRuntime(async () => {calls++; throw Error("Network must not run");}, {hostname: "starvault.example"});
+  await runtime.api.handle("/api/config");
+  const before = JSON.stringify(await runtime.storage.getSnapshot());
+  for (const baseUrl of ["https://127.0.0.1/v1", "https://192.168.1.1/v1", "http://localhost/v1"]) {
+    for (const route of ["/api/settings", "/api/portable-data/import"]) {
+      const settings = {validateProvider: false, llmProviders: [{id: "deepseek", baseUrl, apiKey: "fixture-key"}]};
+      await assert.rejects(runtime.api.handle(route, {method: "POST", body: JSON.stringify(route.endsWith("/import") ? {schema: "starvault-portable-config/v1", settings} : settings)}), /HTTPS|私有网络/);
+      assert.equal(JSON.stringify(await runtime.storage.getSnapshot()), before);
+    }
+  }
+  assert.equal(calls, 0);
+});
 
 function githubResponse(url, payload) {
   return new URL(url).pathname.endsWith("/rate_limit")

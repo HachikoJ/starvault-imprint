@@ -48,6 +48,25 @@
     return /[",\n\r]/.test(text) ? `"${text.replaceAll('"', '""')}"` : text;
   }
 
+  function providerApiUrls(value, options = {}) {
+    const raw = String(value || "").trim();
+    let url;
+    try { url = new URL(raw); } catch { throw new Error("Provider base URL is invalid"); }
+    if (!["https:", "http:"].includes(url.protocol)) throw new Error("Provider base URL must use HTTP or HTTPS");
+    if (url.username || url.password) throw new Error("Provider base URL must not contain credentials");
+    if (/[?#]/.test(raw)) throw new Error("Provider base URL must not contain query or fragment");
+    // A full operation URL and a versioned API base select the same API prefix.
+    // Keep Node's existing root contract and the browser's /v1 default for
+    // roots/unversioned gateways. Explicit versions and operations take priority.
+    let prefix = url.pathname.replace(/\/+$/, "");
+    const operation = /\/(?:chat\/completions|messages|models\/[^/]+:generateContent)$/i.test(prefix);
+    prefix = prefix.replace(/\/(?:chat\/completions|messages)$/i, "");
+    prefix = prefix.replace(/\/models\/[^/]+:generateContent$/i, "");
+    if (options.browserRoot && !operation && !/\/v\d[\w.-]*$/i.test(prefix)) prefix += "/v1";
+    const baseUrl = url.origin + prefix;
+    return {baseUrl, modelsUrl: baseUrl + "/models", chatCompletionsUrl: baseUrl + "/chat/completions", messagesUrl: baseUrl + "/messages"};
+  }
+
   function invalidAnalysisError(detail) {
     const error = new Error(`AI analysis is invalid: ${detail}`);
     error.code = "AI_ANALYSIS_INVALID";
@@ -946,6 +965,7 @@
   }
 
   return {
+    providerApiUrls,
     csvCell,
     assertAnalysisDelivery,
     validateAnalysisResult,

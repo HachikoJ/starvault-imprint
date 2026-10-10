@@ -1448,7 +1448,7 @@
       return { providerId, configured: false, valid: null, authFailure: false };
     }
     try {
-      const response = await fetchWithTimeout(`${String(provider.baseUrl || DEFAULT_PROVIDER.baseUrl).replace(/\/+$/, "")}/models`, {
+      const response = await fetchWithTimeout(browserProviderUrls(provider).modelsUrl, {
         headers: {
           Authorization: `Bearer ${provider.apiKey}`,
           "Content-Type": "application/json"
@@ -2112,14 +2112,9 @@
     };
   }
 
-  function chatCompletionsUrl(provider) {
-    const rawBase = String(provider.baseUrl || DEFAULT_PROVIDER.baseUrl).replace(/\/+$/, "");
-    let parsed;
-    try {
-      parsed = new URL(rawBase);
-    } catch {
-      throw new Error("模型接口地址无效");
-    }
+  function browserProviderUrls(provider) {
+    const urls = domainCore.providerApiUrls(provider.baseUrl || DEFAULT_PROVIDER.baseUrl, {browserRoot: true});
+    const parsed = new URL(urls.baseUrl);
     const targetHost = parsed.hostname.toLowerCase();
     const pageHost = window.location.hostname.toLowerCase();
     const targetIsLocal = ["localhost", "127.0.0.1", "::1"].includes(targetHost) || /^(?:10\.|192\.168\.|172\.(?:1[6-9]|2\d|3[01])\.)/.test(targetHost);
@@ -2127,8 +2122,20 @@
     if (parsed.protocol !== "https:" && !(pageIsLocal && targetIsLocal)) throw new Error("模型接口地址必须使用 HTTPS");
     if (parsed.username || parsed.password) throw new Error("模型接口地址不能包含账号或密码");
     if (targetIsLocal && !pageIsLocal) throw new Error("公网页面不能连接本机或私有网络模型地址");
-    const base = parsed.toString().replace(/\/+$/, "");
-    return /\/chat\/completions$/i.test(base) ? base : `${base}/v1/chat/completions`;
+    return urls;
+  }
+
+  function validateIncomingProviderUrls(settings = {}) {
+    for (const provider of settings.llmProviders || []) {
+      if (provider.baseUrl !== undefined) {
+        if (!String(provider.baseUrl || "").trim()) throw new Error("Provider base URL is empty");
+        browserProviderUrls(provider);
+      }
+    }
+  }
+
+  function chatCompletionsUrl(provider) {
+    return browserProviderUrls(provider).chatCompletionsUrl;
   }
 
   function parseJsonFromText(text) {
@@ -2850,6 +2857,7 @@
     if (!payload || payload.schema !== "starvault-portable-config/v1") {
       throw new Error("No portable configuration data to import");
     }
+    validateIncomingProviderUrls(payload.settings || {});
     snapshot.settings = { ...snapshot.settings, ...safeSettings(payload.settings || {}) };
     const planPayload = payload.observationPlans || {};
     for (const plan of planPayload.plans || []) {
@@ -3264,6 +3272,7 @@
     }
     if (method === "GET" && url.pathname === "/api/settings") return settingsResponse(snapshot, secrets, url.searchParams.get("reveal") || "");
     if (method === "POST" && url.pathname === "/api/settings") {
+      validateIncomingProviderUrls(body);
       const nextSecrets = { ...secrets };
       if (body.githubToken) nextSecrets.githubToken = body.githubToken.trim();
       if (body.tavilyKey) nextSecrets.tavilyKey = body.tavilyKey.trim();

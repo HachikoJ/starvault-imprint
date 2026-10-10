@@ -1,4 +1,4 @@
-const { normalizeAnalysisContext, assertAnalysisDelivery, validateAnalysisResult } = require("../../public/domain-core");
+const { normalizeAnalysisContext, assertAnalysisDelivery, validateAnalysisResult, providerApiUrls } = require("../../public/domain-core");
 const { fetchWithRetries } = require("./http-client");
 const {
   extractJsonObject,
@@ -431,7 +431,7 @@ async function tuneMemoryWithProvider({ provider, payload, language }) {
   if (protocol !== "openai-compatible") {
     throw new Error("Memory tuning currently supports OpenAI-compatible providers only");
   }
-  const url = `${provider.baseUrl.replace(/\/$/, "")}/chat/completions`;
+  const url = providerApiUrls(provider.baseUrl).chatCompletionsUrl;
   const response = await fetchWithRetries(
     url,
     {
@@ -1004,7 +1004,7 @@ function isMaxTokensRejection(error) {
 }
 
 async function requestObservationPlanCompletion({ provider, messages, temperature = 0.25, maxTokens = OBSERVATION_PLAN_MAX_TOKENS }) {
-  const url = `${provider.baseUrl.replace(/\/$/, "")}/chat/completions`;
+  const url = providerApiUrls(provider.baseUrl).chatCompletionsUrl;
   const request = (includeJsonMode, tokens) =>
     fetchWithRetries(
       url,
@@ -1184,7 +1184,7 @@ async function listProviderModels(provider) {
   if (protocol !== "openai-compatible") {
     throw new Error("Model listing is currently available for OpenAI-compatible providers only");
   }
-  const url = `${provider.baseUrl.replace(/\/$/, "")}/models`;
+  const url = providerApiUrls(provider.baseUrl).modelsUrl;
   const response = await fetchWithRetries(
     url,
     {
@@ -1209,7 +1209,7 @@ async function testProviderConnection(provider) {
 }
 
 async function analyzeOpenAICompatible(provider, project, language, context = {}) {
-  const url = `${provider.baseUrl.replace(/\/$/, "")}/chat/completions`;
+  const url = providerApiUrls(provider.baseUrl).chatCompletionsUrl;
   const response = await fetchWithRetries(url, {
     method: "POST",
     headers: {
@@ -1246,7 +1246,7 @@ async function analyzeOpenAICompatible(provider, project, language, context = {}
 }
 
 async function analyzeAnthropic(provider, project, language, context = {}) {
-  const url = `${provider.baseUrl.replace(/\/$/, "")}/messages`;
+  const url = providerApiUrls(provider.baseUrl).messagesUrl;
   const response = await fetchWithRetries(url, {
     method: "POST",
     headers: {
@@ -1277,8 +1277,7 @@ async function analyzeAnthropic(provider, project, language, context = {}) {
 }
 
 async function analyzeGemini(provider, project, language, context = {}) {
-  const base = provider.baseUrl.replace(/\/$/, "");
-  const url = `${base}/models/${encodeURIComponent(provider.model)}:generateContent`;
+  const url = `${providerApiUrls(provider.baseUrl).modelsUrl}/${encodeURIComponent(provider.model)}:generateContent`;
   const response = await fetchWithRetries(url, {
     method: "POST",
     headers: {
