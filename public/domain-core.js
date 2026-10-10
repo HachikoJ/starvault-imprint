@@ -38,6 +38,16 @@
     return (hash >>> 0).toString(36);
   }
 
+  function csvCell(value) {
+    let text = String(value ?? "");
+    // Test the original type before serializing: a negative measurement is a
+    // number, while provider/user text must not become a spreadsheet formula.
+    if (typeof value === "string" && /^[\s\x00-\x1f\x7f-\x9f\u200b-\u200f\u202a-\u202e\u2060-\u206f]*[=+\-@]/u.test(text)) {
+      text = "'" + text;
+    }
+    return /[",\n\r]/.test(text) ? `"${text.replaceAll('"', '""')}"` : text;
+  }
+
   function invalidAnalysisError(detail) {
     const error = new Error(`AI analysis is invalid: ${detail}`);
     error.code = "AI_ANALYSIS_INVALID";
@@ -936,6 +946,7 @@
   }
 
   return {
+    csvCell,
     assertAnalysisDelivery,
     validateAnalysisResult,
     externalSignalOutcome,

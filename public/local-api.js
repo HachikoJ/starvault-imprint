@@ -2826,8 +2826,7 @@
   }
 
   function csvCell(value) {
-    const text = String(value ?? "");
-    return /[",\n\r]/.test(text) ? `"${text.replaceAll('"', '""')}"` : text;
+    return domainCore.csvCell(value);
   }
 
   async function localProjectExport(snapshot, params = {}) {

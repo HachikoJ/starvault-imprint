@@ -1113,11 +1113,7 @@ function discoveryLogic() {
 }
 
 function csvEscape(value) {
-  const text = String(value ?? "");
-  if (/[",\n\r]/.test(text)) {
-    return `"${text.replaceAll('"', '""')}"`;
-  }
-  return text;
+  return domainCore.csvCell(value);
 }
 
 function normalizeExportLanguage(value) {
