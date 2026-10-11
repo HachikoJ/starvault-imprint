@@ -1,0 +1,3 @@
+# Preserve the original audit artifact, including Markdown hard line breaks.
+# This exception applies only to its existing line endings and final blank line.
+AUDIT_REPORT.md whitespace=-blank-at-eol,-blank-at-eof
