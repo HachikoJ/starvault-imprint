@@ -92,6 +92,16 @@ async function bootPage(browser, url, viewport) {
   await page.waitForFunction(() => document.querySelectorAll("#project-rows .repo-item").length > 0, null, {
     timeout: 30000
   });
+  // The first-visit guide opens after a delay and blocks background activation.
+  // Finish that real modal interaction before testing workspace keyboard actions.
+  await page.waitForFunction(() =>
+    localStorage.getItem("starvault.guideSeen.v1") === "1" ||
+    state.guideTourActive || state.config?.githubConfigured || state.settings?.githubTokenSet,
+  null, { timeout: 10000 });
+  if (await page.evaluate(() => state.guideTourActive)) {
+    await page.keyboard.press("Escape");
+    await page.waitForFunction(() => !state.guideTourActive && !document.documentElement.classList.contains("guide-tour-open"));
+  }
   return { context, page, consoleErrors, failedRequests, httpErrors };
 }
 

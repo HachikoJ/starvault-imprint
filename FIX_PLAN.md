@@ -1012,3 +1012,14 @@ env PATH=/tmp/starvault-node22130-t18.rOY1d9/node-v22.13.0-darwin-arm64/bin:$PAT
 
 
 GitHub同步补记：第一轮推送`3c9043d`已成功，原始26个修复提交与T-23/T-16两个部署补丁、两份报告均在远端main。首次暂存diff检查对原审报告的Markdown两空格硬换行/原末尾空行报错，执行命令未因该格式退出而停止提交；该首次失败保留且不冒称通过。报告与开工备份仍逐字节相同。为同时保持原始审计证据及项目diff门禁，`.gitattributes`仅为`AUDIT_REPORT.md`设置`whitespace=-blank-at-eol,-blank-at-eof`，其他文件仍使用原检查；重新检查原基线至本次范围、工作区及暂存区。该规则不跳过代码测试/安全检查，不改审查结论或原文字节。随后推送此格式与记录补丁，以下远端验收以最终代码与规则提交对应run为准。
+
+
+### 14.1 PUB-01：Pages 验收工具的初始引导时序
+
+`e061f34`的Linux CI已完整通过：Node22.13.0/22/24各582/582、audit0 high漏洞、性能fixture通过，下载的visual artifact含60张截图及issueCount=0。Pages同SHA前两次attempt均在desktop返回顶部报scroll offset900、按钮未隐藏；首次及重跑日志保留，不能写成镜像已经发布。
+
+针对性定位确认初始引导在`maybeShowInitialGuide`中延迟520ms弹出，`blockGuideTourBackgroundInteraction`按设计拦截引导卡片外的click。原`scripts/static-pages-check.js`在runtime/projects ready后直接操作背景返回顶部，可能与引导弹出重叠；测试其他语言时本来会关引导，返回顶部步骤却在其之前。真实Chrome四组1440/390×motion/no-motion验证：引导打开时背景Enter不滚动，Escape关闭后反复Enter及文档/列表同时偏移均正常。这是验收流程错误，不把预期modal阻止背景操作列为业务缺陷。
+
+修正范围仅`bootPage`：等待初始引导状态明确，通过真实Escape关闭并等关闭完成，再检查工作区。没有注入guideSeen绕过引导，没有改返回顶部断言/8000ms门槛，没有自动多次重试以掩盖失败。新增`tests/browser-back-to-top.test.js`作为真实modal/keyboard回归；本地官方22.13回归1/1和static检查通过。此前探索过平滑滚动的独立DOM实验及一个public候选；它们不足以证明项目业务故障，候选已完全撤回。public全部文件SHA仍等于已经上线的产物，不需为验收工具修改重新部署主站。
+
+该项是授权GitHub/Pages发布的必要验收工具修正，无新A编号、不扩展原23项业务修复任务；执行O01的这次失败已取得明确解释，但不能概括所有历史间歇现象均同根因。原始失败、Mac原业务用例通过及不成立的候选验证均保留在本机`output/github-sync-20261011/`。本次仅推送测试/脚本与记录，远端最终门禁仍待新的准确HEAD验证。
