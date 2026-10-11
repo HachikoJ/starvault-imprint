@@ -1001,14 +1001,14 @@ env PATH=/tmp/starvault-node22130-t18.rOY1d9/node-v22.13.0-darwin-arm64/bin:$PAT
 - 如需应急恢复，必须联合使用上面的`web.target`和`nginx.previous`，验证目标文件后切软链、恢复配置、nginx -t/reload、检查原首页和服务；不能只回退前端或只回退配置。代码回退不保证新浏览器数据可由旧代码安全读写，仍遵守第12节保存新版资料及独立验证的限制；本轮未执行实际恢复。
 
 
-## 14. 2026-10-11 GitHub 同步（发布前记录）
+## 14. 2026-10-11 GitHub 同步与远端验收
 
 用户明确要求“要更新”GitHub，授权将现有修复、部署补丁与两份独立审查/修复文档提交至既有公开仓库`HachikoJ/starvault-imprint`的`main`。此次不创建Release/PR，不改变仓库可见性、分支策略、LICENSE、提供方或部署目标。主站第13节的实际发布结果不因Git同步改变；GitHub Pages镜像按既有push工作流自动构建并发布。
 
 - **提交范围与前置核验**：`git fetch origin`后远端未增加提交，本地在原远端main之上已有26个修复/补验提交。T-23配置及可独立运行的Linux loopback证书验证脚本已提交为`a4a0765`；T-16 UTF-8完成信息及回归测试提交为`95ddefa`。本文件与原始AUDIT_REPORT首次纳入版本追踪；原审字节保持不变。仅明确列名暂存，不纳入任何output、完整nginx配置、私钥、.env、用户数据库或真实凭据。
 - **前置验证**：沿用最后已验收且未变化的前端/Node业务源码基线CI581/581、visual60/0、static和性能fixture；部署专项最终30/30及Bash语法通过。正式提交的`deploy/verify-exa-proxy-tls.py`在实际既有nginx1.24服务器独立临时prefix/loopback复跑，可信正确名称200、错误名称/不可信证书502、CORS/方法限制均通过；该脚本只读取候选配置，未更改生产配置/发出外部请求。前后凭据扫描及diff检查通过。
 - **复现与证据携带边界**：仓库内源码、tests和可独立执行TLS验证器随提交携带；`output/`内首次失败、截图、完整/私有配置和日志作为本机证据保留且不上传。第10～13节的证据文件名表示实际运行记录，不意味着这些文件出现在GitHub；不拿仅有文档陈述替代远端运行结果。T-23复现命令已改用随仓库携带的验证器。
-- **当前状态**：推送与GitHub远端工作流验收尚待执行。本次只在确认远端main包含准确HEAD、Linux CI各Node矩阵及visual结果、Pages发布和实际线上镜像资产/核心交互之后宣称远端同步与镜像发布完成。若出现远端失败，记录原因与修正，不把原本地通过当作远端已通过。
+- **发布前状态（历史记录，最终结果见14.2）**：推送与GitHub远端工作流验收尚待执行。本次只在确认远端main包含准确HEAD、Linux CI各Node矩阵及visual结果、Pages发布和实际线上镜像资产/核心交互之后宣称远端同步与镜像发布完成。若出现远端失败，记录原因与修正，不把原本地通过当作远端已通过。
 
 
 GitHub同步补记：第一轮推送`3c9043d`已成功，原始26个修复提交与T-23/T-16两个部署补丁、两份报告均在远端main。首次暂存diff检查对原审报告的Markdown两空格硬换行/原末尾空行报错，执行命令未因该格式退出而停止提交；该首次失败保留且不冒称通过。报告与开工备份仍逐字节相同。为同时保持原始审计证据及项目diff门禁，`.gitattributes`仅为`AUDIT_REPORT.md`设置`whitespace=-blank-at-eol,-blank-at-eof`，其他文件仍使用原检查；重新检查原基线至本次范围、工作区及暂存区。该规则不跳过代码测试/安全检查，不改审查结论或原文字节。随后推送此格式与记录补丁，以下远端验收以最终代码与规则提交对应run为准。
@@ -1023,3 +1023,14 @@ GitHub同步补记：第一轮推送`3c9043d`已成功，原始26个修复提交
 修正范围仅`bootPage`：等待初始引导状态明确，通过真实Escape关闭并等关闭完成，再检查工作区。没有注入guideSeen绕过引导，没有改返回顶部断言/8000ms门槛，没有自动多次重试以掩盖失败。新增`tests/browser-back-to-top.test.js`作为真实modal/keyboard回归；本地官方22.13回归1/1和static检查通过。此前探索过平滑滚动的独立DOM实验及一个public候选；它们不足以证明项目业务故障，候选已完全撤回。public全部文件SHA仍等于已经上线的产物，不需为验收工具修改重新部署主站。
 
 该项是授权GitHub/Pages发布的必要验收工具修正，无新A编号、不扩展原23项业务修复任务；执行O01的这次失败已取得明确解释，但不能概括所有历史间歇现象均同根因。原始失败、Mac原业务用例通过及不成立的候选验证均保留在本机`output/github-sync-20261011/`。本次仅推送测试/脚本与记录，远端最终门禁仍待新的准确HEAD验证。
+
+
+### 14.2 GitHub 与 Pages 最终验收（当前结果）
+
+- **已验收代码提交**：`7f4503246dffb95362213c64c59d5415a975ec2d`，已推送既有仓库main。所有修复、部署补丁、原始审查报告和本计划均已进入GitHub；原始AUDIT_REPORT与开工备份逐字节相同，未上传私钥、用户数据、.env或output私有证据。
+- **准确SHA的远端CI**：[CI run 38146718553](https://github.com/HachikoJ/starvault-imprint/actions/runs/38146718553)完整success。Linux Node22.13.0、22、24各583/583、fail0，包含PUB-01新增首次引导/键盘回归；各版本npm audit均0 vulnerabilities，凭据/离线计划/覆盖率与性能fixture门禁通过，visual job success；下载本次artifact实际核对60张PNG、issueCount=0、issues=[]。本机保存latest-ci-success.log、latest-ci-state.json与latest-visual-report.json。没有将旧SHA通过结果冒充本次结果。
+- **准确SHA的Pages部署**：[Pages run 38146718552](https://github.com/HachikoJ/starvault-imprint/actions/runs/38146718552)build/deploy均success；CI及static验收均通过，先前两次Pages失败已由14.1的测试流程修正闭环。镜像为<https://hachikoj.github.io/starvault-imprint/>。
+- **部署后实际验证**：HTTPS正常证书校验，14个静态文件逐字节匹配本地public；唯一预期内容注入为runtime-config.js中Exa代理绝对URL`https://starvault.deline.top/api/exa/search`，JS MIME正确。独立Chrome1440/390×zh/en四组5个导航页面、真实详情/3类风险、笔记状态选择→保存→确认→实际IDB→刷新恢复、JSON/CSV与评分metadata全部通过，页面/HTTP错误及额外外部请求均为0。24张截图保留并实际查看390英文项目及详情；证据pages-http-result.json、pages-browser-result.json和output/playwright/github-pages-20261011/。测试使用隔离context，没有真实Key、付费模型调用或访问用户浏览器数据。
+- **主站影响**：public全部14文件源SHA仍与第13节已上线产物清单一致；PUB-01只改验收脚本/测试，故无需重新部署主站。主站<https://starvault.deline.top/>与Pages镜像均为同一已验收业务源码，运行时代理配置按各自部署入口设置。
+- **文档结项提交规则**：本节仅更新FIX_PLAN.md，将已发生的远端验收写入交接记录；以`[skip ci]`提交避免为纯记录重复运行已通过的全部代码/部署门禁。该标记只用于此纯文档提交，不用于任何源码、测试、脚本或工作流修改。代码验收依据保持上面的7f45032，最终文档HEAD与该SHA之间必须仅有FIX_PLAN.md差异；同步后核对local HEAD=origin/main、ahead/behind=0、工作区干净及diff/secrets检查通过。最终SHA/核对回执保存在本机output/github-sync-20261011/final-sync-receipt.json（避免文档记录自身提交SHA产生循环）。
+- **完整任务去向及限制**：原26个A保持唯一追踪，23条纳入修复且T-01～T-23全部完成，A-24～26仍按既有明确依据暂缓；未产生新的必修业务任务。没有创建PR/Release或改变可见性，没有实施真实Node数据库迁移、供应商付费请求、用户真实数据迁移或生产故障/回滚演练。第13节“尚未推送/Pages未发布”等表述为该阶段的历史状态，现由本节实际结果覆盖，不意味着那些未执行的高风险操作被自动授权或验证。
