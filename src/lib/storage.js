@@ -2,7 +2,7 @@ const fs = require("node:fs");
 const path = require("node:path");
 const { createHash, randomUUID } = require("node:crypto");
 const { classifyRepository, inferUseCase } = require("./scoring");
-const { assignProfileIds, describeTrend, projectProfileMatches, snapshotGrowth, watcherFact } = require("../../public/domain-core");
+const { assignProfileIds, describeTrend, projectProfileMatches, snapshotGrowth, watcherFact, SCORING_VERSION, LEADERBOARD_VERSION, scoreVersion, compareScoredProjects, scoreGroups, appendScoreSnapshot, scoreHistoryAfterUpdate, selectLeaderboardProjects, projectRisk, comparableRankChange, memoryScore: sharedMemoryScore, leaderboardScore: sharedLeaderboardScore } = require("../../public/domain-core");
 const { buildQueryProfiles } = require("./github");
 const { getSqliteRevision, inheritSqliteSnapshot, isSqlitePath, readSqliteStore, snapshotRevision, withSqliteTransaction, writeSqliteStore } = require("./sqlite-store");
 
@@ -1519,7 +1519,8 @@ function normalizeProjectLicensePolicy(policy = {}) {
 }
 
 function riskLevel(project) {
-  const risk = Number(project.scores?.risk || project.scores?.overallRisk || 0);
+  const risk = projectRisk(project);
+  if (risk === null) return "unknown";
   if (risk >= 60) return "critical";
   if (risk >= 35) return "high";
   if (risk >= 15) return "medium";
@@ -1587,9 +1588,10 @@ function projectMemoryKeys(project) {
 }
 
 function dismissProjectSignalScales(project) {
-  const quality = Number(project.scores?.quality ?? 50);
-  const actionability = Number(project.scores?.actionability ?? 50);
-  const risk = Number(project.scores?.risk ?? project.scores?.overallRisk ?? 0);
+  const current = scoreVersion(project) === SCORING_VERSION;
+  const quality = current ? Number(project.scores?.quality ?? 50) : 50;
+  const actionability = current ? Number(project.scores?.actionability ?? 50) : 50;
+  const risk = projectRisk(project);
   const qualityDriven = quality < 45 || actionability < 45 || risk >= 35;
   return {
     semantic: qualityDriven ? 0.18 : 0.55,
@@ -1619,9 +1621,10 @@ function positivePreferenceTotal(memory = {}) {
 function likelyDismissedReason(project, memory = {}) {
   const computed = withComputedUseCase(project);
   const scores = computed.scores || {};
-  const quality = Number(scores.quality ?? 50);
-  const actionability = Number(scores.actionability ?? 50);
-  const risk = Number(scores.risk ?? scores.overallRisk ?? 0);
+  const current = scoreVersion(computed) === SCORING_VERSION;
+  const quality = current ? Number(scores.quality ?? 50) : null;
+  const actionability = current ? Number(scores.actionability ?? 50) : null;
+  const risk = projectRisk(computed);
   const description = String(computed.description || "").trim();
   const pushedDays = daysSince(computed.pushedAt || computed.updatedAt);
   const projectLabel = computed.name || computed.fullName || "该项目";
@@ -1678,7 +1681,7 @@ function likelyDismissedReason(project, memory = {}) {
       { descriptionLength: description.length }
     );
   }
-  if (risk >= 35 || /unknown|no-license|network|agpl/i.test(String(computed.licensePolicy?.bucket || computed.licensePolicy?.name || ""))) {
+  if ((risk !== null && risk >= 35) || /unknown|no-license|network|agpl/i.test(String(computed.licensePolicy?.bucket || computed.licensePolicy?.name || ""))) {
     const license = computed.licensePolicy?.labelZh || computed.licensePolicy?.name || "许可边界不明";
     const licenseEn = computed.licensePolicy?.labelEn || computed.licensePolicy?.name || "unclear license boundary";
     return build(
@@ -1688,7 +1691,7 @@ function likelyDismissedReason(project, memory = {}) {
       { license: computed.licensePolicy?.bucket || computed.licensePolicy?.name || "" }
     );
   }
-  if (quality < 45 || actionability < 45) {
+  if ((quality !== null && quality < 45) || (actionability !== null && actionability < 45)) {
     return build(
       "quality-actionability",
       `${profileZh}。系统更倾向判断为工程质量或落地路径不足：质量 ${Math.round(quality)}、可行动性 ${Math.round(actionability)}，还需要更多验证才适合重点跟踪。`,
@@ -2025,6 +2028,10 @@ function removeLatestMemoryEvent(store, fullName, eventType, requestedPlanId = "
 }
 
 function diversifyProjects(projects, limit) {
+  return scoreGroups(projects).flatMap(group => group.scoringVersion !== SCORING_VERSION ? group.items.slice().sort((a, b) => compareScoredProjects(a, b)).slice(0, limit) : diversifyVersionProjects(group.items, limit)).slice(0, limit);
+}
+
+function diversifyVersionProjects(projects, limit) {
   const grouped = new Map();
   for (const project of projects) {
     const key = projectFocusKey(project);
@@ -2036,10 +2043,10 @@ function diversifyProjects(projects, limit) {
 
   const groups = Array.from(grouped.entries()).map(([key, items]) => [
     key,
-    items.slice().sort((a, b) => (b.scores?.opportunity || 0) - (a.scores?.opportunity || 0))
+    items.slice().sort((a, b) => compareScoredProjects(a, b, (a, b) => (b.scores?.opportunity || 0) - (a.scores?.opportunity || 0)))
   ]);
 
-  groups.sort((a, b) => (b[1][0]?.scores?.opportunity || 0) - (a[1][0]?.scores?.opportunity || 0));
+  groups.sort((a, b) => compareScoredProjects(a[1][0], b[1][0], (a, b) => (b.scores?.opportunity || 0) - (a.scores?.opportunity || 0)));
 
   const selected = [];
   let round = 0;
@@ -2132,25 +2139,8 @@ function cachedTrend(project) {
 }
 
 function memoryScoreFromNormalized(project, normalized = defaultMemory()) {
-  const keys = projectMemoryKeys(project);
-  const preferences = normalized.preferences || {};
-  const negative = normalized.negativePreferences || {};
-  const positive =
-    (preferences.categories?.[keys.category] || 0) * 2 +
-    (preferences.useCases?.[keys.useCase] || 0) * 2.6 +
-    (preferences.languages?.[keys.language] || 0) * 0.95 +
-    (preferences.licenses?.[keys.license] || 0) * 0.75 +
-    (preferences.riskLevels?.[keys.risk] || 0) * 0.55;
-  const penalty =
-    (negative.categories?.[keys.category] || 0) * 2.25 +
-    (negative.useCases?.[keys.useCase] || 0) * 2.9 +
-    (negative.languages?.[keys.language] || 0) * 0.8 +
-    (negative.licenses?.[keys.license] || 0) * 0.65 +
-    (negative.riskLevels?.[keys.risk] || 0) * 0.55 +
-    (negative.repositories?.[project.fullName] || 0) * 3.2;
-  const ratio = Number(normalized.antiBubble?.explorationRatio ?? 0.25);
-  const personalWeight = Math.max(0.55, Math.min(0.95, 1 - ratio * 0.35));
-  return Math.max(-28, Math.min(36, (positive - penalty) * personalWeight));
+  const computed = project?.category?.key && project?.useCase?.key && project?.licensePolicy?.bucket ? project : withComputedUseCase(project);
+  return sharedMemoryScore(computed, normalized);
 }
 
 function memoryScore(project, memory = {}) {
@@ -2162,44 +2152,27 @@ function personalizedOpportunity(project, memory = {}) {
 }
 
 function leaderboardScore(project, period, memory = {}) {
-  const days = daysForPeriod(period);
-  const growth = snapshotGrowth(project, days);
-  const starDelta = Math.max(0, growth.stars ?? 0);
-  const forkDelta = Math.max(0, growth.forks ?? 0);
-  const agentNoise = Number(project.signals?.productFit?.abstractAgentPenalty || 0);
-  const trendingBoost = Math.min(
-    8,
-    (project.signals?.githubTrending || []).reduce((score, signal) => {
-      const periodWeight = {
-        daily: 3.2,
-        weekly: 2.1,
-        monthly: 1.4
-      }[signal.period] || 1.2;
-      const rankBoost = Math.max(0, 26 - Number(signal.rank || 26)) / 12;
-      return score + periodWeight + rankBoost;
-    }, 0)
-  );
-  const base =
-    (project.scores?.opportunity || 0) * 0.42 +
-    (project.scores?.productization || 0) * 0.22 +
-    (project.scores?.actionability || 0) * 0.22 +
-    (project.scores?.momentum || 0) * 0.14 -
-    (project.scores?.overallRisk || 0) * 0.16 -
-    agentNoise * 0.2;
-  const trend = Math.min(25, Math.log10(starDelta + 1) * 9 + Math.log10(forkDelta + 1) * 5);
-  return Math.round(Math.max(0, base + trend + trendingBoost + memoryScore(project, memory)));
+  return sharedLeaderboardScore(project, period, memoryScore(project, memory));
 }
 
 function leaderboardItem(project, rank, period, memory = {}, previousRanks = new Map()) {
   const fullName = project.fullName;
   const days = daysForPeriod(period);
   const growth = snapshotGrowth(project, days);
-  const previousRank = previousRanks.get(fullName) || null;
-  const memoryBoost = memoryScore(project, memory);
+  const previous = previousRanks.get(fullName) || null;
+  const rankChange = comparableRankChange({ ...project, leaderboardVersion: LEADERBOARD_VERSION }, previous, rank);
+  const previousRank = rankChange === null ? null : previous.rank;
+  const memoryBoost = scoreVersion(project) !== SCORING_VERSION ? 0 : memoryScore(project, memory);
   return {
     rank,
     previousRank,
-    rankChange: previousRank ? previousRank - rank : null,
+    rankChange,
+    rankWithinVersion: rank,
+    rankChangeComparable: previousRank !== null,
+    scoringVersion: scoreVersion(project),
+    riskSemantics: project.riskSemantics || "unknown",
+    riskDefinitions: project.riskDefinitions,
+    leaderboardVersion: LEADERBOARD_VERSION,
     fullName,
     name: project.name,
     url: project.url,
@@ -2215,10 +2188,11 @@ function leaderboardItem(project, rank, period, memory = {}, previousRanks = new
     signals: project.signals,
     leaderboardScore: leaderboardScore(project, period, memory),
     scoreParts: {
+      score: leaderboardScore(project, period, memory),
       opportunity: project.scores?.opportunity || 0,
       recentHeat: project.scores?.momentum || 0,
       actionability: project.scores?.actionability || 0,
-      projectRisk: project.scores?.risk || 0,
+      projectRisk: projectRisk(project),
       memoryBoost,
       starDelta: growth.stars,
       forkDelta: growth.forks,
@@ -2249,7 +2223,7 @@ function hydrateLeaderboardRecordState(item, userData = {}) {
 }
 
 function rankMap(archive) {
-  return new Map((archive?.items || []).map((item) => [item.fullName, item.rank]));
+  return new Map((archive?.items || []).map((item) => [item.fullName, { ...item, scoringVersion: item.scoringVersion || archive.scoringVersion, leaderboardVersion: item.leaderboardVersion || archive.leaderboardVersion }]));
 }
 
 function previousDateKey(dateKey) {
@@ -4265,22 +4239,25 @@ function createStorage(filePath) {
 
     if (filters.risk && filters.risk !== "all") {
       if (filters.risk === "critical") {
-        items = items.filter((project) => (project.scores?.risk || 0) >= 60);
+        items = items.filter((project) => projectRisk(project) !== null && projectRisk(project) >= 60);
       }
       if (filters.risk === "high") {
         items = items.filter((project) => {
-          const risk = project.scores?.risk || 0;
-          return risk >= 35 && risk < 60;
+          const risk = projectRisk(project);
+          return risk !== null && risk >= 35 && risk < 60;
         });
       }
       if (filters.risk === "medium") {
         items = items.filter((project) => {
-          const risk = project.scores?.risk || 0;
-          return risk >= 15 && risk < 35;
+          const risk = projectRisk(project);
+          return risk !== null && risk >= 15 && risk < 35;
         });
       }
       if (filters.risk === "low") {
-        items = items.filter((project) => (project.scores?.risk || 0) < 15);
+        items = items.filter((project) => projectRisk(project) !== null && projectRisk(project) < 15);
+      }
+      if (filters.risk === "unknown") {
+        items = items.filter((project) => projectRisk(project) === null);
       }
     }
 
@@ -4330,19 +4307,19 @@ function createStorage(filePath) {
       items.sort((a, b) => {
         if (sort === "stars") return (b.stars || 0) - (a.stars || 0);
         if (sort === "updated") return new Date(b.pushedAt || 0) - new Date(a.pushedAt || 0);
-        if (sort === "risk") return (b.scores?.risk || 0) - (a.scores?.risk || 0);
-        if (sort === "momentum") return (b.scores?.momentum || 0) - (a.scores?.momentum || 0);
-        if (sort === "actionability") return (b.scores?.actionability || 0) - (a.scores?.actionability || 0);
-        if (sort === "commercial") return commercialScore(b) - commercialScore(a);
-        if (sort === "productization") return (b.scores?.productization || 0) - (a.scores?.productization || 0);
-        if (sort === "quality") return (b.scores?.quality || 0) - (a.scores?.quality || 0);
+        if (sort === "risk") return compareScoredProjects(a, b, (a, b) => (projectRisk(b) ?? -Infinity) - (projectRisk(a) ?? -Infinity));
+        if (sort === "momentum") return compareScoredProjects(a, b, (a, b) => (b.scores?.momentum || 0) - (a.scores?.momentum || 0));
+        if (sort === "actionability") return compareScoredProjects(a, b, (a, b) => (b.scores?.actionability || 0) - (a.scores?.actionability || 0));
+        if (sort === "commercial") return compareScoredProjects(a, b, (a, b) => commercialScore(b) - commercialScore(a));
+        if (sort === "productization") return compareScoredProjects(a, b, (a, b) => (b.scores?.productization || 0) - (a.scores?.productization || 0));
+        if (sort === "quality") return compareScoredProjects(a, b, (a, b) => (b.scores?.quality || 0) - (a.scores?.quality || 0));
         if (sort === "trendStars") {
-          return cachedTrendValue(b, "stars") - cachedTrendValue(a, "stars") || personalizedScore(b) - personalizedScore(a);
+          return cachedTrendValue(b, "stars") - cachedTrendValue(a, "stars") || compareScoredProjects(a, b, (a, b) => personalizedScore(b) - personalizedScore(a));
         }
         if (sort === "trendForks") {
-          return cachedTrendValue(b, "forks") - cachedTrendValue(a, "forks") || personalizedScore(b) - personalizedScore(a);
+          return cachedTrendValue(b, "forks") - cachedTrendValue(a, "forks") || compareScoredProjects(a, b, (a, b) => personalizedScore(b) - personalizedScore(a));
         }
-        return personalizedScore(b) - personalizedScore(a);
+        return compareScoredProjects(a, b, (a, b) => personalizedScore(b) - personalizedScore(a));
       });
     }
 
@@ -4907,6 +4884,10 @@ function createStorage(filePath) {
         stars: project.stars || 0,
         forks: project.forks || 0,
         openIssues: project.openIssues || 0,
+        scoringVersion: scoreVersion(project),
+        riskSemantics: project.riskSemantics || "unknown",
+        riskDefinitions: project.riskDefinitions,
+        scores: cloneJson(project.scores || {}, {}),
         opportunity: project.scores?.opportunity || 0,
         momentum: project.scores?.momentum || 0,
         risk: project.scores?.risk || 0
@@ -4934,7 +4915,8 @@ function createStorage(filePath) {
         ...project,
         firstSeenAt: previous?.firstSeenAt || now,
         lastSeenAt: now,
-        snapshots: [...(previous?.snapshots || []), snapshot].slice(-180),
+        snapshots: appendScoreSnapshot(previous?.snapshots, snapshot),
+        scoreHistory: scoreHistoryAfterUpdate(previous, project, now),
         ...globalProjection,
         trend: project.trend || previous?.trend || onlineTrendPlaceholder(),
         observationPlanMatches
@@ -5306,7 +5288,7 @@ function createStorage(filePath) {
     const semanticCatalog = countSemanticFilters(allProjects, memory);
     const byCategory = {};
     const byLicense = {};
-    const byRisk = { low: 0, medium: 0, high: 0 };
+    const byRisk = { low: 0, medium: 0, high: 0, unknown: 0 };
     const categoryCounts = {};
     const categoryLabels = {};
     const useCaseCounts = {};
@@ -5314,14 +5296,15 @@ function createStorage(filePath) {
     const languageCounts = {};
     const licenseCounts = {};
     const licenseLabels = {};
-    const riskCounts = { low: 0, medium: 0, high: 0, critical: 0 };
-    const momentumCounts = { hot: 0, rising: 0, steady: 0, quiet: 0 };
-    const actionabilityCounts = { ready: 0, promising: 0, evaluate: 0, early: 0 };
+    const riskCounts = { low: 0, medium: 0, high: 0, critical: 0, unknown: 0 };
+    const momentumCounts = { hot: 0, rising: 0, steady: 0, quiet: 0, unknown: 0 };
+    const actionabilityCounts = { ready: 0, promising: 0, evaluate: 0, early: 0, unknown: 0 };
     const capabilityCounts = {};
     const capabilityLabels = {};
     const today = todayKey();
     const projectRiskLevel = (project) => {
-      const risk = Number(project.scores?.risk ?? 0);
+      const risk = projectRisk(project);
+      if (risk === null) return "unknown";
       if (risk >= 60) return "critical";
       if (risk >= 35) return "high";
       if (risk >= 15) return "medium";
@@ -5333,8 +5316,9 @@ function createStorage(filePath) {
       byCategory[category] = (byCategory[category] || 0) + 1;
       const license = project.licensePolicy?.label || "Unknown";
       byLicense[license] = (byLicense[license] || 0) + 1;
-      const risk = project.scores?.risk || 0;
-      if (risk >= 35) byRisk.high += 1;
+      const risk = projectRisk(project);
+      if (risk === null) byRisk.unknown += 1;
+      else if (risk >= 35) byRisk.high += 1;
       else if (risk >= 15) byRisk.medium += 1;
       else byRisk.low += 1;
 
@@ -5368,11 +5352,11 @@ function createStorage(filePath) {
       riskCounts[riskKey] = (riskCounts[riskKey] || 0) + 1;
 
       const momentum = Number(project.scores?.momentum || 0);
-      const momentumKey = momentum >= 70 ? "hot" : momentum >= 45 ? "rising" : momentum >= 20 ? "steady" : "quiet";
+      const momentumKey = scoreVersion(project) !== SCORING_VERSION ? "unknown" : momentum >= 70 ? "hot" : momentum >= 45 ? "rising" : momentum >= 20 ? "steady" : "quiet";
       momentumCounts[momentumKey] = (momentumCounts[momentumKey] || 0) + 1;
 
       const actionability = Number(project.scores?.actionability || 0);
-      const actionabilityKey = actionability >= 70 ? "ready" : actionability >= 50 ? "promising" : actionability >= 30 ? "evaluate" : "early";
+      const actionabilityKey = scoreVersion(project) !== SCORING_VERSION ? "unknown" : actionability >= 70 ? "ready" : actionability >= 50 ? "promising" : actionability >= 30 ? "evaluate" : "early";
       actionabilityCounts[actionabilityKey] = (actionabilityCounts[actionabilityKey] || 0) + 1;
 
       for (const tag of projectCapabilityTags(project)) {
@@ -5402,6 +5386,9 @@ function createStorage(filePath) {
       lastSeenAt: project.lastSeenAt,
       licensePolicy: project.licensePolicy,
       scores: project.scores,
+      scoringVersion: scoreVersion(project),
+      riskSemantics: project.riskSemantics || "unknown",
+      riskDefinitions: project.riskDefinitions,
       signals: project.signals,
       reasons: project.reasons,
       actions: project.actions
@@ -5411,7 +5398,7 @@ function createStorage(filePath) {
     const top = diversifyProjects(
       projects
         .slice()
-        .sort((a, b) => (b.scores?.opportunity || 0) - (a.scores?.opportunity || 0)),
+        .sort((a, b) => compareScoredProjects(a, b, (a, b) => (b.scores?.opportunity || 0) - (a.scores?.opportunity || 0))),
       summaryTopLimit
     )
       .slice(0, summaryTopLimit)
@@ -5426,7 +5413,7 @@ function createStorage(filePath) {
     ]);
     const licenseReview = projects
       .filter((project) => reviewBuckets.has(project.licensePolicy?.bucket || "unknown-no-license"))
-      .sort((a, b) => (b.scores?.opportunity || 0) - (a.scores?.opportunity || 0))
+      .sort((a, b) => compareScoredProjects(a, b, (a, b) => (b.scores?.opportunity || 0) - (a.scores?.opportunity || 0)))
       .slice(0, 8)
       .map(compactProject);
     const highTrend = projects
@@ -5434,7 +5421,7 @@ function createStorage(filePath) {
       .sort((a, b) => {
         const aTrend = (a.signals?.starDelta || 0) + (a.signals?.forkDelta || 0) * 2;
         const bTrend = (b.signals?.starDelta || 0) + (b.signals?.forkDelta || 0) * 2;
-        return bTrend - aTrend;
+        return bTrend - aTrend || compareScoredProjects(a, b);
       })
       .slice(0, 8)
       .map(compactProject);
@@ -5463,19 +5450,22 @@ function createStorage(filePath) {
       low: { labelZh: "稳健", labelEn: "Stable", tone: "good" },
       medium: { labelZh: "需观察", labelEn: "Watch", tone: "watch" },
       high: { labelZh: "高波动", labelEn: "Volatile", tone: "warning" },
-      critical: { labelZh: "避险优先", labelEn: "Avoid first", tone: "danger" }
+      critical: { labelZh: "避险优先", labelEn: "Avoid first", tone: "danger" },
+      unknown: { labelZh: "旧版含义未确认", labelEn: "Unknown legacy semantics", tone: "muted" }
     };
     const momentumMeta = {
       hot: { labelZh: "高热", labelEn: "Hot", tone: "hot" },
       rising: { labelZh: "升温", labelEn: "Rising", tone: "good" },
       steady: { labelZh: "平稳", labelEn: "Steady", tone: "watch" },
-      quiet: { labelZh: "低波动", labelEn: "Quiet", tone: "muted" }
+      quiet: { labelZh: "低波动", labelEn: "Quiet", tone: "muted" },
+      unknown: { labelZh: "旧版含义未确认", labelEn: "Unknown legacy semantics", tone: "muted" }
     };
     const actionabilityMeta = {
       ready: { labelZh: "准备度高", labelEn: "Ready", tone: "good" },
       promising: { labelZh: "值得评估", labelEn: "Promising", tone: "watch" },
       evaluate: { labelZh: "需要验证", labelEn: "Needs validation", tone: "warning" },
-      early: { labelZh: "早期观察", labelEn: "Early watch", tone: "muted" }
+      early: { labelZh: "早期观察", labelEn: "Early watch", tone: "muted" },
+      unknown: { labelZh: "旧版含义未确认", labelEn: "Unknown legacy semantics", tone: "muted" }
     };
 
     const result = {
@@ -5483,6 +5473,7 @@ function createStorage(filePath) {
       poolTotal: pool.total,
       poolLimit: pool.limit,
       poolSort: pool.sort,
+      scoreGroups: scoreGroups(projects).map(group => ({ scoringVersion: group.scoringVersion, count: group.items.length })),
       watched: Object.keys(userData.watchlist || {}).length,
       scans: planScans,
       lastScan: planScans[0] || null,
@@ -5495,9 +5486,9 @@ function createStorage(filePath) {
         useCases: distributionEntries(useCaseCounts, useCaseLabels, 12),
         languages: distributionEntries(languageCounts, {}, 10),
         licenses: distributionEntries(licenseCounts, licenseLabels, 8),
-        projectRisk: orderedEntries(riskCounts, riskMeta, ["low", "medium", "high", "critical"]),
-        momentum: orderedEntries(momentumCounts, momentumMeta, ["hot", "rising", "steady", "quiet"]),
-        actionability: orderedEntries(actionabilityCounts, actionabilityMeta, ["ready", "promising", "evaluate", "early"]),
+        projectRisk: orderedEntries(riskCounts, riskMeta, ["low", "medium", "high", "critical", "unknown"]),
+        momentum: orderedEntries(momentumCounts, momentumMeta, ["hot", "rising", "steady", "quiet", "unknown"]),
+        actionability: orderedEntries(actionabilityCounts, actionabilityMeta, ["ready", "promising", "evaluate", "early", "unknown"]),
         topics: distributionEntries(capabilityCounts, capabilityLabels, 28),
         semanticFilters: semanticPreview(semanticFilters),
         semanticCatalog: semanticPreview(semanticCatalog),
@@ -5535,9 +5526,14 @@ function createStorage(filePath) {
     const memory = normalizeMemory(plan?.memory || store.memory);
     const userData = normalizePlanUserData(plan?.userData || {});
     const dailyArchive = planId === "default" ? store.leaderboards?.daily : store.leaderboards?.byPlan?.[planId]?.daily;
-    const dateKey = options.date || todayKey();
+    const requestedArchiveKey = options.date || "";
+    // New versioned archives share the browser's UTC calendar. Existing
+    // archive keys/dates are read verbatim and are never rewritten.
+    const currentDate = new Date().toISOString().slice(0, 10);
+    const dateKey = dailyArchive?.[requestedArchiveKey]?.date || String(options.date || currentDate).slice(0, 10);
+    const archiveKey = `${dateKey}~${SCORING_VERSION}~${LEADERBOARD_VERSION}`;
     const limit = Math.max(5, Math.min(Number(options.limit || 20), 30));
-    const cacheKey = `${leaderboardCacheVersion(store, planId)}:${period}:${dateKey}:${limit}`;
+    const cacheKey = `${leaderboardCacheVersion(store, planId)}:${period}:${requestedArchiveKey || archiveKey}:${limit}`;
     if (options.persist === false && leaderboardCache.has(cacheKey)) {
       const cached = leaderboardCache.get(cacheKey);
       leaderboardCache.delete(cacheKey);
@@ -5561,63 +5557,52 @@ function createStorage(filePath) {
         });
       });
 
-    if (period === "daily" && options.date && dailyArchive?.[dateKey]) {
+    if (period === "daily" && options.date && dailyArchive?.[requestedArchiveKey]) {
       return {
-        ...dailyArchive[dateKey],
-        items: (dailyArchive[dateKey].items || []).map((item) => hydrateLeaderboardRecordState(item, userData)),
+        ...dailyArchive[requestedArchiveKey],
+        archiveKey: requestedArchiveKey,
+        items: (dailyArchive[requestedArchiveKey].items || []).map((item) => hydrateLeaderboardRecordState(item, userData)),
         memory,
         observationPlan: observationPlanPublicView(plan, planId, false),
         archiveDates: Object.keys(dailyArchive || {}).sort().reverse()
       };
     }
 
-    const previousRanks = rankMap(dailyArchive?.[previousDateKey(dateKey)]);
+    const previousDay = new Date(`${dateKey}T00:00:00Z`);
+    previousDay.setUTCDate(previousDay.getUTCDate() - 1);
+    const previousDate = Number.isFinite(previousDay.getTime()) ? previousDay.toISOString().slice(0, 10) : "";
+    const previousRanks = rankMap(dailyArchive?.[`${previousDate}~${SCORING_VERSION}~${LEADERBOARD_VERSION}`] || dailyArchive?.[previousDate]);
     const ranked = projects
       .map((project) => ({
         ...project,
         _leaderboardScore: leaderboardScore(project, period, memory)
       }))
-      .sort((a, b) => b._leaderboardScore - a._leaderboardScore || (b.scores?.opportunity || 0) - (a.scores?.opportunity || 0));
+      .sort((a, b) => compareScoredProjects(a, b, (a, b) => b._leaderboardScore - a._leaderboardScore || (b.scores?.opportunity || 0) - (a.scores?.opportunity || 0)));
 
-    const grouped = new Map();
-    for (const project of ranked) {
-      const key = project.useCase?.key || project.category?.key || "other";
-      if (!grouped.has(key)) grouped.set(key, []);
-      grouped.get(key).push(project);
-    }
-
-    const groups = Array.from(grouped.values()).sort((a, b) => (b[0]?._leaderboardScore || 0) - (a[0]?._leaderboardScore || 0));
-    const selected = [];
-    let round = 0;
-    while (selected.length < limit) {
-      let progressed = false;
-      for (const group of groups) {
-        const project = group[round];
-        if (project) {
-          progressed = true;
-          if (!dismissedProjects[projectKey(project.fullName)]) {
-            selected.push(project);
-          }
-          if (selected.length >= limit) break;
-        }
-      }
-      if (!progressed) break;
-      round += 1;
-    }
+    const selected = selectLeaderboardProjects(ranked.filter(project => !dismissedProjects[projectKey(project.fullName)]), limit);
+    const ranksWithinVersion = new Map();
 
     const result = {
       period,
       date: dateKey,
+      archiveKey,
+      scoringVersion: SCORING_VERSION,
+      leaderboardVersion: LEADERBOARD_VERSION,
+      scoreGroups: scoreGroups(selected).map(group => ({ scoringVersion: group.scoringVersion, count: group.items.length })),
       generatedAt: new Date().toISOString(),
       limit,
       discoveryCoverage: cloneJson(latestScanInStore(store, planId)?.discoveryCoverage || null, null),
       memory,
       observationPlan: observationPlanPublicView(plan, planId, false),
-      items: selected.map((project, index) => hydrateLeaderboardRecordState(leaderboardItem(project, index + 1, period, memory, previousRanks), userData)),
+      items: selected.map(project => {
+        const version = scoreVersion(project), rank = (ranksWithinVersion.get(version) || 0) + 1;
+        ranksWithinVersion.set(version, rank);
+        return hydrateLeaderboardRecordState(leaderboardItem(project, rank, period, memory, previousRanks), userData);
+      }),
       archiveDates: Object.keys(dailyArchive || {}).sort().reverse()
     };
 
-    if (period === "daily" && dateKey === todayKey() && options.persist !== false) {
+    if (period === "daily" && dateKey === currentDate && options.persist !== false) {
       store.leaderboards = store.leaderboards || { daily: {} };
       const target =
         planId === "default"
@@ -5625,9 +5610,13 @@ function createStorage(filePath) {
           : ((store.leaderboards.byPlan = store.leaderboards.byPlan || {}),
             (store.leaderboards.byPlan[planId] = store.leaderboards.byPlan[planId] || { daily: {} }),
             (store.leaderboards.byPlan[planId].daily = store.leaderboards.byPlan[planId].daily || {}));
-      target[dateKey] = {
+      target[archiveKey] = {
         period: result.period,
         date: result.date,
+        archiveKey: result.archiveKey,
+        scoringVersion: result.scoringVersion,
+        leaderboardVersion: result.leaderboardVersion,
+        scoreGroups: result.scoreGroups,
         generatedAt: result.generatedAt,
         limit: result.limit,
         observationPlan: result.observationPlan,

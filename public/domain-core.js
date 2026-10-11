@@ -191,7 +191,7 @@
   function createAnalysisTaskInput(body, planId, project, provider, language = "zh") {
     const fullName = String(project?.fullName || body.fullName || "").trim().toLowerCase().slice(0, 240);
     const captured = {};
-    for (const field of ["description", "url", "language", "topics", "stars", "forks", "openIssues", "category", "useCase", "licensePolicy", "scores", "signals", "reasons", "actions", "observationPlanMatches", "observationMatches"]) {
+    for (const field of ["description", "url", "language", "topics", "stars", "forks", "openIssues", "category", "useCase", "licensePolicy", "scores", "scoringVersion", "riskSemantics", "riskDefinitions", "signals", "reasons", "actions", "observationPlanMatches", "observationMatches"]) {
       if (project?.[field] !== undefined) captured[field] = JSON.parse(JSON.stringify(project[field]));
     }
     captured.fullName = fullName;
@@ -928,11 +928,130 @@
   }
 
   function riskLevel(project = {}) {
-    const risk = Number(project.scores?.risk ?? project.scores?.overallRisk ?? project.licensePolicy?.risk ?? 0);
+    const risk = projectRisk(project);
+    if (risk === null) return "unknown";
     if (risk >= 60) return "critical";
     if (risk >= 35) return "high";
     if (risk >= 15) return "medium";
     return "low";
+  }
+
+  const SCORING_VERSION = "starvault-node-v1";
+  const LEADERBOARD_VERSION = "starvault-node-board-v1";
+  const RISK_SEMANTICS = "project-license-action-v1";
+
+  function scoreVersion(project = {}) {
+    const value = project.scoringVersion;
+    return typeof value === "string" && value.trim() ? value.trim() : "unknown";
+  }
+
+  function scoreVersionCompare(a, b) {
+    const left = scoreVersion(a), right = scoreVersion(b);
+    if (left === right) return 0;
+    if (left === SCORING_VERSION) return -1;
+    if (right === SCORING_VERSION) return 1;
+    if (left === "unknown") return 1;
+    if (right === "unknown") return -1;
+    return left.localeCompare(right);
+  }
+
+  function compareScoredProjects(a, b, compare = () => 0) {
+    const group = scoreVersionCompare(a, b);
+    if (group) return group;
+    if (scoreVersion(a) === SCORING_VERSION) {
+      const result = compare(a, b);
+      if (Number.isFinite(result) && result) return result;
+    }
+    return Number(b.stars || 0) - Number(a.stars || 0) || String(a.fullName || "").localeCompare(String(b.fullName || ""));
+  }
+
+  function scoreGroups(projects = []) {
+    const groups = new Map();
+    for (const project of projects) {
+      const version = scoreVersion(project);
+      if (!groups.has(version)) groups.set(version, []);
+      groups.get(version).push(project);
+    }
+    return Array.from(groups, ([scoringVersion, items]) => ({ scoringVersion, items }))
+      .sort((a, b) => scoreVersionCompare(a, b));
+  }
+
+  function appendScoreSnapshot(history = [], entry) {
+    const combined = [...history, entry];
+    const version = scoreVersion(entry);
+    const sameVersion = combined.filter(point => scoreVersion(point) === version);
+    const retained = new Set(sameVersion.slice(-180));
+    // Retention applies to the new version only: a first new scan must not
+    // discard historical observations belonging to another scoring contract.
+    return combined.filter(point => scoreVersion(point) !== version || retained.has(point));
+  }
+
+  function scoreHistoryAfterUpdate(previous, project, at) {
+    const history = [...(previous?.scoreHistory || [])];
+    if (previous?.scores && (scoreVersion(previous) !== scoreVersion(project) ||
+        (previous.riskSemantics || "unknown") !== (project.riskSemantics || "unknown"))) {
+      history.push({ at: previous.lastSeenAt || previous.firstSeenAt || at,
+        scoringVersion: scoreVersion(previous), riskSemantics: previous.riskSemantics || "unknown",
+        riskDefinitions: previous.riskDefinitions, scores: JSON.parse(JSON.stringify(previous.scores)) });
+    }
+    return history;
+  }
+
+  function selectLeaderboardProjects(projects, limit) {
+    const selected = [];
+    const ranked = projects.slice().sort((a, b) => compareScoredProjects(a, b, (left, right) =>
+      right._leaderboardScore - left._leaderboardScore || (right.scores?.opportunity || 0) - (left.scores?.opportunity || 0)));
+    for (const versionGroup of scoreGroups(ranked)) {
+      if (selected.length >= limit) break;
+      if (versionGroup.scoringVersion !== SCORING_VERSION) {
+        selected.push(...versionGroup.items.slice(0, limit - selected.length));
+        continue;
+      }
+      const grouped = new Map();
+      for (const project of versionGroup.items) {
+        const key = project.useCase?.key || project.category?.key || "other";
+        if (!grouped.has(key)) grouped.set(key, []);
+        grouped.get(key).push(project);
+      }
+      const groups = Array.from(grouped.values()).sort((a, b) => compareScoredProjects(a[0], b[0], (left, right) => right._leaderboardScore - left._leaderboardScore));
+      for (let round = 0; selected.length < limit; round++) {
+        let progressed = false;
+        for (const group of groups) {
+          if (group[round]) { selected.push(group[round]); progressed = true; }
+          if (selected.length >= limit) break;
+        }
+        if (!progressed) break;
+      }
+    }
+    return selected;
+  }
+
+  function projectRisk(project = {}) {
+    const value = project.scores?.risk;
+    return project.riskSemantics === RISK_SEMANTICS && typeof value === "number" && Number.isFinite(value) ? value : null;
+  }
+
+  function comparableRankChange(project, previous, rank) {
+    return previous && scoreVersion(project) === SCORING_VERSION && scoreVersion(project) === scoreVersion(previous) &&
+      project.leaderboardVersion && project.leaderboardVersion === previous.leaderboardVersion &&
+      Number.isInteger(previous.rank) && Number.isInteger(rank) ? previous.rank - rank : null;
+  }
+
+  function leaderboardScore(project, period = "daily", memoryBoost = 0, reference = Date.now()) {
+    if (scoreVersion(project) !== SCORING_VERSION) return null;
+    const days = { daily: 1, weekly: 7, monthly: 30, all: 3650 }[period] || 1;
+    const growth = snapshotGrowth(project, days, reference);
+    const starDelta = Math.max(0, growth.stars ?? 0), forkDelta = Math.max(0, growth.forks ?? 0);
+    const agentNoise = Number(project.signals?.productFit?.abstractAgentPenalty || 0);
+    const trendingBoost = Math.min(8, (project.signals?.githubTrending || []).reduce((score, signal) => {
+      const periodWeight = { daily: 3.2, weekly: 2.1, monthly: 1.4 }[signal.period] || 1.2;
+      return score + periodWeight + Math.max(0, 26 - Number(signal.rank || 26)) / 12;
+    }, 0));
+    const base = (project.scores?.opportunity || 0) * 0.42 + (project.scores?.productization || 0) * 0.22 +
+      (project.scores?.actionability || 0) * 0.22 + (project.scores?.momentum || 0) * 0.14 -
+      (project.scores?.overallRisk || 0) * 0.16 - agentNoise * 0.2;
+    const trend = Math.min(25, Math.log10(starDelta + 1) * 9 + Math.log10(forkDelta + 1) * 5);
+    return Math.round(Math.max(0, base + trend + trendingBoost + memoryBoost));
   }
 
   function memoryScore(project = {}, memory = {}) {
@@ -950,7 +1069,7 @@
       Number(preferences.licenses?.[license] || 0) * 0.75 +
       Number(preferences.riskLevels?.[risk] || 0) * 0.55;
     const repositoryPenalty = Number(
-      negative.repositories?.[project.fullName] || negative.repositories?.[String(project.fullName || "").toLowerCase()] || 0
+      negative.repositories?.[project.fullName] || 0
     );
     const penalty =
       Number(negative.categories?.[category] || 0) * 2.25 +
@@ -965,6 +1084,19 @@
   }
 
   return {
+    SCORING_VERSION,
+    LEADERBOARD_VERSION,
+    RISK_SEMANTICS,
+    scoreVersion,
+    scoreVersionCompare,
+    compareScoredProjects,
+    scoreGroups,
+    appendScoreSnapshot,
+    scoreHistoryAfterUpdate,
+    selectLeaderboardProjects,
+    projectRisk,
+    comparableRankChange,
+    leaderboardScore,
     providerApiUrls,
     csvCell,
     assertAnalysisDelivery,

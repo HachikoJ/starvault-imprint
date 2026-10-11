@@ -73,9 +73,10 @@ test("T-17 real IndexedDB/local export covers all text fields and preserves raw 
   const indexedDB = new IDBFactory(), values = new Map();
   const window = {indexedDB, IDBKeyRange, localStorage: {getItem: k => values.get(k) || null, setItem: (k,v) => values.set(k,String(v)), removeItem: k => values.delete(k)}, location: {origin: "http://127.0.0.1:4173",hostname: "127.0.0.1",host: "127.0.0.1:4173"}};
   const context = {window,globalThis: {IDBKeyRange},indexedDB,IDBKeyRange,location: window.location,fetch: async () => {throw Error("No external requests allowed");},setTimeout,clearTimeout,AbortController,TextDecoder,Date,JSON,Map,Set,Promise,Error,Object,Array,String,Number,Boolean,URL,URLSearchParams,Math};
-  for (const file of ["domain-core.js","indexeddb-storage.js","local-api.js"]) {
+  for (const file of ["domain-core.js","scoring-core.js","indexeddb-storage.js","local-api.js"]) {
     vm.runInNewContext(fs.readFileSync(path.join(__dirname,"../public",file),"utf8"),context);
     if (file === "domain-core.js") window.StarVaultDomainCore = context.globalThis.StarVaultDomainCore;
+    if (file === "scoring-core.js") window.StarVaultScoringCore = context.globalThis.StarVaultScoringCore;
   }
   const api = window.StarVaultLocalApi, db = window.StarVaultIndexedDB;
   await api.handle("/api/config"); await db.putProjects(projects());

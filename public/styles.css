@@ -11015,6 +11015,17 @@ body::before {
   padding: 6px 7px;
 }
 
+#view-projects .hero-metrics .score-contract-metric {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  column-gap: 6px;
+}
+
+#view-projects .hero-metrics .score-contract-metric span {
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+
 #view-projects .hero-metrics span {
   font-size: 10px;
 }

@@ -21,6 +21,9 @@ const store = createStorage(process.env.STORE_PATH);
 const make = (name, trend, snapshots) => ({ fullName: "fixture/" + name, name, owner:"fixture",
   description:"A deployable dashboard toolkit for product teams", topics:["dashboard"], language:"TypeScript",
   url:"https://github.com/fixture/"+name, stars:150, forks:15, openIssues:1, createdAt:"2020-01-01T00:00:00Z", pushedAt:new Date().toISOString(),
+  // These fixtures exercise current leaderboard weights. The legacy names
+  // describe the trend format, not an unknown scoring version.
+  scoringVersion:"starvault-node-v1", riskSemantics:"project-license-action-v1",
   scores:{ opportunity:80, productization:80, actionability:80, momentum:50, overallRisk:10, risk:10 }, trend, snapshots });
 const now = "2026-10-09T00:30:00.000Z";
 const atMonth = "2026-09-09T00:30:00.000Z";
@@ -64,7 +67,7 @@ assert.equal(zero.scoreParts.starDelta, 0);
 assert.equal(negative.leaderboardScore, zero.leaderboardScore, "negative growth creates no reward or NaN penalty");
 assert.equal(JSON.stringify(store.load().projects), beforeProjects, "reading/scoring does not rewrite historical project records");
 const reader = createStorage(process.env.STORE_PATH);
-const archive = reader.buildLeaderboard("daily", { date:"2026-10-09", limit:20, persist:false });
+const archive = reader.buildLeaderboard("daily", { date:daily.archiveKey, limit:20, persist:false });
 assert.deepEqual(archive.items.find(item => item.fullName === "fixture/negative").scoreParts, negative.scoreParts, "SQLite archive preserves the measured window and raw deltas");
 reader.buildLeaderboard("daily", { date:"2020-01-01", persist:false });
 assert.equal(JSON.stringify(reader.load().leaderboards.daily["2020-01-01"]), legacyArchive, "existing archives are retained without inventing windows");

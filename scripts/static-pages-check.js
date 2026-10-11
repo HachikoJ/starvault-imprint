@@ -324,7 +324,7 @@ async function main() {
     await mobile.page.screenshot({ path: path.join(OUTPUT_DIR, "mobile.png"), fullPage: true });
     await mobile.context.close();
 
-    const assets = ["/index.html", "/styles.css", "/runtime-config.js", "/bootstrap.js", "/domain-core.js", "/indexeddb-storage.js", "/local-api.js", "/app.js", "/demo-snapshot.json", "/og-cover.png", "/favicon.svg"];
+    const assets = ["/index.html", "/styles.css", "/runtime-config.js", "/bootstrap.js", "/domain-core.js", "/scoring-core.js", "/indexeddb-storage.js", "/local-api.js", "/app.js", "/demo-snapshot.json", "/og-cover.png", "/favicon.svg"];
     for (const asset of assets) {
       const response = await fetch(`${url.replace(/\/$/, "")}${asset}`);
       const ok = response.status === 200;

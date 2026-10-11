@@ -13,8 +13,8 @@ async function fixture(t) {
   const searchGate = new Promise(resolve=>{releaseSearch=resolve;});
   const server=http.createServer((req,res)=>{
     const name=new URL(req.url,'http://localhost').pathname.slice(1);
-    if (!name) {res.writeHead(200,{'Content-Type':'text/html; charset=utf-8'});res.end('<!doctype html><script src="/domain-core.js"></script><script src="/indexeddb-storage.js"></script><script src="/local-api.js"></script>');return;}
-    if (['domain-core.js','indexeddb-storage.js','local-api.js'].includes(name)) {res.writeHead(200,{'Content-Type':'text/javascript; charset=utf-8'});res.end(fs.readFileSync(path.join(ROOT,'public',name)));return;}
+    if (!name) {res.writeHead(200,{'Content-Type':'text/html; charset=utf-8'});res.end('<!doctype html><script src="/domain-core.js"></script><script src="/scoring-core.js"></script><script src="/indexeddb-storage.js"></script><script src="/local-api.js"></script>');return;}
+    if (['domain-core.js','scoring-core.js','indexeddb-storage.js','local-api.js'].includes(name)) {res.writeHead(200,{'Content-Type':'text/javascript; charset=utf-8'});res.end(fs.readFileSync(path.join(ROOT,'public',name)));return;}
     if (name !== 'model/v1/chat/completions') {res.writeHead(404);res.end();return;}
     let body='';req.on('data',chunk=>body+=chunk);req.on('end',()=>{model.push({payload:JSON.parse(body),res});res.writeHead(200,{'Content-Type':'application/json'});res.flushHeaders();});
   });

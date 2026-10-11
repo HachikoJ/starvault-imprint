@@ -62,6 +62,8 @@ function seedDismissReasonProjects(storage) {
         openIssues: 0,
         pushedAt: new Date().toISOString(),
         updatedAt: new Date().toISOString(),
+        scoringVersion: "starvault-node-v1",
+        riskSemantics: "project-license-action-v1",
         scores: {
           opportunity: 54,
           quality: 62,
@@ -81,6 +83,8 @@ function seedDismissReasonProjects(storage) {
         openIssues: 42,
         pushedAt: new Date().toISOString(),
         updatedAt: new Date().toISOString(),
+        scoringVersion: "starvault-node-v1",
+        riskSemantics: "project-license-action-v1",
         scores: {
           opportunity: 68,
           quality: 51,

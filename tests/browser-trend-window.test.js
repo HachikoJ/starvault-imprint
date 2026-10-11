@@ -36,6 +36,8 @@ async function runtime(repositories = []) {
     }, setTimeout, clearTimeout, AbortController, TextDecoder, Date: ClockDate, JSON, Map, Set, Promise, Error, Object, Array, String, Number, Boolean, URL, URLSearchParams, Math };
   vm.runInNewContext(fs.readFileSync(path.join(sourceRoot, "public/domain-core.js"), "utf8"), context);
   window.StarVaultDomainCore = context.globalThis.StarVaultDomainCore;
+  vm.runInNewContext(fs.readFileSync(path.join(sourceRoot, "public/scoring-core.js"), "utf8"), context);
+  window.StarVaultScoringCore = context.globalThis.StarVaultScoringCore;
   vm.runInNewContext(fs.readFileSync(path.join(sourceRoot, "public/indexeddb-storage.js"), "utf8"), context);
   vm.runInNewContext(fs.readFileSync(path.join(sourceRoot, "public/local-api.js"), "utf8"), context);
   const api = window.StarVaultLocalApi;
@@ -172,10 +174,10 @@ test("T-09 browser daily leaderboard and persisted archive use only numeric-time
   assert.equal(parts("negative").starDelta, -10);
   assert.ok(Number.isFinite(parts("negative").score));
   const snapshot = await storage.getSnapshot();
-  const archived = snapshot.store.leaderboards.byPlan[PLAN].daily[END.slice(0, 10)];
+  const archived = snapshot.store.leaderboards.byPlan[PLAN].daily[board.archiveKey];
   assert.equal(archived.observationPlan.id, PLAN);
   for (const row of archived.items) assert.deepEqual(JSON.parse(JSON.stringify(row.scoreParts.growthWindow)), JSON.parse(JSON.stringify(parts(row.name.replace("fixturetrend-", "")).growthWindow)));
-  const restored = await api.handle(`/api/leaderboard?date=${END.slice(0, 10)}`);
+  const restored = await api.handle(`/api/leaderboard?date=${encodeURIComponent(board.archiveKey)}`);
   assert.equal(restored.items.find(row => row.fullName.endsWith("-month")).scoreParts.starDelta, null);
   const savedHistory = (await storage.getProject(project("multi").fullName)).snapshots;
   for (const point of history) assert.ok(savedHistory.some(saved => JSON.stringify(saved) === JSON.stringify(point)), "Existing snapshot data are retained; storage already normalizes ordering");

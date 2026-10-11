@@ -94,6 +94,18 @@ const I18N = {
     projectRisk: "项目风险",
     licenseRisk: "许可风险",
     overallRisk: "行动风险",
+    scoringVersion: "评分版本",
+    scoringCurrent: "共享评分 v1",
+    scoringLegacy: "旧版评分（定义未知）",
+    scoringGrouping: "分版本比较；各组独立排序，旧版按 Stars 排序",
+    scoringCurrentHint: "共享评分 v1：项目风险与许可风险分别计算；行动风险 = 58% 项目风险 + 42% 许可风险。不同版本不能直接比较。",
+    scoringLegacyHint: "历史分数原样保留，算法与风险定义未知；不能当作新版项目风险或与新版分数直接比较。",
+    historicRisk: "历史风险值",
+    historicOpportunity: "历史机会分",
+    historicActionability: "历史可落地分",
+    scoreUnknown: "未知",
+    rankWithinVersion: "版本组内排名",
+    rankIncomparable: "无可比历史排名，名次变化不可比",
     semanticProblem: "解决什么",
     semanticAudience: "给谁用",
     semanticShape: "可做成",
@@ -840,6 +852,18 @@ const I18N = {
     projectRisk: "Project risk",
     licenseRisk: "License risk",
     overallRisk: "Action risk",
+    scoringVersion: "Scoring version",
+    scoringCurrent: "Shared scoring v1",
+    scoringLegacy: "Legacy scoring (definition unknown)",
+    scoringGrouping: "Compare within each version; legacy groups sort by Stars",
+    scoringCurrentHint: "Shared scoring v1: project and license risks are separate; action risk = 58% project risk + 42% license risk. Scores from different versions are not comparable.",
+    scoringLegacyHint: "Historical scores are preserved. Their algorithm and risk definition are unknown; do not treat them as current project risk or compare them directly with current scores.",
+    historicRisk: "Historical risk value",
+    historicOpportunity: "Historical opportunity",
+    historicActionability: "Historical actionability",
+    scoreUnknown: "Unknown",
+    rankWithinVersion: "Rank within version",
+    rankIncomparable: "No comparable historical rank; rank change is not comparable",
     semanticProblem: "Problem",
     semanticAudience: "Audience",
     semanticShape: "Can become",
@@ -4111,13 +4135,41 @@ function metaTagMarkup(label, text, value, className) {
   return `<span class="project-meta-tag ${escapeHtml(className)}${clickableClass}"${filterAttrs} aria-label="${escapeHtml(`${label}：${text}`)}"><small>${escapeHtml(label)}</small>${escapeHtml(text)}</span>`;
 }
 
+function hasCurrentScoring(project = {}) {
+  return project.scoringVersion === "starvault-node-v1" && project.riskSemantics === "project-license-action-v1";
+}
+
+function scoringVersionLabel(project = {}) {
+  if (hasCurrentScoring(project)) return t("scoringCurrent");
+  const version = String(project.scoringVersion || "").trim();
+  return `${t("scoringLegacy")}${version ? ` · ${version}` : ""}`;
+}
+
+function scoringVersionMarkup(project) {
+  return `<span class="project-meta-tag scoring-version has-tooltip" data-scoring-version="${escapeHtml(project?.scoringVersion || "unknown")}" data-tooltip="${escapeHtml(t(hasCurrentScoring(project) ? "scoringCurrentHint" : "scoringLegacyHint"))}"><small>${escapeHtml(t("scoringVersion"))}</small>${escapeHtml(scoringVersionLabel(project))}</span>`;
+}
+
+function scoreValue(value) {
+  return typeof value === "number" && Number.isFinite(value) ? String(value) : t("scoreUnknown");
+}
+
+function leaderboardArchiveOption(entry) {
+  const key = typeof entry === "string" ? entry : String(entry?.archiveKey || entry?.date || "");
+  const [date, scoringVersion, leaderboardVersion] = key.split("~");
+  const version = typeof entry === "object" ? entry.scoringVersion || scoringVersion : scoringVersion;
+  const boardVersion = typeof entry === "object" ? entry.leaderboardVersion || leaderboardVersion : leaderboardVersion;
+  const label = [date, version || t("scoringLegacy"), boardVersion].filter(Boolean).join(" · ");
+  return { key, label };
+}
+
 function renderProjectMetaTags(project) {
   const owner = projectOwnerName(project);
   const language = languageLabel(project.language);
   return [
     metaTagMarkup(t("author"), owner || t("unknownAuthor"), owner ? `owner:${owner}` : "", "repo-owner"),
     metaTagMarkup(t("language"), language, project.language ? `language:${project.language}` : "", "language-tag"),
-    renderSemanticTags(project, 3)
+    renderSemanticTags(project, 3),
+    scoringVersionMarkup(project)
   ].join("");
 }
 
@@ -7260,7 +7312,7 @@ function projectActions(project) {
     actions.push("先人工阅读完整许可证，再决定是否深入采用、分发或集成。");
   }
   actions.push(CATEGORY_ACTION_ZH[project.category?.key || "other"] || CATEGORY_ACTION_ZH.other);
-  if ((project.scores?.risk || 0) >= 15) actions.push("项目风险不是许可风险，需重点检查维护活跃度、成熟度和热度结构。");
+  if (hasCurrentScoring(project) && (project.scores?.risk || 0) >= 15) actions.push("项目风险不是许可风险，需重点检查维护活跃度、成熟度和热度结构。");
   return actions;
 }
 
@@ -7557,7 +7609,8 @@ function rankChangeValue(change) {
   return String(Math.abs(change));
 }
 
-function rankChangeIcon(change) {
+function rankChangeIcon(change, comparable = true) {
+  if (!comparable) return `<small class="rank-change same has-tooltip" aria-label="${escapeHtml(t("rankIncomparable"))}" data-tooltip="${escapeHtml(t("rankIncomparable"))}">${iconOnly("minus", t("rankIncomparable"))}<span aria-hidden="true">—</span></small>`;
   const cls = rankChangeClass(change);
   const iconName = cls === "up" ? "arrowUp" : cls === "down" ? "arrowDown" : cls === "new" ? "plusCircle" : "minus";
   const label = rankChangeText(change);
@@ -8035,13 +8088,16 @@ function renderLeaderboard(leaderboard) {
   elements.leaderboardArchive.innerHTML = archives.length
     ? [
         `<option value="">${escapeHtml(t("latestArchive"))}</option>`,
-        ...archives.map((date) => `<option value="${escapeHtml(date)}" ${leaderboard.date === date ? "selected" : ""}>${escapeHtml(date)}</option>`)
+        ...archives.map((entry) => {
+          const {key, label} = leaderboardArchiveOption(entry);
+          return `<option value="${escapeHtml(key)}" ${(leaderboard.archiveKey || leaderboard.date) === key ? "selected" : ""}>${escapeHtml(label)}</option>`;
+        })
       ].join("")
     : `<option value="">${escapeHtml(t("noArchive"))}</option>`;
   elements.leaderboardArchive.disabled = state.leaderboardPeriod !== "daily" || !archives.length;
 
   const generated = leaderboard.generatedAt ? `${t("generatedAt")} ${fmtDate(leaderboard.generatedAt)}` : "";
-  elements.leaderboardMeta.textContent = [t("leaderboardSource"), generated].filter(Boolean).join(" · ");
+  elements.leaderboardMeta.textContent = [t("leaderboardSource"), generated, t("scoringGrouping")].filter(Boolean).join(" · ");
 
   const items = leaderboard.items || [];
   const noticeHtml = renderLeaderboardDismissNotice();
@@ -8049,13 +8105,15 @@ function renderLeaderboard(leaderboard) {
     ? `${noticeHtml}${items
         .map((project) => {
           const selected = state.leaderboardSelectedFullName === project.fullName ? "selected" : "";
+          const rank = project.rankWithinVersion ?? project.rank;
+          const rankHint = `${t("rankWithinVersion")}: ${rank} · ${scoringVersionLabel(project)} · ${leaderboardGrowthHint(project)}`;
           return `
             <article class="leaderboard-item ${selected}" data-full-name="${escapeHtml(project.fullName)}" role="button" tabindex="0" aria-label="${escapeHtml(project.fullName)}">
               <span class="leaderboard-rank-select" aria-hidden="true">
-                <span class="rank-cell has-tooltip ${rankPodiumClass(project.rank)}" data-tooltip="${escapeHtml(leaderboardGrowthHint(project))}">
-                  ${rankPodiumClass(project.rank) ? iconOnly("trophy", rankMedalLabel(project.rank), "rank-medal") : ""}
-                  ${rankPodiumClass(project.rank) ? "" : `<strong>${project.rank}</strong>`}
-                  ${rankChangeIcon(project.rankChange)}
+                <span class="rank-cell has-tooltip ${rankPodiumClass(rank)}" data-tooltip="${escapeHtml(rankHint)}">
+                  ${rankPodiumClass(rank) ? iconOnly("trophy", rankMedalLabel(rank), "rank-medal") : ""}
+                  ${rankPodiumClass(rank) ? "" : `<strong>${escapeHtml(rank)}</strong>`}
+                  ${rankChangeIcon(project.rankChange, project.rankChangeComparable !== false)}
                 </span>
               </span>
               <span class="leaderboard-main">
@@ -8094,6 +8152,7 @@ function renderLeaderboard(leaderboard) {
   const memory = setMemory(leaderboard.memory || {}, { render: false });
   elements.leaderboardLogic.innerHTML = `
     <p>${escapeHtml(t("rankingLogicCopy"))}</p>
+    <p>${escapeHtml(t("scoringGrouping"))}</p>
     <p>${escapeHtml(t("trendGrowthHint"))}</p>
     <p>${escapeHtml(t("trendHint"))}</p>
     <div class="logic-matrix">
@@ -8731,7 +8790,7 @@ function renderProjects(response) {
         <article class="repo-item ${selected}" data-full-name="${escapeHtml(project.fullName)}" role="button" tabindex="0" aria-label="${escapeHtml(project.fullName)}">
           <span class="repo-score-select" aria-hidden="true">
             <span class="repo-score-rail">
-              <strong>${project.scores?.opportunity || 0}</strong>
+              <strong title="${escapeHtml(t(hasCurrentScoring(project) ? "opportunity" : "historicOpportunity"))}">${escapeHtml(scoreValue(project.scores?.opportunity))}</strong>
               <small>${state.language === "zh" ? "分" : "Score"}</small>
             </span>
           </span>
@@ -8985,7 +9044,8 @@ function renderDetail(project) {
     return;
   }
 
-  const risk = project.scores?.risk || 0;
+  const currentScoring = hasCurrentScoring(project);
+  const risk = project.scores?.risk;
   const githubUrl = safeExternalUrl(project.url, { hosts: ["github.com"] });
   const homepageUrl = safeExternalUrl(project.homepage);
   const semanticProfile = projectSemanticProfile(project);
@@ -9103,15 +9163,17 @@ function renderDetail(project) {
           </div>
         </div>
         <p class="detail-summary">${escapeHtml(projectBrief(project))}</p>
+        <div class="repo-meta-line">${scoringVersionMarkup(project)}</div>
         <div class="detail-semantic-grid">${semanticCards}</div>
         <div class="detail-basis-row">
           <span><strong>${escapeHtml(t("licenseBoundary"))}</strong>${escapeHtml(licenseName(project.licensePolicy))} · ${escapeHtml(projectLicenseBoundary(project))}</span>
-          <span><strong>${escapeHtml(t("projectRiskBasis"))}</strong>${escapeHtml(riskBasisText(risk))}</span>
+          <span><strong>${escapeHtml(t(currentScoring ? "projectRiskBasis" : "historicRisk"))}</strong>${escapeHtml(currentScoring && typeof risk === "number" ? riskBasisText(risk) : `${scoreValue(risk)} · ${t(currentScoring ? "scoreUnknown" : "scoringLegacyHint")}`)}</span>
+          <span class="scoring-risk-definition">${escapeHtml(t(currentScoring ? "scoringCurrentHint" : "scoringLegacyHint"))}</span>
         </div>
         <div class="hero-metrics">
-          <div><span>${escapeHtml(t("opportunity"))}</span><strong>${project.scores?.opportunity ?? 0}</strong></div>
-          <div><span>${escapeHtml(t("actionability"))}</span><strong>${project.scores?.actionability ?? 0}</strong></div>
-          <div><span>${escapeHtml(t("licenseRisk"))}</span><strong>${project.scores?.licenseRisk ?? 0}</strong></div>
+          <div class="score-contract-metric"><span>${escapeHtml(t(currentScoring ? "opportunity" : "historicOpportunity"))}</span><strong>${escapeHtml(scoreValue(project.scores?.opportunity))}</strong></div>
+          <div class="score-contract-metric"><span>${escapeHtml(t(currentScoring ? "actionability" : "historicActionability"))}</span><strong>${escapeHtml(scoreValue(project.scores?.actionability))}</strong></div>
+          ${currentScoring ? ["risk", "licenseRisk", "overallRisk"].map(key => `<div class="score-risk-metric" data-risk-kind="${key}"><span>${escapeHtml(t(key === "risk" ? "projectRisk" : key))}</span><strong>${escapeHtml(scoreValue(project.scores?.[key]))}</strong></div>`).join("") : ""}
         </div>
       </section>
 

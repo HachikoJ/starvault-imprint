@@ -1,6 +1,8 @@
 (function () {
   const domainCore = window.StarVaultDomainCore;
   if (!domainCore) throw new Error("StarVault domain core is unavailable");
+  const scoringCore = window.StarVaultScoringCore;
+  if (!scoringCore) throw new Error("StarVault scoring core is unavailable");
   const SECRETS_KEY = "localSecrets";
   const LAST_PORTABLE_EXPORT_KEY = "lastPortableExportAt";
   const GITHUB_COOLDOWN_KEY = "githubCooldown";
@@ -480,7 +482,7 @@
         labelZh: String(item.profileLabelZh || ""),
         labelEn: String(item.profileLabelEn || "")
       };
-      const project = githubRepoToProject(repository, plan, profile);
+      const project = githubRepoToProject(repository, plan, profile, { now: timestamp });
       project.firstSeenAt = timestamp;
       project.lastSeenAt = timestamp;
       project.updatedInMonitorAt = timestamp;
@@ -549,10 +551,11 @@
     };
     const leaderboard = buildLeaderboard(snapshot, { period: "daily", limit: 20 }, projectList);
     leaderboard.date = archiveDate;
+    leaderboard.archiveKey = `${archiveDate}~${domainCore.SCORING_VERSION}~${domainCore.LEADERBOARD_VERSION}`;
     leaderboard.generatedAt = timestamp;
     leaderboard.source = "static-demo-snapshot";
     snapshot.leaderboard = leaderboard;
-    snapshot.store.leaderboards.byPlan[plan.id].daily[archiveDate] = clone(leaderboard, leaderboard);
+    snapshot.store.leaderboards.byPlan[plan.id].daily[leaderboard.archiveKey] = clone(leaderboard, leaderboard);
     return snapshot;
   }
 
@@ -734,7 +737,8 @@
   }
 
   function riskLevel(project) {
-    const risk = Number(project.scores?.risk || project.scores?.overallRisk || 0);
+    const risk = domainCore.projectRisk(project);
+    if (risk === null) return "unknown";
     if (risk >= 60) return "critical";
     if (risk >= 35) return "high";
     if (risk >= 15) return "medium";
@@ -842,11 +846,11 @@
     items.sort((a, b) => {
       if (sort === "stars") return Number(b.stars || 0) - Number(a.stars || 0);
       if (sort === "updated") return dateValue(b.pushedAt) - dateValue(a.pushedAt);
-      if (sort === "risk") return score(b, "risk") - score(a, "risk");
-      if (sort === "momentum") return score(b, "momentum") - score(a, "momentum");
-      if (sort === "actionability") return score(b, "actionability") - score(a, "actionability");
-      if (sort === "productization") return score(b, "productization") - score(a, "productization");
-      if (sort === "quality") return score(b, "quality") - score(a, "quality");
+      if (sort === "risk") return domainCore.compareScoredProjects(a, b, (left, right) => score(right, "risk") - score(left, "risk"));
+      if (sort === "momentum") return domainCore.compareScoredProjects(a, b, (left, right) => score(right, "momentum") - score(left, "momentum"));
+      if (sort === "actionability") return domainCore.compareScoredProjects(a, b, (left, right) => score(right, "actionability") - score(left, "actionability"));
+      if (sort === "productization") return domainCore.compareScoredProjects(a, b, (left, right) => score(right, "productization") - score(left, "productization"));
+      if (sort === "quality") return domainCore.compareScoredProjects(a, b, (left, right) => score(right, "quality") - score(left, "quality"));
       if (sort === "trendStars" || sort === "trendForks") {
         const field = sort === "trendStars" ? "stars" : "forks";
         const left = domainCore.describeTrend(a.trend)[field];
@@ -857,7 +861,7 @@
         return Number(b.stars || 0) - Number(a.stars || 0);
       }
       const personalized = (project) => score(project, "opportunity") + domainCore.memoryScore(project, memory);
-      return personalized(b) - personalized(a) || Number(b.stars || 0) - Number(a.stars || 0);
+      return domainCore.compareScoredProjects(a, b, (left, right) => personalized(right) - personalized(left));
     });
   }
 
@@ -939,6 +943,9 @@
       lastSeenAt: project.lastSeenAt,
       licensePolicy: project.licensePolicy,
       scores: project.scores,
+      scoringVersion: domainCore.scoreVersion(project),
+      riskSemantics: project.riskSemantics || "unknown",
+      riskDefinitions: project.riskDefinitions,
       signals: project.signals,
       reasons: project.reasons,
       actions: project.actions
@@ -992,63 +999,54 @@
           languageCount: Object.keys(languages).length,
           topicCount: Object.keys(topics).length,
           licenseReadyCount: licenses["permissive-commercial"] || 0,
-          highHeatCount: items.filter((project) => Number(project.scores?.momentum || 0) >= 70).length,
+          highHeatCount: items.filter((project) => domainCore.scoreVersion(project) === domainCore.SCORING_VERSION && Number(project.scores?.momentum || 0) >= 70).length,
           highRiskCount: items.filter((project) => ["high", "critical"].includes(riskLevel(project))).length
         }
       },
       brief: { newToday: 0, seenToday: 0, licenseReview: [], highTrend: [], scanErrors: [] },
+      scoreGroups: domainCore.scoreGroups(items).map(group => ({ scoringVersion: group.scoringVersion, count: group.items.length })),
       top
     };
-  }
-
-  function browserLeaderboardScore(project, period, memory) {
-    const memoryBoost = domainCore.memoryScore(project, memory);
-    const opportunity = Number(project.scores?.opportunity || 0);
-    const quality = Number(project.scores?.quality || 0);
-    const momentum = Number(project.scores?.momentum || 0);
-    const actionability = Number(project.scores?.actionability || 0);
-    const community = Number(project.scores?.community || 0);
-    const days = period === "daily" ? 1 : period === "weekly" ? 7 : period === "monthly" ? 30 : 3650;
-    const growthWindow = domainCore.snapshotGrowth(project, days);
-    const starDelta = growthWindow.stars;
-    const forkDelta = growthWindow.forks;
-    const trendBoost = Math.min(24, Math.log10(1 + Math.max(0, starDelta ?? 0)) * 8 + Math.log10(1 + Math.max(0, forkDelta ?? 0)) * 5);
-    const weights = {
-      daily: [0.34, 0.12, 0.26, 0.16, 0.12],
-      weekly: [0.36, 0.17, 0.2, 0.16, 0.11],
-      monthly: [0.38, 0.22, 0.14, 0.16, 0.1],
-      all: [0.34, 0.28, 0.08, 0.19, 0.11]
-    }[period] || [0.36, 0.2, 0.16, 0.17, 0.11];
-    const base = opportunity * weights[0] + quality * weights[1] + momentum * weights[2] + actionability * weights[3] + community * weights[4];
-    return { score: Number((base + trendBoost + memoryBoost).toFixed(2)), memoryBoost: Number(memoryBoost.toFixed(2)), starDelta, forkDelta, growthWindow };
   }
 
   function buildLeaderboard(snapshot, params = {}, sourceProjects = null, planId = snapshot.activeObservationPlanId || "default") {
     const limit = Math.max(5, Math.min(Number(params.limit || 20), 30));
     const period = ["daily", "weekly", "monthly", "all"].includes(params.period) ? params.period : "daily";
     const memory = memoryForPlan(snapshot, planId);
-    const ranked = filterProjects(snapshot, { sort: "opportunity", limit: "all" }, sourceProjects, planId)
-      .map((project) => ({ project, parts: browserLeaderboardScore(project, period, memory) }))
-      .sort((a, b) => b.parts.score - a.parts.score || Number(b.project.stars || 0) - Number(a.project.stars || 0));
-    const items = ranked.slice(0, limit).map(({ project, parts }, index) => ({
-        ...project,
-        rank: index + 1,
-        leaderboardScore: parts.score,
-        rankChange: null,
-        scoreParts: parts
-      }));
+    const date = nowIso().slice(0, 10);
+    const archiveKey = `${date}~${domainCore.SCORING_VERSION}~${domainCore.LEADERBOARD_VERSION}`;
+    const reference = Date.now();
     const dailyArchive = planId === "default" ? snapshot.store.leaderboards?.daily || {} : snapshot.store.leaderboards?.byPlan?.[planId]?.daily || {};
-    return {
-      period,
-      date: new Date().toISOString().slice(0, 10),
-      generatedAt: nowIso(),
-      limit,
-      discoveryCoverage: clone((snapshot.store.scans || []).find((scan) => String(scan.observationPlanId || "default") === planId)?.discoveryCoverage),
-      memory,
-      observationPlan: publicPlan(planById(snapshot, planId), snapshot.activeObservationPlanId, false),
-      items,
-      archiveDates: Object.keys(dailyArchive).sort().reverse()
-    };
+    const yesterday = new Date(`${date}T00:00:00Z`); yesterday.setUTCDate(yesterday.getUTCDate() - 1);
+    const previousDate = yesterday.toISOString().slice(0, 10);
+    const previous = dailyArchive[`${previousDate}~${domainCore.SCORING_VERSION}~${domainCore.LEADERBOARD_VERSION}`] || dailyArchive[previousDate];
+    const previousRanks = new Map((previous?.items || []).map(item => [item.fullName, { ...item, scoringVersion: item.scoringVersion || previous.scoringVersion, leaderboardVersion: item.leaderboardVersion || previous.leaderboardVersion }]));
+    const candidates = filterProjects(snapshot, { sort: "opportunity", limit: "all" }, sourceProjects, planId)
+      .map(project => ({ ...project, _leaderboardScore: domainCore.leaderboardScore(project, period, domainCore.memoryScore(project, memory), reference) }));
+    const selected = domainCore.selectLeaderboardProjects(candidates, limit);
+    const ranks = new Map();
+    const items = selected.map(project => {
+      const { _leaderboardScore, ...clean } = project;
+      const version = domainCore.scoreVersion(project), rank = (ranks.get(version) || 0) + 1;
+      ranks.set(version, rank);
+      const prior = previousRanks.get(project.fullName);
+      const rankChange = domainCore.comparableRankChange({ ...project, leaderboardVersion: domainCore.LEADERBOARD_VERSION }, prior, rank);
+      const growthWindow = domainCore.snapshotGrowth(project, { daily: 1, weekly: 7, monthly: 30, all: 3650 }[period], reference);
+      const memoryBoost = version !== domainCore.SCORING_VERSION ? 0 : domainCore.memoryScore(project, memory);
+      return { ...clean, scoringVersion: version, riskSemantics: project.riskSemantics || "unknown", leaderboardVersion: domainCore.LEADERBOARD_VERSION,
+        rank, rankWithinVersion: rank, rankChange, rankChangeComparable: rankChange !== null,
+        previousRank: rankChange === null ? null : prior.rank, leaderboardScore: _leaderboardScore,
+        scoreParts: { score: _leaderboardScore, opportunity: project.scores?.opportunity || 0, recentHeat: project.scores?.momentum || 0,
+          actionability: project.scores?.actionability || 0, projectRisk: domainCore.projectRisk(project),
+          memoryBoost, starDelta: growthWindow.stars, forkDelta: growthWindow.forks,
+          growthWindow, diversitySlot: memoryBoost <= 0.5 } };
+    });
+    return { period, date, archiveKey, scoringVersion: domainCore.SCORING_VERSION, leaderboardVersion: domainCore.LEADERBOARD_VERSION,
+      scoreGroups: domainCore.scoreGroups(selected).map(group => ({ scoringVersion: group.scoringVersion, count: group.items.length })),
+      generatedAt: nowIso(), limit,
+      discoveryCoverage: clone((snapshot.store.scans || []).find(scan => String(scan.observationPlanId || "default") === planId)?.discoveryCoverage),
+      memory, observationPlan: publicPlan(planById(snapshot, planId), snapshot.activeObservationPlanId, false), items,
+      archiveDates: Object.keys(dailyArchive).sort().reverse() };
   }
 
   function githubHeaders(token) {
@@ -1527,45 +1525,14 @@
     return { key, label: labelEn, labelZh, labelEn, summaryZh: labelZh, summaryEn: labelEn };
   }
 
-  function browserProjectScores(repo = {}, licensePolicy = {}) {
-    const now = Date.now();
-    const createdAt = new Date(repo.created_at || repo.createdAt || now).getTime();
-    const pushedAt = new Date(repo.pushed_at || repo.updated_at || repo.pushedAt || now).getTime();
-    const ageDays = Math.max(1, (now - createdAt) / 86400000);
-    const pushedDays = Math.max(0, (now - pushedAt) / 86400000);
-    const stars = Number(repo.stargazers_count ?? repo.stars ?? 0);
-    const forks = Number(repo.forks_count ?? repo.forks ?? 0);
-    const starScale = Math.min(100, Math.log10(Math.max(1, stars)) * 24);
-    const forkScale = Math.min(100, Math.log10(Math.max(1, forks)) * 28);
-    const recency = Math.max(0, 100 - Math.min(100, pushedDays * 0.8));
-    const velocity = Math.min(100, Math.log10(1 + stars / ageDays) * 42);
-    const clarity = Math.min(100, 28 + Math.min(30, String(repo.description || "").length / 4) + Math.min(24, (repo.topics || []).length * 4) + (repo.homepage ? 12 : 0));
-    const licenseRisk = Number(licensePolicy.risk || 58);
-    const quality = Math.max(0, Math.min(100, clarity * 0.38 + recency * 0.34 + starScale * 0.28 - (repo.archived ? 38 : 0)));
-    const community = Math.max(0, Math.min(100, starScale * 0.68 + forkScale * 0.32));
-    const momentum = Math.max(0, Math.min(100, recency * 0.58 + velocity * 0.42));
-    const actionability = Math.max(0, Math.min(100, clarity * 0.55 + quality * 0.25 + (100 - licenseRisk) * 0.2));
-    const productization = Math.max(0, Math.min(100, clarity * 0.64 + community * 0.16 + actionability * 0.2));
-    const risk = Math.max(0, Math.min(100, licenseRisk * 0.62 + (repo.archived ? 28 : 0) + (pushedDays > 730 ? 18 : 0)));
-    const opportunity = Math.max(
-      0,
-      Math.min(100, quality * 0.22 + community * 0.16 + momentum * 0.2 + actionability * 0.24 + productization * 0.18 - risk * 0.12)
-    );
-    return Object.fromEntries(
-      Object.entries({ opportunity, momentum, quality, community, productization, novelty: velocity, risk, licenseRisk, overallRisk: risk, actionability }).map(
-        ([key, value]) => [key, Math.round(value)]
-      )
-    );
-  }
-
-  function githubRepoToProject(repo, plan, profile = {}) {
+  function githubRepoToProject(repo, plan, profile = {}, options = {}) {
     const planId = plan.id;
     const licensePolicy = domainCore.classifyLicensePolicy(repo.license || null);
     const categoryLabel = String(profile.labelZh || profile.label || profile.labelEn || plan.name || "扫描发现");
     const categoryKey = `profile-${domainCore.normalizedId(profile.key || categoryLabel) || domainCore.stableHash(categoryLabel)}`;
     const shape = browserProjectShape(repo);
     const evidence = domainCore.profileEvidence(profile);
-    const scores = browserProjectScores(repo, licensePolicy);
+    const scored = scoringCore.scoreRepository(repo, null, [], options);
     return {
       id: repo.id,
       fullName: repo.full_name,
@@ -1575,13 +1542,13 @@
       url: repo.html_url,
       description: repo.description || "",
       homepage: repo.homepage || "",
-      language: repo.language || "unknown",
+      language: repo.language || "",
       topics: Array.isArray(repo.topics) ? repo.topics : [],
       stars: repo.stargazers_count || 0,
       forks: repo.forks_count || 0,
       ...domainCore.githubWatchers(repo),
       openIssues: repo.open_issues_count || 0,
-      defaultBranch: repo.default_branch || "main",
+      defaultBranch: repo.default_branch || "",
       createdAt: repo.created_at || "",
       updatedAt: repo.updated_at || "",
       pushedAt: repo.pushed_at || repo.updated_at || "",
@@ -1589,8 +1556,8 @@
       archived: Boolean(repo.archived),
       disabled: Boolean(repo.disabled),
       fork: Boolean(repo.fork),
-      category: { key: categoryKey, label: categoryLabel, labelZh: categoryLabel, labelEn: profile.labelEn || categoryLabel },
-      useCase: shape,
+      category: scored.category,
+      useCase: scored.useCase,
       semantic: {
         problem: { key: categoryKey, label: categoryLabel, labelZh: categoryLabel, labelEn: profile.labelEn || categoryLabel },
         audience: {
@@ -1602,10 +1569,13 @@
         shape
       },
       licensePolicy,
-      scores,
-      signals: {},
-      reasons: [`命中检索画像：${categoryLabel}`, `许可边界：${licensePolicy.labelZh}`],
-      actions: [],
+      scores: scored.scores,
+      scoringVersion: scored.scoringVersion,
+      riskSemantics: scored.riskSemantics,
+      riskDefinitions: scored.riskDefinitions,
+      signals: scored.signals,
+      reasons: scored.reasons,
+      actions: scored.actions,
       source: "github-browser",
       firstSeenAt: nowIso(),
       lastSeenAt: nowIso(),
@@ -2042,7 +2012,15 @@
     const scannedAt = nowIso();
     for (const project of projects) {
       const previous = previousByKey.get(projectKey(project.fullName));
+      const externalWeb = project.signals?.externalWeb || [];
+      Object.assign(project, scoringCore.scoreRepository(project, previous, externalWeb, { now: scannedAt }));
+      project.signals.externalWeb = externalWeb;
+      project.scoreHistory = domainCore.scoreHistoryAfterUpdate(previous, project, scannedAt);
       const snapshotEntry = {
+        scoringVersion: project.scoringVersion,
+        riskSemantics: project.riskSemantics,
+        riskDefinitions: project.riskDefinitions,
+        scores: clone(project.scores, {}),
         at: scannedAt,
         stars: Number(project.stars || 0),
         forks: Number(project.forks || 0),
@@ -2053,7 +2031,7 @@
       };
       project.firstSeenAt = previous?.firstSeenAt || scannedAt;
       project.lastSeenAt = scannedAt;
-      project.snapshots = [...(previous?.snapshots || []), snapshotEntry].slice(-180);
+      project.snapshots = domainCore.appendScoreSnapshot(previous?.snapshots, snapshotEntry);
       project.trend = { ...domainCore.snapshotTrend(previous, project, scannedAt), updatedAt: scannedAt };
     }
     await storage().replaceProjectsForPlan(plan.id, projects, { replace: discoveryCoverage.complete, ...taskWriteOptions(snapshot) });
@@ -2081,7 +2059,7 @@
     snapshot.summary = summary(snapshot, {}, planProjects, plan.id);
     snapshot.leaderboard = buildLeaderboard(snapshot, { limit: 20 }, planProjects, plan.id);
     if (snapshot.leaderboard.observationPlan?.id !== plan.id || snapshot.leaderboard.items.some(project => !projectMatchesPlan(project, snapshot, plan.id))) throw new Error("Scan archive does not belong to its owning observation plan");
-    const archiveDate = scannedAt.slice(0, 10);
+    const archiveDate = snapshot.leaderboard.archiveKey;
     if (plan.id === "default") {
       snapshot.store.leaderboards.daily = snapshot.store.leaderboards.daily || {};
       snapshot.store.leaderboards.daily[archiveDate] = clone(snapshot.leaderboard, snapshot.leaderboard);
@@ -2241,7 +2219,10 @@
             stars: project.stars,
             forks: project.forks,
             license: project.licensePolicy,
-            scores: project.scores
+            scores: project.scores,
+            scoringVersion: project.scoringVersion || "unknown",
+            riskSemantics: project.riskSemantics || "unknown",
+            riskDefinitions: project.riskDefinitions
           },
           context
         })
@@ -2739,6 +2720,7 @@
     const fields = language === "zh"
       ? {
           排名: index + 1,
+          排名含义: "导出行序；分数仅在同一评分版本内比较",
           仓库全名: project.fullName,
           项目名: project.name,
           中文名: project.nameZh || project.name,
@@ -2772,7 +2754,12 @@
           推荐值: project.scores?.opportunity ?? "",
           可落地性: project.scores?.actionability ?? "",
           工程质量: project.scores?.quality ?? "",
-          项目风险: project.scores?.risk ?? "",
+          评分版本: domainCore.scoreVersion(project),
+          风险定义: project.riskSemantics || "unknown",
+          原始分数: JSON.stringify(project.scores || {}),
+          历史风险值: domainCore.projectRisk(project) === null ? project.scores?.risk ?? "" : "",
+          行动风险: domainCore.projectRisk(project) === null ? "" : project.scores?.overallRisk ?? "",
+          项目风险: domainCore.projectRisk(project) ?? "",
           许可风险: project.scores?.licenseRisk ?? "",
           许可证: project.licensePolicy?.name || project.license?.name || "",
           许可标签: project.licensePolicy?.labelZh || "",
@@ -2785,6 +2772,7 @@
         }
       : {
           rank: index + 1,
+          rankScope: "export row order; compare scores only within the same scoringVersion",
           fullName: project.fullName,
           name: project.name,
           nameZh: project.nameZh || project.name,
@@ -2818,7 +2806,12 @@
           opportunity: project.scores?.opportunity ?? "",
           actionability: project.scores?.actionability ?? "",
           quality: project.scores?.quality ?? "",
-          projectRisk: project.scores?.risk ?? "",
+          scoringVersion: domainCore.scoreVersion(project),
+          riskSemantics: project.riskSemantics || "unknown",
+          rawScores: JSON.stringify(project.scores || {}),
+          historicalRisk: domainCore.projectRisk(project) === null ? project.scores?.risk ?? "" : "",
+          overallRisk: domainCore.projectRisk(project) === null ? "" : project.scores?.overallRisk ?? "",
+          projectRisk: domainCore.projectRisk(project) ?? "",
           licenseRisk: project.scores?.licenseRisk ?? "",
           license: project.licensePolicy?.name || project.license?.name || "",
           licensePolicy: project.licensePolicy?.labelEn || "",
@@ -3401,7 +3394,8 @@
           ...clone(archive[params.date], archive[params.date]),
           items: (archive[params.date].items || []).map(item => ({ ...item, ...domainCore.watcherFact(item) })),
           period: "daily",
-          date: params.date,
+          date: archive[params.date].date || params.date.slice(0, 10),
+          archiveKey: params.date,
           memory: memoryForPlan(snapshot),
           observationPlan: publicPlan(activePlan(snapshot), planId, false),
           archiveDates: Object.keys(archive).sort().reverse()

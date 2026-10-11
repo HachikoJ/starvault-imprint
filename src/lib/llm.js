@@ -80,6 +80,9 @@ function projectPrompt(project, language = "zh", context = {}) {
     category: project.category,
     licensePolicy,
     scores: project.scores,
+    scoringVersion: project.scoringVersion || "unknown",
+    riskSemantics: project.riskSemantics || "unknown",
+    riskDefinitions: project.riskDefinitions,
     signals: project.signals,
     reasons: project.reasons,
     actions: project.actions

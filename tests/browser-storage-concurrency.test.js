@@ -10,7 +10,7 @@ const { chromium } = require("playwright");
 // Only these three public scripts are served; no application server, .env,
 // demo bootstrap, existing user database, or production endpoint is involved.
 const SOURCE_ROOT = path.resolve(process.env.STARVAULT_TEST_SOURCE_ROOT || path.join(__dirname, ".."));
-const SCRIPT_NAMES = new Set(["domain-core.js", "indexeddb-storage.js", "local-api.js"]);
+const SCRIPT_NAMES = new Set(["domain-core.js","scoring-core.js", "indexeddb-storage.js", "local-api.js"]);
 const PROJECT = "fixture/asset-retention";
 
 function launchOptions() {
@@ -46,7 +46,7 @@ async function fixture(t, modelHandler) {
     const name = new URL(request.url, "http://127.0.0.1").pathname.slice(1);
     if (!name) {
       response.writeHead(200, { "Content-Type": "text/html; charset=utf-8" });
-      response.end('<!doctype html><meta charset="utf-8"><script src="/domain-core.js"></script><script src="/indexeddb-storage.js"></script><script src="/local-api.js"></script>');
+      response.end('<!doctype html><meta charset="utf-8"><script src="/domain-core.js"></script><script src="/scoring-core.js"></script><script src="/indexeddb-storage.js"></script><script src="/local-api.js"></script>');
     } else if (SCRIPT_NAMES.has(name)) {
       response.writeHead(200, { "Content-Type": "text/javascript; charset=utf-8" });
       response.end(fs.readFileSync(path.join(SOURCE_ROOT, "public", name)));

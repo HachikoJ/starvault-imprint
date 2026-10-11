@@ -2458,6 +2458,7 @@ function exportTrendKind(project, language) {
 
 const EXPORT_FIELDS = [
   ["rank", "排名", "rank", (project, language, semantic, index) => index + 1],
+  ["rankScope", "排名含义", "rankScope", (project, language) => language === "zh" ? "导出行序；分数仅在同一评分版本内比较" : "export row order; compare scores only within the same scoringVersion"],
   ["fullName", "仓库全名", "fullName", (project) => project.fullName],
   ["name", "项目名", "name", (project) => originalProjectName(project)],
   ["nameZh", "中文名", "nameZh", (project) => exportProjectNameZh(project)],
@@ -2507,7 +2508,12 @@ const EXPORT_FIELDS = [
   ["actionability", "可落地性", "actionability", (project) => project.scores?.actionability],
   ["productization", "应用价值", "appliedValue", (project) => project.scores?.productization],
   ["quality", "工程质量", "quality", (project) => project.scores?.quality],
-  ["projectRisk", "项目风险", "projectRisk", (project) => project.scores?.risk],
+  ["scoringVersion", "评分版本", "scoringVersion", project => domainCore.scoreVersion(project)],
+  ["riskSemantics", "风险定义", "riskSemantics", project => project.riskSemantics || "unknown"],
+  ["rawScores", "原始分数", "rawScores", project => JSON.stringify(project.scores || {})],
+  ["historicalRisk", "历史风险值", "historicalRisk", project => domainCore.projectRisk(project) === null ? project.scores?.risk : ""],
+  ["overallRisk", "行动风险", "overallRisk", project => domainCore.projectRisk(project) === null ? "" : project.scores?.overallRisk],
+  ["projectRisk", "项目风险", "projectRisk", project => domainCore.projectRisk(project)],
   ["licenseRisk", "许可风险", "licenseRisk", (project) => project.scores?.licenseRisk],
   ["license", "许可证", "license", (project) => project.licensePolicy?.name || project.license?.name || ""],
   ["licensePolicy", "许可标签", "licensePolicy", (project, language) => exportLicenseLabel(project, language)],
@@ -2992,7 +2998,9 @@ async function runScan(options = {}) {
       memberPolicy: scanErrors.length ? "retain" : "replace",
       reasons: scanErrors.map((error) => String(error.message || error))
     };
-    const preScoredRepositories = repositories.map((repo) => enrichRepository(repo, previous.get(repo.fullName), signalsForRepository(trendingSignals, repo.fullName)));
+    const scoringClock = checkpoint.scoringClock || new Date().toISOString();
+    saveScanCheckpoint(options.taskId, { planId: activePlan.id, scoringClock });
+    const preScoredRepositories = repositories.map((repo) => enrichRepository(repo, previous.get(repo.fullName), signalsForRepository(trendingSignals, repo.fullName), { now: scoringClock }));
     const tavilyLimit = Math.max(0, Number(options.tavilyCount ?? 24));
     const exaLimit = Math.max(0, Number(options.exaCount ?? 24));
 
@@ -3070,7 +3078,7 @@ async function runScan(options = {}) {
       const trending = signalsForRepository(trendingSignals, repo.fullName);
       const tavily = externalSignals.get(repo.fullName)?.signals || [];
       const exa = exaSignals.get(repo.fullName)?.signals || [];
-      return enrichRepository(repo, previous.get(repo.fullName), [...trending, ...tavily, ...exa]);
+      return enrichRepository(repo, previous.get(repo.fullName), [...trending, ...tavily, ...exa], { now: scoringClock });
     });
 
     const trendLimit = Math.max(0, Math.min(budgetedTrendLimit, enriched.length));

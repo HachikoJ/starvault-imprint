@@ -86,6 +86,8 @@ async function createBrowserRuntime(fetchImpl, options = {}) {
   };
   vm.runInNewContext(domainCoreSource, context);
   window.StarVaultDomainCore = context.globalThis.StarVaultDomainCore;
+  vm.runInNewContext(fs.readFileSync(path.join(sourceRoot, "public/scoring-core.js"), "utf8"), context);
+  window.StarVaultScoringCore = context.globalThis.StarVaultScoringCore;
   vm.runInNewContext(indexedDbSource, context);
   vm.runInNewContext(localApiSource, context);
   return {

@@ -170,6 +170,8 @@ test("project pool default ranking uses learned preferences", () => {
         openIssues: 4,
         pushedAt: now,
         updatedAt: now,
+        scoringVersion: "starvault-node-v1",
+        riskSemantics: "project-license-action-v1",
         scores: {
           opportunity: 72,
           productization: 82,
@@ -191,6 +193,8 @@ test("project pool default ranking uses learned preferences", () => {
         openIssues: 6,
         pushedAt: now,
         updatedAt: now,
+        scoringVersion: "starvault-node-v1",
+        riskSemantics: "project-license-action-v1",
         scores: {
           opportunity: 88,
           productization: 78,

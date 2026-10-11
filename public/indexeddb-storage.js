@@ -1331,11 +1331,15 @@
         };
         const history = new Map();
         for (const entry of [...(previous.snapshots || []), ...(project.snapshots || [])]) history.set(stableJson(entry), entry);
+        const observations = [...history.values()].sort((a, b) => String(a.at || "").localeCompare(String(b.at || "")));
+        const version = String(project.scoringVersion || "unknown");
+        const currentObservations = new Set(observations.filter(entry => String(entry.scoringVersion || "unknown") === version).slice(-180));
+        const retainedObservations = observations.filter(entry => String(entry.scoringVersion || "unknown") !== version || currentObservations.has(entry));
         const updated = {
           ...previous,
           ...project,
           firstSeenAt: previous.firstSeenAt || project.firstSeenAt,
-          ...(history.size ? { snapshots: [...history.values()].sort((a, b) => String(a.at || "").localeCompare(String(b.at || ""))).slice(-180) } : {}),
+          ...(history.size ? { snapshots: retainedObservations } : {}),
           observationPlanMatches: nextMatches
         };
         store.put(projectRecord(key, updated));

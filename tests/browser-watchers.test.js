@@ -21,9 +21,10 @@ test("T-21 browser scan, views, bilingual exports and archive reads distinguish 
     else {assert.equal(url.pathname,"/search/repositories","no per-repository subscriber requests");payload={total_count:repositories.length,incomplete_results:false,items:repositories};}
     return {ok:true,status:200,headers:{get:()=>null},json:async()=>payload,text:async()=>JSON.stringify(payload)};
   },setTimeout,clearTimeout,AbortController,TextDecoder,Date,JSON,Map,Set,Promise,Error,Object,Array,String,Number,Boolean,URL,URLSearchParams,Math};
-  for(const file of ["domain-core.js","indexeddb-storage.js","local-api.js"]) {
+  for(const file of ["domain-core.js","scoring-core.js","indexeddb-storage.js","local-api.js"]) {
     vm.runInNewContext(fs.readFileSync(path.join(__dirname,"../public",file),"utf8"),context);
     if(file==="domain-core.js")window.StarVaultDomainCore=context.globalThis.StarVaultDomainCore;
+    if(file==="scoring-core.js")window.StarVaultScoringCore=context.globalThis.StarVaultScoringCore;
   }
   const api=window.StarVaultLocalApi,storage=window.StarVaultIndexedDB,plan="watch-fixture";
   await api.handle("/api/settings",{method:"POST",body:JSON.stringify({githubToken:"fixture-watch-token"})});

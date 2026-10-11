@@ -48,6 +48,8 @@ function browserRuntime(fetchImpl, indexedDB = new IDBFactory()) {
   };
   vm.runInNewContext(source("domain-core.js"), context);
   window.StarVaultDomainCore = context.globalThis.StarVaultDomainCore;
+  vm.runInNewContext(source("scoring-core.js"), context);
+  window.StarVaultScoringCore = context.globalThis.StarVaultScoringCore;
   vm.runInNewContext(source("indexeddb-storage.js"), context);
   vm.runInNewContext(source("local-api.js"), context);
   return { indexedDB, api: window.StarVaultLocalApi, storage: window.StarVaultIndexedDB };

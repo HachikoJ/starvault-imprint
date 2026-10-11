@@ -6,6 +6,7 @@
 
   const runtimeScripts = [
     ["domain", "core"],
+    ["scoring", "core"],
     ["indexeddb", "storage"],
     ["local", "api"],
     ["app"]
