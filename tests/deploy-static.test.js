@@ -129,6 +129,14 @@ function deploy(f, fault='', rollbackFault='') {
   return {...result,calls};
 }
 function cleanupCalls(calls) {return calls.filter(call=>call.command==='rm' && call.args.includes('-rf') && call.args.some(value=>value.includes('/remote/releases/')));}
+test('T-16 completion message survives the deployment UTF-8 locale', () => {
+  const completion = fs.readFileSync(path.join(projectRoot, 'deploy/deploy-static.sh'), 'utf8').trim().split('\n').at(-1);
+  for (const locale of ['C', 'C.UTF-8']) {
+    const result = spawnSync('/bin/bash', ['-uc', `DOMAIN=deploy-fixture.invalid; STATE_DIR=/fixture/restore; ${completion}`], { env: { PATH: process.env.PATH, LANG: locale, LC_ALL: locale }, encoding: 'utf8' });
+    assert.equal(result.status, 0, result.stderr);
+    assert.match(result.stdout, /部署完成：https:\/\/deploy-fixture.invalid\/（恢复资料：\/fixture\/restore）/);
+  }
+});
 function assertRestored(f,result,{priorWeb=true,priorConfig=true,relativeWeb=false}={}) {
   assert.notEqual(result.status,0,result.stdout+result.stderr);
   assert.match(result.stderr,/已恢复发布前/);

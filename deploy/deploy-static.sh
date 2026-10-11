@@ -231,4 +231,4 @@ ssh "${SSH_OPTS[@]}" "$HOST" "set -Eeuo pipefail
     fi
   done <<< \"\$releases\"
 "
-echo "部署完成：https://$DOMAIN/（恢复资料：$STATE_DIR）"
+echo "部署完成：https://$DOMAIN/（恢复资料：${STATE_DIR}）"
